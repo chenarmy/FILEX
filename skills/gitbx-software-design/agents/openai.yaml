@@ -1,0 +1,5 @@
+interface:
+  display_name: "GITBX Software Design"
+  short_description: "Design new desktop software with the GITBX baseline"
+  default_prompt: "Use $gitbx-software-design to design a new product that keeps GITBX non-functional qualities while replacing its business domain."
+

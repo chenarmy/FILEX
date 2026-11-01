@@ -1,0 +1,13 @@
+[package]
+name = "filex-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+filex-contracts = { path = "../filex-contracts" }
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
