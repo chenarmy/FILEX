@@ -14,6 +14,11 @@ export function setLocale(next: LocaleCode): void {
   document.documentElement.dir = 'ltr';
 }
 
-export function t(key: MessageKey): string {
-  return dictionaries[locale.value][key] ?? enUS[key] ?? key;
+export function t(key: MessageKey, parameters?: Record<string, string | number>): string {
+  const message: string = dictionaries[locale.value][key] ?? enUS[key] ?? key;
+  if (!parameters) return message;
+  return message.replace(/\{([a-zA-Z0-9_]+)\}/g, (placeholder, name: string) => {
+    const value = parameters[name];
+    return value === undefined ? placeholder : String(value);
+  });
 }

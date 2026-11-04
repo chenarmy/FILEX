@@ -4,11 +4,16 @@ import { CircleDot, Database, ShieldCheck } from 'lucide-vue-next';
 import { isTauriRuntime } from '@/api/common';
 import { t } from '@/i18n';
 import { useConnectionsStore } from '@/stores/connections';
+import { useSessionsStore } from '@/stores/sessions';
 
 const connections = useConnectionsStore();
-const endpoint = computed(() => connections.activeProfile
-  ? `${connections.activeProfile.username}@${connections.activeProfile.host}:${connections.activeProfile.port}`
-  : '—');
+const sessions = useSessionsStore();
+const endpoint = computed(() => {
+  const session = sessions.activeSession;
+  const profile = sessions.profileForSession(session) ?? connections.activeProfile;
+  if (profile) return `${profile.username}@${profile.host}:${profile.port}`;
+  return session ? `${session.username}@${session.host}:${session.port}` : '—';
+});
 </script>
 
 <template>

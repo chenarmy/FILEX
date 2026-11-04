@@ -169,6 +169,8 @@ Evaluate WebView and native renderer options with real throughput, CJK IME, acce
 
 Separate directory browsing from transfer execution. A listing channel should not be blocked by a long file transfer.
 
+The runtime session-map lock protects lookup and insertion only. Clone the session or terminal handle while holding it, then release it before awaiting SSH or SFTP I/O. Serialize operations on one terminal through its per-session channel lock so unrelated sessions remain available.
+
 - `FileBrowserService` handles list/stat/canonicalize and capability flags.
 - `TransferPlanner` expands directories, validates targets, computes conflict plans and records a durable manifest.
 - `TransferExecutor` uses bounded workers and per-host concurrency limits.
@@ -339,7 +341,7 @@ SFTP, monitoring and tunnels follow only after the session foundation proves can
 
 ## 20. AI assistant architecture
 
-The assistant is a consumer of FILEX capabilities, not a privileged alternate control plane. It uses the same application use cases, policy checks, cancellation, structured errors and audit events as human-triggered actions. It never calls SSH transports, Tauri commands, credential stores or raw filesystems directly.
+The assistant is a consumer of FILEX capabilities, not a privileged alternate control plane. It uses the same application use cases, policy checks, cancellation, structured errors and audit events as human-triggered actions. Model output cannot call SSH transports, credential stores or raw filesystems. Frontend code uses typed Tauri APIs; a narrow Rust command handles only the native picker and bounded read after explicit local-file selection.
 
 ### 20.1 Boundaries
 
@@ -354,6 +356,7 @@ Assistant UI
 ```
 
 - `ContextAssembler` accepts explicit context references and produces a bounded, typed snapshot. It does not scrape global stores or whole terminal histories.
+- A local-file context reference is created only after the native picker returns a user-selected path. Rust validates and reads bounded text into a short-lived `Zeroizing<String>` and returns only an in-memory ID plus display metadata to Vue. Provider serialization includes redacted file text but excludes the filename, path and reference; these values are not persisted in the transcript, event log or diagnostics.
 - `Redactor` removes credentials, tokens, private-key material, credential-bearing URLs, hidden input and user-configured sensitive patterns before provider serialization.
 - `ProviderAdapter` owns streaming, timeouts, cancellation, retry policy and provider-specific request/response mapping. Provider API keys are obtained as short-lived credential leases in the Rust adapter and are never returned to Vue.
 - `ToolRegistry` exposes stable schemas for registered FILEX use cases. Tools are classified as `observe`, `draft`, `mutate` or `destructive`.
@@ -362,6 +365,8 @@ Assistant UI
 ### 20.2 Execution contract
 
 Model output is untrusted data. Free-form text cannot invoke capabilities. A tool proposal must deserialize into a known versioned contract and remains inert until FILEX validates it.
+
+The initial `command.draft` v1 preview is built locally from supported shell code fences in a completed Draft response. FILEX supplies the version, kind and fixed `draft` risk; the model cannot assign authority. The renderer caps proposals at five blocks and 10,000 UTF-8 command bytes, rejects hidden control and bidirectional-format characters, and has no terminal-send or execution action. An active session target snapshot is kept in memory only when the user explicitly attaches that session, and the preview becomes stale when its target or connection state changes. Target metadata is omitted from provider requests and transcript storage; restored command drafts have no target binding.
 
 - Observe tools are read-only and return bounded sanitized data.
 - Draft tools create text or plans without remote mutation.
@@ -374,9 +379,11 @@ Model output is untrusted data. Free-form text cannot invoke capabilities. A too
 
 SQLite may store assistant session titles, provider/model references, redacted messages, context reference metadata, proposals and sanitized outcomes. It does not store provider credentials, recovered secrets, private-key content or hidden terminal input.
 
+Selected local-file text is held only in process memory, limited to 12 KiB per file, at most four temporary references, and a 15-minute lifetime. The retained file buffer is zeroized when released or expired and is never included in assistant history or database backups.
+
 External-provider requests are opt-in and identify the categories leaving the device. Local-model adapters follow the same contracts and policy even when data does not leave the machine. Prompt/response retention is disabled by default and is independent from the operational event timeline.
 
-Remote file content, command output, server banners and copied text are marked as untrusted context so prompt-injection text cannot alter tool policy, confirmation requirements or system instructions.
+Remote file content, selected local file text, command output, server banners and copied text are marked as untrusted context so prompt-injection text cannot alter tool policy, confirmation requirements or system instructions.
 
 ### 20.4 Tests
 

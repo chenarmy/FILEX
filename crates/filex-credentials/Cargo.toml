@@ -1,0 +1,13 @@
+[package]
+name = "filex-credentials"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+filex-contracts = { path = "../filex-contracts" }
+keyring = { version = "4.2", default-features = true }
+thiserror.workspace = true
+uuid.workspace = true
+zeroize = { version = "1", features = ["alloc"] }

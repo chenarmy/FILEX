@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "crates/filex-contracts",
     "crates/filex-core",
+    "crates/filex-credentials",
+    "crates/filex-ssh",
+    "crates/filex-storage",
     "src-tauri",
 ]
 

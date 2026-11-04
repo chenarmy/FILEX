@@ -19,6 +19,15 @@ export function validateConnectionProfile(input: CreateConnectionProfileInput): 
     return validationError('profile.usernameRequired', 'username');
   }
 
+  if (input.proxyJumpProfileIds.length > 4) {
+    return validationError('profile.proxyJumpTooManyHops', 'proxyJumpProfileIds');
+  }
+
+  if (input.proxyJumpProfileIds.some((id) => !id.trim() || id.trim() !== id)
+    || new Set(input.proxyJumpProfileIds).size !== input.proxyJumpProfileIds.length) {
+    return validationError('profile.proxyJumpRouteInvalid', 'proxyJumpProfileIds');
+  }
+
   return null;
 }
 

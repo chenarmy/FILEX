@@ -125,6 +125,8 @@ Actions:
 
 Do not provide “accept all hosts” or a preselected trust action.
 
+The Settings/Security trust ledger shows current and historical fingerprints with provenance and timestamps. OpenSSH `known_hosts` import uses the native file picker and previews exact hosts, candidate fingerprints, current fingerprints and counted skip reasons. Entries that change current trust are highlighted and listed in the confirmation; the old fingerprint remains in history. Hashed names, wildcard/negated patterns, marked entries, malformed keys and conflicting keys are not broadened or silently imported.
+
 ### 4.5 Terminal workspace
 
 - Tab label: environment indicator, connection name, optional active command marker, state icon and close button.
@@ -133,8 +135,9 @@ Do not provide “accept all hosts” or a preselected trust action.
 - Search and command history are overlays that do not steal the entire workspace.
 - Paste containing multiple lines or shell metacharacters can show a configurable safety preview.
 - Password prompts and alternate screen applications must remain compatible with standard terminal behavior.
+- Terminal logging is off by default. After the user enables logging capability in Settings → Terminal, the active session toolbar exposes a log action; starting requires a host-specific confirmation that raw output may contain sensitive data. An active log shows a compact written-size indicator, and limit, overflow or write failure changes to an explicit warning state.
 
-The toolbar prioritizes reconnect/disconnect, new split, Files, Monitor and Tunnel. Rare actions belong in More.
+The toolbar prioritizes reconnect/disconnect, new split, Files, Monitor and Tunnel. Session logging sits with the secondary session utilities and exposes its state inline; other rare actions belong in More.
 
 ### 4.6 Files inspector
 
@@ -163,8 +166,12 @@ Use compact sections rather than a card dashboard:
 - Disk table.
 - Network rate and interface selector.
 - Collector status and last sample time.
+- A Metrics/Processes sub-view. The process list is manually refreshed and capped at 100 rows; it shows a sanitized process name, PID, CPU information, resident memory and state without command arguments, environment variables or working directories.
+- A termination control appears only when the process identity is available and the snapshot is fresh. Confirmation names the host, PID, process and exact action; POSIX sends SIGTERM and Windows uses Stop-Process without Force. The UI reports that the request was sent and does not claim the process has exited.
 
 Each metric may be live, stale, unsupported or permission denied. Missing data renders as “Unavailable,” never `0`.
+
+The user selects a 15-, 30- or 60-second base interval in Settings. Polling runs only while Monitor is open for a connected session and the application window is visible and focused. Repeated collection failures extend the retry interval up to five minutes and show the current delay; unsupported and permission-denied collectors stop automatic polling while keeping manual refresh available.
 
 ### 4.8 Tunnel manager
 
@@ -190,9 +197,15 @@ The assistant uses a collapsible right-side panel that can coexist with the term
 - **Draft:** produces commands, snippets or change plans but cannot execute them.
 - **Act:** exposes only registered typed tools whose underlying capability and policy permit execution.
 
-The composer always shows attached context as removable chips. External-provider requests display a compact disclosure of what will leave the device. The panel never silently attaches the full terminal buffer, all profiles, credential metadata or unrelated files.
+The composer shows attached context as removable chips. The user may select one local text/configuration file through the native picker; selection is capped at 12 KiB and rechecked by the Rust boundary for an allowed extension, regular-file type, UTF-8 and control characters. The panel displays its base filename, type and size, explains that redaction is best-effort, and includes its category and approximate size in the provider disclosure. The file text is sent only with an explicit request, without the filename or path, and is not stored in chat history. Provider setup explains that the endpoint operator controls retention and training practices, which FILEX cannot verify. External-provider consent defaults off, is stored with provider configuration, can be revoked, and resets when the endpoint is changed. The assistant boundary rejects sends without consent, and each request displays a compact disclosure of what will leave the device. The panel never silently attaches the full terminal buffer, all profiles, credential metadata or unrelated files.
 
 Every proposed action renders a structured preview with target host, environment, command/tool name, parameters, risk and expected mutation. Read-only tools may use a compact confirmation policy; mutating and destructive tools require explicit confirmation. Model text cannot dismiss or modify that confirmation.
+
+The current command-draft card is a local `command.draft` v1 preview parsed from supported shell fences in completed Draft replies. It shows shell, command, fixed draft risk and the explicitly attached session target, or explains that no target is bound. It also states that FILEX did not execute the command. Changing the selected session, generation, host, port or connection state marks a bound draft stale. Restored transcript drafts have no target binding, and the card offers no execution action.
+
+Multi-step plans use a separate `change-plan.draft` v1 preview parsed from the `filex-change-plan-v1` JSON fence. It shows the title and summary, ordered steps, commands, expected effects and rollback notes with the same fixed draft risk and optional target state. It has no approval, send-to-terminal or execute action. Invalid, oversized or mixed-format plan payloads remain plain assistant text and receive a localized notice; restored plans have no target binding.
+
+After a valid preview is created, FILEX omits its structured fence from the duplicate transcript body and keeps any surrounding explanation visible; the preview card remains the readable representation of the parsed proposal.
 
 Required states:
 
@@ -294,8 +307,12 @@ Initial shortcuts, editable in Settings:
 | Focus connections | Ctrl/Cmd + 1 |
 | Focus terminal | Ctrl/Cmd + 2 |
 | Focus inspector | Ctrl/Cmd + 3 |
+| Open settings | Ctrl/Cmd + , |
+| Show events | Ctrl/Cmd + Shift + E |
 
 Terminal-reserved shortcuts and platform conventions take precedence. Shortcut conflicts are detected, displayed and remappable.
+
+Settings has a dedicated shortcut page with key recording, conflict and reserved-key feedback, and per-page reset. The command palette is searchable, keyboard navigable, focus-trapped and available from the context bar; it exposes the same session, workspace, pane, settings and console actions as the keyboard model.
 
 Drag/drop is never the only path to move or transfer files. Context menus are never the only path to an action.
 
@@ -309,6 +326,7 @@ Drag/drop is never the only path to move or transfer files. Context menus are ne
 | Files | loading, empty, populated, permission denied, SFTP unavailable, not found, disconnected, partial listing |
 | Transfer | scanning, queued, transferring, paused, conflict, verifying, completed, partial, interrupted, failed |
 | Monitor | probing, live, stale, unsupported, permission denied, paused, failed |
+| Process action | fresh snapshot, expired snapshot, identity changed, awaiting confirmation, request sent, permission denied, failed |
 | Tunnel | stopped, starting, listening, degraded, blocked, stopping, failed |
 | Forms | pristine, dirty, validating, invalid, saving, saved, failed |
 | AI assistant | unconfigured, idle, streaming, cancelled, failed, proposal, awaiting confirmation, executing, policy denied, stale context |

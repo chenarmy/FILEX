@@ -269,7 +269,7 @@ Alternative states: `paused`, `cancel_requested`, `cancelled`, `partial`, `inter
 
 - Use the platform credential store for passwords and passphrases. Store only opaque references in the profile database.
 - Private key contents are never copied into ordinary app configuration. Import means register a path unless the user explicitly requests a managed secure copy.
-- Support known-hosts import, but maintain a FILEX trust ledger with clear provenance and change history.
+- Support OpenSSH `known_hosts` import through a preview and explicit confirmation; skip ambiguous hashed/pattern entries and retain previous fingerprints in the FILEX trust ledger.
 - Never offer “always accept any host key.”
 - Proxy/jump credentials are isolated per hop and never displayed in the destination profile summary.
 - Redact usernames when requested and redact passwords, tokens, passphrases, credential-bearing URLs, and private key content unconditionally.

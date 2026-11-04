@@ -1,6 +1,6 @@
 # FILEX repository instructions
 
-FILEX is currently in a design-first phase for a secure cross-platform remote operations workbench.
+FILEX is in phased implementation and acceptance for a secure cross-platform remote operations workbench.
 
 ## Required design skill
 

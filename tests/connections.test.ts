@@ -10,6 +10,10 @@ const validInput: CreateConnectionProfileInput = {
   username: 'deploy',
   environment: 'production',
   tags: ['api'],
+  authenticationMethod: 'password',
+  identityFile: null,
+  proxyJump: null,
+  proxyJumpProfileIds: [],
 };
 
 const profile: ConnectionProfile = {

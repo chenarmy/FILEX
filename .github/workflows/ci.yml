@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      build_installers:
+        description: Build cross-platform installer drafts
+        type: boolean
+        required: true
+        default: false
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test -- --run
+      - run: cargo fmt --all --check
+      - run: cargo check --workspace
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: pnpm build
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report
+
+  installers:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_installers == true
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        platform: [macos-latest, ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+        if: matrix.platform == 'ubuntu-22.04'
+      - run: pnpm install --frozen-lockfile
+      - name: Validate signed updater release configuration
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          FILEX_UPDATER_PUBLIC_KEY: ${{ vars.FILEX_UPDATER_PUBLIC_KEY }}
+          FILEX_UPDATER_STABLE_ENDPOINT: ${{ vars.FILEX_UPDATER_STABLE_ENDPOINT }}
+          FILEX_UPDATER_BETA_ENDPOINT: ${{ vars.FILEX_UPDATER_BETA_ENDPOINT }}
+        run: |
+          test -n "$TAURI_SIGNING_PRIVATE_KEY" || { echo "TAURI_SIGNING_PRIVATE_KEY is required" >&2; exit 1; }
+          test -n "$FILEX_UPDATER_PUBLIC_KEY" || { echo "FILEX_UPDATER_PUBLIC_KEY is required" >&2; exit 1; }
+          node <<'NODE'
+          const endpointNames = [
+            "FILEX_UPDATER_STABLE_ENDPOINT",
+            "FILEX_UPDATER_BETA_ENDPOINT",
+          ];
+          for (const [index, name] of endpointNames.entries()) {
+            const value = process.env[name] ?? "";
+            if (!value && index === 0) throw new Error(name + " is required");
+            if (!value) continue;
+
+            let endpoint;
+            try {
+              endpoint = new URL(value);
+            } catch {
+              throw new Error(name + " must be a valid HTTPS URL");
+            }
+
+            const authority = value.match(/^https:\/\/([^/?#]*)/i)?.[1] ?? "";
+            if (
+              endpoint.protocol !== "https:" ||
+              !endpoint.hostname ||
+              authority.includes("@") ||
+              value.includes("?") ||
+              value.includes("#")
+            ) {
+              throw new Error(
+                name + " must use HTTPS without credentials, query, or fragment",
+              );
+            }
+          }
+          NODE
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          FILEX_UPDATER_PUBLIC_KEY: ${{ vars.FILEX_UPDATER_PUBLIC_KEY }}
+          FILEX_UPDATER_STABLE_ENDPOINT: ${{ vars.FILEX_UPDATER_STABLE_ENDPOINT }}
+          FILEX_UPDATER_BETA_ENDPOINT: ${{ vars.FILEX_UPDATER_BETA_ENDPOINT }}
+        with:
+          tagName: v__VERSION__
+          releaseName: FILEX v__VERSION__
+          releaseDraft: true
+          prerelease: false
+          args: --config src-tauri/tauri.release.conf.json
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
+          updaterJsonPreferNsis: true
