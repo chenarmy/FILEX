@@ -85,6 +85,30 @@ test('defaults to password authentication and shows all three authentication opt
 });
 
 test('blocks ProxyJump profiles before opening an SSH trust or password dialog', async ({ page }) => {
+  // The app ships no seed profiles; each test installs its own fixture.
+  await page.evaluate(() => {
+    const fixture = [{
+      id: 'dev-sandbox',
+      name: 'dev-sandbox',
+      group: '开发环境',
+      host: '192.168.56.21',
+      port: 22,
+      username: 'developer',
+      environment: 'development',
+      favorite: false,
+      tags: ['sandbox'],
+      authenticationMethod: 'password',
+      identityFile: null,
+      proxyJump: null,
+      proxyJumpProfileIds: [],
+      credentialRef: null,
+      state: 'idle',
+      latencyMs: null,
+      lastUsedAt: null,
+    }];
+    localStorage.setItem('filex.connection-profiles.v1', JSON.stringify(fixture));
+  });
+  await page.reload();
   await page.evaluate(() => {
     const storageKey = 'filex.connection-profiles.v1';
     const profiles = JSON.parse(localStorage.getItem(storageKey) ?? '[]') as Array<{
@@ -106,6 +130,30 @@ test('blocks ProxyJump profiles before opening an SSH trust or password dialog',
 });
 
 test('allows SSH Agent profiles through preflight and reaches the desktop runtime boundary', async ({ page }) => {
+  await page.evaluate(() => {
+    const fixture = [{
+      id: 'worker-canary',
+      name: 'worker-canary',
+      group: '生产环境',
+      host: '10.24.1.33',
+      port: 22,
+      username: 'ops',
+      environment: 'production',
+      favorite: false,
+      tags: ['worker', 'canary'],
+      authenticationMethod: 'agent',
+      identityFile: null,
+      proxyJump: null,
+      proxyJumpProfileIds: [],
+      credentialRef: null,
+      state: 'idle',
+      latencyMs: null,
+      lastUsedAt: null,
+    }];
+    localStorage.setItem('filex.connection-profiles.v1', JSON.stringify(fixture));
+  });
+  await page.reload();
+
   await page.locator('.connection-row', { hasText: 'worker-canary' }).click();
   await page.getByRole('button', { name: '重新连接' }).click();
 

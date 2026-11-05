@@ -10,85 +10,6 @@ import type {
 
 const storageKey = 'filex.connection-profiles.v1';
 
-const seedProfiles: ConnectionProfile[] = [
-  {
-    id: 'prod-api-01',
-    name: 'prod-api-01',
-    group: '生产环境',
-    host: '10.24.0.18',
-    port: 22,
-    username: 'deploy',
-    environment: 'production',
-    favorite: true,
-    tags: ['api', 'primary'],
-    authenticationMethod: 'password',
-    identityFile: null,
-    proxyJump: null,
-    proxyJumpProfileIds: [],
-    credentialRef: null,
-    state: 'connected',
-    latencyMs: 38,
-    lastUsedAt: '2026-11-01T08:45:00+08:00',
-  },
-  {
-    id: 'worker-canary',
-    name: 'worker-canary',
-    group: '生产环境',
-    host: '10.24.1.33',
-    port: 22,
-    username: 'ops',
-    environment: 'production',
-    favorite: false,
-    tags: ['worker', 'canary'],
-    authenticationMethod: 'agent',
-    identityFile: null,
-    proxyJump: null,
-    proxyJumpProfileIds: [],
-    credentialRef: null,
-    state: 'idle',
-    latencyMs: null,
-    lastUsedAt: '2026-10-31T17:20:00+08:00',
-  },
-  {
-    id: 'staging-web',
-    name: 'staging-web',
-    group: '预发布环境',
-    host: '172.18.3.12',
-    port: 22,
-    username: 'ubuntu',
-    environment: 'staging',
-    favorite: true,
-    tags: ['web'],
-    authenticationMethod: 'private_key',
-    identityFile: '~/.ssh/id_ed25519',
-    proxyJump: null,
-    proxyJumpProfileIds: [],
-    credentialRef: null,
-    state: 'degraded',
-    latencyMs: 86,
-    lastUsedAt: '2026-10-30T10:08:00+08:00',
-  },
-  {
-    id: 'dev-sandbox',
-    name: 'dev-sandbox',
-    group: '开发环境',
-    host: '192.168.56.21',
-    port: 22,
-    username: 'developer',
-    environment: 'development',
-    favorite: false,
-    tags: ['sandbox'],
-    authenticationMethod: 'password',
-    identityFile: null,
-    proxyJump: null,
-    proxyJumpProfileIds: [],
-    credentialRef: null,
-    state: 'idle',
-    latencyMs: null,
-    lastUsedAt: null,
-  },
-];
-
 export function listBrowserProfiles(): Promise<OperationResult<ConnectionProfile[]>> {
   const requestId = createRequestId();
   try {
@@ -247,10 +168,7 @@ function jumpRouteError(code: string, messageKey: string): AppError {
 
 function readProfiles(): ConnectionProfile[] {
   const raw = localStorage.getItem(storageKey);
-  if (!raw) {
-    localStorage.setItem(storageKey, JSON.stringify(seedProfiles));
-    return structuredClone(seedProfiles);
-  }
+  if (!raw) return [];
   const profiles = JSON.parse(raw) as Partial<ConnectionProfile>[];
   return profiles.map((profile) => ({
     ...profile,

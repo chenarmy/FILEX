@@ -1,5 +1,11 @@
 # FILEX verification evidence
 
+## 2026-11-05 — Browser preview seed profiles removed
+
+The browser (non-Tauri) runtime no longer injects four demo connection profiles into `filex.connection-profiles.v1` on first load; an empty storage now renders an empty list with the standard empty state. The two Playwright scenarios that relied on the seeds (`dev-sandbox` ProxyJump preflight, `worker-canary` Agent desktop boundary) now install their own localStorage fixtures, so the suite stays self-contained.
+
+Checks: `pnpm typecheck`, `pnpm lint`, `pnpm test` (14), `pnpm test:e2e` (5/5) — all green. Verified in the browser that after clearing stored profiles the list is empty with zero page errors.
+
 ## 2026-11-05 — Browser functional test pass (non-SSH features)
 
 Scope: manual browser test of every non-SSH feature surface in dev mode (SSH connect/PTY/SFTP/monitoring/tunnel against a live host remain desktop/host-gated): connection profile CRUD + favorites/filter/grouping/navigation modes, all keyboard shortcuts, command palette, focus mode, panel resizing and persistence, bottom file browser (files/commands/editor sub-tabs, dual pane, follow-terminal help, transfer footer), Monaco editor panel, command input bar empty state, task drawer tabs, session details inspector, AI assistant panel, and the full settings dialog (7 sections, theme and locale switching with persistence, shortcuts page).
