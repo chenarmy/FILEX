@@ -1,5 +1,20 @@
 # FILEX verification evidence
 
+## 2026-11-05 — Browser functional test pass (non-SSH features)
+
+Scope: manual browser test of every non-SSH feature surface in dev mode (SSH connect/PTY/SFTP/monitoring/tunnel against a live host remain desktop/host-gated): connection profile CRUD + favorites/filter/grouping/navigation modes, all keyboard shortcuts, command palette, focus mode, panel resizing and persistence, bottom file browser (files/commands/editor sub-tabs, dual pane, follow-terminal help, transfer footer), Monaco editor panel, command input bar empty state, task drawer tabs, session details inspector, AI assistant panel, and the full settings dialog (7 sections, theme and locale switching with persistence, shortcuts page).
+
+Result: all scenarios pass with zero page errors in a clean session. Four defects found and fixed in the same pass:
+
+1. **Monaco editor DOM detached in the empty state** — monaco 0.5x removes the entire editor DOM on `setModel(null)`, so the panel rendered a blank host until a file opened. `EditorPanel` now keeps a shared blank model attached instead of null.
+2. **Settings → Connections section hardcoded English** ("Connection timeout", "Keepalive interval", "Automatic reconnect", option labels) — now routed through the translation layer (`settings.connectionTimeout`, `settings.keepaliveInterval`, `settings.automaticReconnect(HELP)`, `settings.secondsValue`, `settings.attemptsValue`; `settings.off` already existed).
+3. **Task drawer close/resize labels hardcoded English** — now `tasks.closeDrawer` / `tasks.resizeDrawer`.
+4. **Shortcuts settings page omitted the focus-mode shortcut** — `toggleFocusMode` added to `shortcutActions` (16 rows render).
+
+Test-tooling notes (not app defects): Playwright `fill("")` on the connections search input did not register in the in-app browser (clearing via input event works and filters reset correctly); injected CUA input stopped reaching the page mid-session while `evaluate` kept working (HMR-period `dimensions` TypeErrors were also HMR-only — a clean reload reproduces none).
+
+Gates re-run after the fixes: `pnpm lint`, `pnpm typecheck`, `pnpm test` (14), `pnpm build`, `pnpm test:e2e` (5/5) — all green.
+
 ## 2026-11-05 — Phase 5.5 workspace experience alignment
 
 Scope: FileTerm-style shell restyle (top session tab bar, left host monitor panel, floating command input bar, bottom dual-pane file browser with transfer footer), plus the aligned feature additions — OSC 7 follow-terminal, chmod permission editing with uid/gid columns, multi-mount disk list with load 1/5/15, network rate history chart, virtualized file lists, Monaco editor panel, snippet folders, and focus mode.

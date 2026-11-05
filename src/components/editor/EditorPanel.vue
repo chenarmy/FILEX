@@ -17,6 +17,7 @@ const monacoFailed = ref(false);
 let monaco: typeof MonacoApi | null = null;
 let editorInstance: MonacoApi.editor.IStandaloneCodeEditor | null = null;
 let resizeObserver: ResizeObserver | null = null;
+let emptyModel: MonacoApi.editor.ITextModel | null = null;
 const models = new Map<string, MonacoApi.editor.ITextModel>();
 
 const appearance = computed(() => {
@@ -59,9 +60,12 @@ function modelFor(tab: { id: string; path: string; content: string }): MonacoApi
 
 function bindActiveTab(): void {
   const tab = editor.activeTab;
-  if (!editorInstance) return;
+  if (!editorInstance || !emptyModel) return;
+  // setModel(null) detaches the whole editor DOM in monaco 0.5x, so the empty
+  // state keeps a shared blank model attached instead.
   if (!tab) {
-    editorInstance.setModel(null);
+    editorInstance.setModel(emptyModel);
+    editorInstance.updateOptions({ readOnly: true });
     return;
   }
   const model = modelFor(tab);
@@ -108,6 +112,7 @@ onMounted(async () => {
     renderWhitespace: 'selection',
     tabSize: 2,
   });
+  emptyModel = monaco.editor.createModel('', 'plaintext');
   editorInstance.onDidChangeModelContent(handleEdit);
   editorInstance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => void saveActive());
   resizeObserver = new ResizeObserver(() => editorInstance?.layout());
@@ -140,6 +145,8 @@ watch(appearance, (value) => {
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   editorInstance?.dispose();
+  emptyModel?.dispose();
+  emptyModel = null;
   for (const model of models.values()) model.dispose();
   models.clear();
   editorInstance = null;

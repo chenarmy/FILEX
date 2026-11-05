@@ -140,6 +140,7 @@ const shortcutActions: { action: KeyboardShortcutAction; label: Parameters<typeo
   { action: 'previousSession', label: 'commands.previousSession' },
   { action: 'terminalSearch', label: 'commands.terminalSearch' },
   { action: 'toggleFiles', label: 'commands.showFiles' },
+  { action: 'toggleFocusMode', label: 'commands.toggleFocusMode' },
   { action: 'toggleTaskDrawer', label: 'commands.toggleTaskDrawer' },
   { action: 'commandPalette', label: 'commands.title' },
   { action: 'toggleAssistant', label: 'commands.toggleAssistant' },
@@ -571,10 +572,10 @@ onMounted(async () => {
 
           <section v-else-if="activeSection === 'connections'">
             <h2>{{ t('settings.connections') }}</h2>
-            <div class="setting-row"><div><strong>Connection timeout</strong></div><select v-model.number="draft.connectionTimeoutSeconds"><option :value="10">10 seconds</option><option :value="15">15 seconds</option><option :value="30">30 seconds</option><option :value="60">60 seconds</option></select></div>
-            <div class="setting-row"><div><strong>Keepalive interval</strong></div><select v-model.number="draft.keepaliveSeconds"><option :value="30">30 seconds</option><option :value="60">60 seconds</option><option :value="0">Off</option></select></div>
-            <div class="setting-row"><div><strong>Automatic reconnect</strong><small>Bounded retries with jitter</small></div><select v-model.number="draft.reconnectAttempts"><option :value="3">Up to 3 attempts</option><option :value="5">Up to 5 attempts</option><option :value="0">Off</option></select></div>
-            <div class="setting-row"><div><strong>{{ t('settings.monitorInterval') }}</strong><small>{{ t('settings.monitorIntervalHelp') }}</small></div><select v-model.number="draft.monitorIntervalSeconds"><option :value="15">15 s</option><option :value="30">30 s</option><option :value="60">60 s</option></select></div>
+            <div class="setting-row"><div><strong>{{ t('settings.connectionTimeout') }}</strong></div><select v-model.number="draft.connectionTimeoutSeconds"><option :value="10">{{ t('settings.secondsValue', { n: 10 }) }}</option><option :value="15">{{ t('settings.secondsValue', { n: 15 }) }}</option><option :value="30">{{ t('settings.secondsValue', { n: 30 }) }}</option><option :value="60">{{ t('settings.secondsValue', { n: 60 }) }}</option></select></div>
+            <div class="setting-row"><div><strong>{{ t('settings.keepaliveInterval') }}</strong></div><select v-model.number="draft.keepaliveSeconds"><option :value="30">{{ t('settings.secondsValue', { n: 30 }) }}</option><option :value="60">{{ t('settings.secondsValue', { n: 60 }) }}</option><option :value="0">{{ t('settings.off') }}</option></select></div>
+            <div class="setting-row"><div><strong>{{ t('settings.automaticReconnect') }}</strong><small>{{ t('settings.automaticReconnectHelp') }}</small></div><select v-model.number="draft.reconnectAttempts"><option :value="3">{{ t('settings.attemptsValue', { count: 3 }) }}</option><option :value="5">{{ t('settings.attemptsValue', { count: 5 }) }}</option><option :value="0">{{ t('settings.off') }}</option></select></div>
+            <div class="setting-row"><div><strong>{{ t('settings.monitorInterval') }}</strong><small>{{ t('settings.monitorIntervalHelp') }}</small></div><select v-model.number="draft.monitorIntervalSeconds"><option :value="15">{{ t('settings.secondsValue', { n: 15 }) }}</option><option :value="30">{{ t('settings.secondsValue', { n: 30 }) }}</option><option :value="60">{{ t('settings.secondsValue', { n: 60 }) }}</option></select></div>
           </section>
 
           <section v-else-if="activeSection === 'security'">

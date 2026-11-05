@@ -62,7 +62,7 @@ function transferStateText(state: TransferState): string {
 
 <template>
   <section class="task-drawer">
-    <button class="task-resizer" type="button" role="separator" aria-orientation="horizontal" aria-label="Resize task drawer" @pointerdown="beginResize" @keydown="resizeByKeyboard" />
+    <button class="task-resizer" type="button" role="separator" aria-orientation="horizontal" :aria-label="t('tasks.resizeDrawer')" @pointerdown="beginResize" @keydown="resizeByKeyboard" />
     <header class="task-header">
       <div class="task-tabs" role="tablist">
         <button
@@ -76,7 +76,7 @@ function transferStateText(state: TransferState): string {
           <component :is="tab.icon" :size="12" />{{ t(tab.label) }}
         </button>
       </div>
-      <button type="button" class="icon-button" aria-label="Close task drawer" @click="settings.value.taskDrawerOpen = false">
+      <button type="button" class="icon-button" :aria-label="t('tasks.closeDrawer')" @click="settings.value.taskDrawerOpen = false">
         <X :size="13" />
       </button>
     </header>
