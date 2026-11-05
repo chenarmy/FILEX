@@ -1,5 +1,24 @@
 # FILEX verification evidence
 
+## 2026-11-05 — Windows NSIS package (post Phase 5.5 alignment)
+
+Generated the unsigned Windows x64 NSIS installer with all Phase 5.5 work included (FileTerm-style shell, command input bar, follow-terminal, chmod, disk mounts, Monaco editor, focus mode, seed removal and layout fixes).
+
+| Check | Command | Observed result |
+| --- | --- | --- |
+| Front-end production build | `pnpm build` (via beforeBuildCommand) | Passed; Vue strict typecheck and Vite build, Monaco split into lazy chunks |
+| Release compile | `CARGO_NET_OFFLINE=true pnpm tauri build --bundles nsis` | Passed; release profile optimized build in 4m02s |
+| NSIS bundle | makensis | Passed |
+
+Artifact:
+
+- `target/release/bundle/nsis/FILEX_0.1.0_x64-setup.exe`
+- Size: 7,595,367 bytes (7.24 MiB)
+- SHA-256: `347362ee069fd9fd298e7f7b75f776eb4617d3ce5074d14db8ee03c569c330e5`
+- Authenticode: `NotSigned`
+
+Built fully offline (`CARGO_NET_OFFLINE=true`) because the local git proxy (`127.0.0.1:7897`) was down; all crates came from the local cargo cache. Updater signing variables remain unset, so the artifact is for local inspection only — the in-app updater will not install unsigned builds. Installer interaction, live SSH and cross-platform checks were not run.
+
 ## 2026-11-05 — Browser preview seed profiles removed
 
 The browser (non-Tauri) runtime no longer injects four demo connection profiles into `filex.connection-profiles.v1` on first load; an empty storage now renders an empty list with the standard empty state. The two Playwright scenarios that relied on the seeds (`dev-sandbox` ProxyJump preflight, `worker-canary` Agent desktop boundary) now install their own localStorage fixtures, so the suite stays self-contained.
