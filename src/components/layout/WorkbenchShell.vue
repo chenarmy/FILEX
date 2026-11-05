@@ -316,10 +316,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleShortcut, true
         <span class="brand-mark"><Terminal :size="15" /></span>
         <span>FILEX</span>
       </div>
-      <button type="button" class="workspace-picker">
-        <span class="environment-dot development" aria-hidden="true" />
-        <span>{{ t('app.workspace') }}</span>
-      </button>
       <label class="global-search">
         <Search :size="14" aria-hidden="true" />
         <span class="sr-only">{{ t('app.searchPlaceholder') }}</span>
