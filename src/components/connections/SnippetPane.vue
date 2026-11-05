@@ -156,15 +156,15 @@ async function sendToTerminal(): Promise<void> {
 </template>
 
 <style scoped>
-.snippet-pane { display: flex; flex-direction: column; min-height: 0; height: 100%; color: hsl(var(--foreground)); font-size: 12px; }
+.snippet-pane { display: flex; flex-direction: column; min-height: 0; height: 100%; color: hsl(var(--foreground)); font-size: 1rem; }
 .snippet-heading { display: flex; align-items: flex-start; justify-content: space-between; padding: 10px 10px 8px; border-bottom: 1px solid hsl(var(--border)); }
 .snippet-heading div { display: grid; gap: 4px; }
 .snippet-heading small, .snippet-preview small { color: hsl(var(--muted-foreground)); }
 .snippet-list { max-height: 180px; overflow: auto; border-bottom: 1px solid hsl(var(--border)); }
-.snippet-group h3 { margin: 8px 10px 2px; color: hsl(var(--muted-foreground)); font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+.snippet-group h3 { margin: 8px 10px 2px; color: hsl(var(--muted-foreground)); font-size: 0.8333rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
 .snippet-item { display: grid; gap: 4px; width: 100%; padding: 8px 10px; text-align: left; color: inherit; border: 0; border-bottom: 1px solid hsl(var(--border)); background: transparent; cursor: pointer; }
 .snippet-item:hover, .snippet-item.selected { background: hsl(var(--accent)); }
-.snippet-item code { overflow: hidden; color: hsl(var(--muted-foreground)); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.snippet-item code { overflow: hidden; color: hsl(var(--muted-foreground)); font-size: 0.8333rem; text-overflow: ellipsis; white-space: nowrap; }
 .snippet-empty { margin: 0; padding: 12px; color: hsl(var(--muted-foreground)); }
 .snippet-editor { display: grid; gap: 9px; padding: 10px; overflow: auto; }
 .snippet-editor > label, .snippet-parameters label { display: grid; gap: 5px; color: hsl(var(--muted-foreground)); }

@@ -7,7 +7,7 @@ export const defaultSafeSettings: SafeSettings = {
   theme: 'system',
   locale: 'zh-CN',
   uiFontFamily: 'Inter, system-ui, sans-serif',
-  uiFontSize: 12,
+  uiFontSize: 14,
   terminalFontFamily: 'JetBrains Mono, Consolas, monospace',
   terminalFontSize: 13,
   terminalTheme: 'match',

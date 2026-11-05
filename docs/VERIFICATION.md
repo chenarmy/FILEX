@@ -1,5 +1,11 @@
 # FILEX verification evidence
 
+## 2026-11-05 — UI font-size setting made effective, default raised to 14
+
+The Settings → Appearance "界面字号" slider previously had no visible effect: `settings.apply()` sets the root element font-size (rem base), but 167 declarations in `workbench.css` plus 16 in component scoped styles hardcoded `font-size: Npx`, so compact labels ignored the setting. All of them are now converted to rem (base 12, preserving the original pixel scale exactly at the old 12px default), so the slider scales the entire UI. The default `uiFontSize` is raised from 12 to 14 in both the Rust core defaults and the browser settings repository (range 11–20 unchanged).
+
+Checks: `cargo test -p filex-core` (6), `pnpm typecheck`, `pnpm lint`, `pnpm test` (14) — all green. Verified in the browser: at setting 14 the root font-size is 14px and labels render 1.1667× their 12px-base sizes; raising the setting to 16 scales every sampled label proportionally (e.g. 9.3px → 10.7px); layout at 14 shows no misalignment in the connection pane, terminal column, bottom file browser or status bar.
+
 ## 2026-11-05 — Windows NSIS package (post Phase 5.5 alignment)
 
 Generated the unsigned Windows x64 NSIS installer with all Phase 5.5 work included (FileTerm-style shell, command input bar, follow-terminal, chmod, disk mounts, Monaco editor, focus mode, seed removal and layout fixes).

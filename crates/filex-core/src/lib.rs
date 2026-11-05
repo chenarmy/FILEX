@@ -47,7 +47,7 @@ pub fn default_safe_settings() -> SafeSettings {
         theme: "system".to_owned(),
         locale: "zh-CN".to_owned(),
         ui_font_family: "Inter, system-ui, sans-serif".to_owned(),
-        ui_font_size: 12,
+        ui_font_size: 14,
         terminal_font_family: "JetBrains Mono, Consolas, monospace".to_owned(),
         terminal_font_size: 13,
         terminal_theme: "match".to_owned(),

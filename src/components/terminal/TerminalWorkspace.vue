@@ -471,7 +471,7 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
   gap: 5px;
   padding-inline: 7px 23px;
   color: hsl(var(--muted-foreground));
-  font-size: 9px;
+  font-size: 0.75rem;
 }
 
 .terminal-tab-item {
@@ -578,7 +578,7 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
   align-items: center;
   overflow: hidden;
   color: hsl(var(--warning));
-  font-size: 8px;
+  font-size: 0.6667rem;
   font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
   white-space: nowrap;

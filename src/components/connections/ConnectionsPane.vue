@@ -185,5 +185,5 @@ defineExpose({ focusFilter });
 .recent-row:disabled { opacity: .6; cursor: wait; }
 .recent-copy { display: grid; min-width: 0; gap: 2px; }
 .recent-copy strong, .recent-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.recent-copy small { color: hsl(var(--muted-foreground)); font-size: 9px; }
+.recent-copy small { color: hsl(var(--muted-foreground)); font-size: 0.75rem; }
 </style>

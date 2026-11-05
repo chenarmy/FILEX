@@ -528,7 +528,7 @@ defineExpose({ focusTerminal });
   padding-inline: 7px;
   color: hsl(var(--muted-foreground));
   background: hsl(var(--card));
-  font-size: 9px;
+  font-size: 0.75rem;
 }
 
 .terminal-pane-header {
@@ -547,7 +547,7 @@ defineExpose({ focusTerminal });
 .terminal-pane-heading strong {
   overflow: hidden;
   color: hsl(var(--foreground));
-  font-size: 10px;
+  font-size: 0.8333rem;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -575,7 +575,7 @@ defineExpose({ focusTerminal });
   border-radius: 3px;
   color: hsl(var(--foreground));
   background: hsl(var(--secondary));
-  font-size: 9px;
+  font-size: 0.75rem;
 }
 
 .pane-reconnect:disabled {
@@ -603,7 +603,7 @@ defineExpose({ focusTerminal });
   border-radius: 3px;
   color: hsl(var(--foreground));
   background: hsl(var(--background));
-  font-size: 10px;
+  font-size: 0.8333rem;
 }
 
 .terminal-search input:focus-visible {
@@ -613,7 +613,7 @@ defineExpose({ focusTerminal });
 .terminal-search-position {
   min-width: 54px;
   overflow: hidden;
-  font-size: 9px;
+  font-size: 0.75rem;
   text-align: end;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -639,6 +639,6 @@ defineExpose({ focusTerminal });
   justify-content: flex-start;
   gap: 12px;
   border-top: 1px solid hsl(var(--border));
-  font-size: 8px;
+  font-size: 0.6667rem;
 }
 </style>
