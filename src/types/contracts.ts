@@ -25,6 +25,7 @@ export type OperationResult<T> =
 export interface CommandSnippet {
   id: string;
   name: string;
+  folder?: string | null;
   command: string;
   createdAtMs: number;
   updatedAtMs: number;
@@ -33,6 +34,7 @@ export interface CommandSnippet {
 export interface SaveCommandSnippetInput {
   id?: string | null;
   name: string;
+  folder?: string | null;
   command: string;
 }
 
@@ -272,6 +274,8 @@ export interface RemoteFileEntry {
   size: number | null;
   modifiedAtMs: number | null;
   permissionsMode: number | null;
+  uid?: number | null;
+  gid?: number | null;
 }
 
 export interface LocalFileEntry {
@@ -306,7 +310,27 @@ export interface RemoteTextSaveResult {
   recoveryCopyPath: string | null;
 }
 
+export interface LocalTextPreview {
+  path: string;
+  content: string;
+  bytes: number;
+  truncated: boolean;
+  revision: string;
+}
+
+export interface LocalTextSaveResult {
+  path: string;
+  bytes: number;
+  revision: string;
+}
+
 export type MonitorState = 'live' | 'unsupported' | 'permission_denied' | 'failed';
+
+export interface DiskMount {
+  path: string;
+  totalKib: number;
+  availableKib: number;
+}
 
 export interface SystemMonitorSnapshot {
   state: MonitorState;
@@ -315,6 +339,8 @@ export interface SystemMonitorSnapshot {
   osName: string | null;
   uptimeSeconds: number | null;
   loadOne: number | null;
+  loadFive?: number | null;
+  loadFifteen?: number | null;
   cpuPercent: number | null;
   memoryTotalKib: number | null;
   memoryAvailableKib: number | null;
@@ -322,6 +348,7 @@ export interface SystemMonitorSnapshot {
   swapUsedKib: number | null;
   rootTotalKib: number | null;
   rootAvailableKib: number | null;
+  mounts?: DiskMount[];
   networkReceiveBytesPerSecond: number | null;
   networkTransmitBytesPerSecond: number | null;
 }
@@ -430,6 +457,7 @@ export interface KeyboardShortcuts {
   previousSession: string;
   terminalSearch: string;
   toggleFiles: string;
+  toggleFocusMode: string;
   toggleTaskDrawer: string;
   commandPalette: string;
   toggleAssistant: string;
@@ -463,6 +491,13 @@ export interface SafeSettings {
   connectionsPaneWidth: number;
   inspectorPaneWidth: number;
   taskDrawerHeight: number;
+  hostPanelOpen: boolean;
+  fileBrowserOpen: boolean;
+  followTerminalCwd: boolean;
+  focusMode: boolean;
+  detailsPaneOpen: boolean;
+  hostPanelWidth: number;
+  fileBrowserHeight: number;
   terminalLogging: boolean;
   backupSchedule: 'off' | 'daily' | 'weekly';
   updateChannel: 'stable' | 'beta';

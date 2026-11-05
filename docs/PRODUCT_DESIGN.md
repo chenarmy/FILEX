@@ -119,7 +119,7 @@ A timestamped, capability-tagged sample for load, CPU, memory, swap, disks, and 
 
 ### Command snippet
 
-A user-authored template with name, body, optional parameters, tags, shell hints, and risk classification. It is inserted or previewed by default; automatic execution is an explicit choice.
+A user-authored template with name, optional folder, body, optional parameters, tags, shell hints, and risk classification. It is inserted or previewed by default; automatic execution is an explicit choice.
 
 ### AI assistant session
 
@@ -173,6 +173,22 @@ A typed, inspectable proposal produced by the assistant. It contains the target 
 - Process list with read-only default and explicit signal actions.
 - Config backup/export with secrets excluded by default.
 
+### P1 — workspace experience alignment (added 2026-11-05)
+
+Aligned with the public feature set of open SSH workbenches (FileTerm as reference, implementation our own):
+
+- Floating command input bar bound to the active terminal session: Enter sends, Shift+Enter inserts a newline, with a bounded in-memory history that is never persisted, exported, or logged.
+- Optional terminal working-directory tracking through OSC 7 shell integration. When enabled, the remote file browser may follow the shell's current directory; reliability limits stay visible and the paths remain independently navigable.
+- Remote permission mode editing (chmod) with an explicit octal review before mutation; file rows display numeric uid/gid ownership when the server provides it.
+- Monitor samples extend to load averages 1/5/15 and a bounded multi-mount disk list; the host panel renders a bounded network rate history chart.
+- Virtualized scrolling for large directory listings so bounded listings stay interactive.
+- Monaco-based editor panel for bounded remote and local text files with syntax highlighting, find/replace and multiple open tabs; the lightweight preview dialog remains available.
+- Command snippet folders for grouping.
+- Focus mode that collapses all auxiliary panes for terminal-only work.
+- The primary shell layout becomes: top session tab bar, left host panel (connection info and monitoring), terminal, command input bar, and a bottom local/remote dual-pane file browser with a transfer footer. The legacy right inspector remains available for session details.
+
+FTP/FTPS support stays deferred pending its own design approval; see "Later".
+
 ### Planned — AI assistant
 
 - Explain sanitized connection, authentication, transfer, monitoring and tunnel errors.
@@ -187,7 +203,7 @@ A typed, inspectable proposal produced by the assistant. It contains the target 
 ### Later, after separate design approval
 
 - RDP and other remote desktop protocols.
-- Serial, Telnet, FTP, Kubernetes, container, or database-specific consoles.
+- Serial, Telnet, FTP, Kubernetes, container, or database-specific consoles. FTP/FTPS is the next deferred candidate: it requires a separate protocol stack, an SSH-independent connection model, and a file-only workspace mode, so it enters only through its own design slice.
 - Multi-host command broadcasting and orchestration.
 - End-to-end encrypted cross-device sync.
 - Team workspaces, enterprise policies, audit export, or shared secrets.
@@ -274,6 +290,7 @@ Alternative states: `paused`, `cancel_requested`, `cancelled`, `partial`, `inter
 - Proxy/jump credentials are isolated per hop and never displayed in the destination profile summary.
 - Redact usernames when requested and redact passwords, tokens, passphrases, credential-bearing URLs, and private key content unconditionally.
 - Terminal logging is off by default, per-session opt-in, visible while active, and never includes hidden password input.
+- The floating command input bar keeps its history in memory only for the running application session; it is never persisted, exported, or written to logs or diagnostics.
 - Clipboard copy of secrets is avoided; reveal/copy actions are explicit and time-bounded when provided.
 - Remote delete, recursive permission changes, process signals, and command broadcast require target-rich confirmation.
 - Monitoring uses read-only commands by default and cannot silently escalate privileges.

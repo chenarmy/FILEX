@@ -186,7 +186,9 @@ async function submit(): Promise<void> {
                     :key="profile.id"
                     :value="profile.id"
                     :disabled="profile.id !== profileId && form.proxyJumpProfileIds.includes(profile.id)"
-                  >{{ profile.name }} — {{ profile.username }}@{{ profile.host }}:{{ profile.port }}</option>
+                  >
+                    {{ profile.name }} — {{ profile.username }}@{{ profile.host }}:{{ profile.port }}
+                  </option>
                 </select>
                 <button type="button" class="icon-button" :aria-label="t('profile.moveJumpHostUp')" :disabled="index === 0" @click="moveJumpProfile(index, -1)">
                   <ChevronUp :size="13" />

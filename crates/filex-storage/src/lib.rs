@@ -12,8 +12,8 @@ use filex_contracts::{
     TransferDirection, TransferState, TransferTask, TunnelKind, TunnelRule,
 };
 use filex_core::{
-    HostTrustImportExpectation, HostTrustRepository, ProfileRepository, SettingsRepository, TransferRepository,
-    TunnelRuleRepository,
+    HostTrustImportExpectation, HostTrustRepository, ProfileRepository, SettingsRepository,
+    TransferRepository, TunnelRuleRepository,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, types::Type};
 
@@ -316,7 +316,7 @@ impl SqliteProfileRepository {
         let database_path = self
             .database_path
             .as_deref()
-            .ok_or_else(|| backup_invalid_error())?;
+            .ok_or_else(backup_invalid_error)?;
         let source_path = source_path
             .canonicalize()
             .map_err(|_| backup_invalid_error())?;
@@ -550,7 +550,8 @@ impl ProfileRepository for SqliteProfileRepository {
                 .push(jump_profile_id);
         }
         for profile in &mut profiles {
-            profile.proxy_jump_profile_ids = jumps_by_profile.remove(&profile.id).unwrap_or_default();
+            profile.proxy_jump_profile_ids =
+                jumps_by_profile.remove(&profile.id).unwrap_or_default();
         }
         Ok(profiles)
     }
@@ -829,11 +830,7 @@ impl HostTrustRepository for SqliteProfileRepository {
         for expectation in expected {
             let current = statement
                 .query_row(
-                    params![
-                        expectation.host,
-                        expectation.port,
-                        expectation.algorithm,
-                    ],
+                    params![expectation.host, expectation.port, expectation.algorithm,],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()

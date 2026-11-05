@@ -11,7 +11,10 @@ use russh::{
     client::{self, ChannelOpenHandle, Config, Handler, Session},
     keys::{
         HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate,
-        agent::{AgentIdentity, client::{AgentClient, AgentStream}},
+        agent::{
+            AgentIdentity,
+            client::{AgentClient, AgentStream},
+        },
     },
 };
 use russh_sftp::{
@@ -98,8 +101,7 @@ pub enum SshError {
 struct HostKeyHandler {
     expected: Option<PresentedHostKey>,
     presented: Arc<Mutex<Option<PresentedHostKey>>>,
-    remote_forward_routes:
-        Arc<Mutex<std::collections::HashMap<(String, u32), mpsc::Sender<Channel<client::Msg>>>>>,
+    remote_forward_routes: RemoteForwardRoutes,
 }
 
 impl Handler for HostKeyHandler {
@@ -161,8 +163,7 @@ impl Handler for HostKeyHandler {
 
 pub struct ConnectedSshSession {
     handle: client::Handle<HostKeyHandler>,
-    remote_forward_routes:
-        Arc<Mutex<std::collections::HashMap<(String, u32), mpsc::Sender<Channel<client::Msg>>>>>,
+    remote_forward_routes: RemoteForwardRoutes,
     connect_timeout: Duration,
 }
 
@@ -436,7 +437,11 @@ impl ConnectedSshSession {
         self.reserve_remote_forward_route(requested_key.clone(), sender)?;
 
         match self.handle.tcpip_forward(address, u32::from(port)).await {
-            Ok(actual_port) if actual_port == u32::from(port) => {
+            // A zero port here means the server echoed no port back: per RFC 4254
+            // the REQUEST_SUCCESS body is empty when a specific port was
+            // requested, and russh maps that empty reply to 0. The requested
+            // port was accepted.
+            Ok(actual_port) if actual_port == u32::from(port) || actual_port == 0 => {
                 Ok((port, RemoteForwardReceiver { receiver }))
             }
             Ok(actual_port) => {
@@ -478,8 +483,7 @@ impl ConnectedSshSession {
     pub async fn cancel_remote_forward(&self, address: &str, port: u16) -> Result<(), SshError> {
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            self.handle
-                .cancel_tcpip_forward(address, u32::from(port)),
+            self.handle.cancel_tcpip_forward(address, u32::from(port)),
         )
         .await;
         if let Ok(mut routes) = self.remote_forward_routes.lock() {
@@ -568,10 +572,7 @@ impl RusshEngine {
         self.finish_host_key_probe(handle, presented).await
     }
 
-    pub async fn probe_host_key_stream<S>(
-        &self,
-        stream: S,
-    ) -> Result<PresentedHostKey, SshError>
+    pub async fn probe_host_key_stream<S>(&self, stream: S) -> Result<PresentedHostKey, SshError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -688,14 +689,14 @@ impl RusshEngine {
         let mut bounded_file = file.take((PRIVATE_KEY_MAX_BYTES + 1) as u64);
         let mut source = Zeroizing::new(Vec::with_capacity(64 * 1024));
         bounded_file
-            .read_to_end(&mut *source)
+            .read_to_end(&mut source)
             .await
             .map_err(|_| SshError::PrivateKeyFileUnavailable)?;
         if source.len() > PRIVATE_KEY_MAX_BYTES {
             return Err(SshError::PrivateKeyTooLarge);
         }
-        let source_text = std::str::from_utf8(source.as_slice())
-            .map_err(|_| SshError::PrivateKeyInvalid)?;
+        let source_text =
+            std::str::from_utf8(source.as_slice()).map_err(|_| SshError::PrivateKeyInvalid)?;
         let key = russh::keys::decode_secret_key(source_text, passphrase).map_err(|error| {
             if matches!(error, russh::keys::Error::KeyIsEncrypted) && passphrase.is_none() {
                 SshError::PrivateKeyPassphraseRequired
@@ -962,12 +963,7 @@ async fn authenticate_with_agent(
         let result = match identity {
             AgentIdentity::PublicKey { key, .. } => {
                 handle
-                    .authenticate_publickey_with(
-                        username.to_owned(),
-                        key,
-                        rsa_hash.clone(),
-                        &mut agent,
-                    )
+                    .authenticate_publickey_with(username.to_owned(), key, rsa_hash, &mut agent)
                     .await
             }
             AgentIdentity::Certificate { certificate, .. } => {
@@ -975,7 +971,7 @@ async fn authenticate_with_agent(
                     .authenticate_certificate_with(
                         username.to_owned(),
                         certificate,
-                        rsa_hash.clone(),
+                        rsa_hash,
                         &mut agent,
                     )
                     .await
@@ -1047,8 +1043,8 @@ mod tests {
     use tokio::io::AsyncReadExt;
 
     use super::{
-        PresentedHostKey, RusshEngine, SshError, TerminalOutputEvent,
-        remote_forward_cancel_error, remote_forward_request_error,
+        PresentedHostKey, RusshEngine, SshError, TerminalOutputEvent, remote_forward_cancel_error,
+        remote_forward_request_error,
     };
 
     type ForwardRoute = (String, u32, russh::server::Handle);
@@ -1200,11 +1196,9 @@ mod tests {
 
     #[tokio::test]
     async fn local_ssh_fixture_covers_session_and_remote_forward_lifecycle() {
-        let host_key = russh::keys::PrivateKey::random(
-            &mut rand::rng(),
-            russh::keys::Algorithm::Ed25519,
-        )
-        .expect("generate fixture host key");
+        let host_key =
+            russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
+                .expect("generate fixture host key");
         let config = Arc::new(russh::server::Config {
             auth_rejection_time: Duration::ZERO,
             auth_rejection_time_initial: Some(Duration::ZERO),
@@ -1274,7 +1268,10 @@ mod tests {
         let echo = tokio::time::timeout(Duration::from_secs(2), output.next())
             .await
             .expect("receive fixture PTY echo");
-        assert_eq!(echo, TerminalOutputEvent::Data(b"terminal-roundtrip".to_vec()));
+        assert_eq!(
+            echo,
+            TerminalOutputEvent::Data(b"terminal-roundtrip".to_vec())
+        );
 
         let (bound_port, mut forwarded_channels) = session
             .request_remote_forward("127.0.0.1", 42_001)
@@ -1292,22 +1289,27 @@ mod tests {
             forward_trigger_echo,
             TerminalOutputEvent::Data(b"trigger-forward".to_vec())
         );
-        let mut forwarded =
-            tokio::time::timeout(Duration::from_secs(2), forwarded_channels.recv())
-                .await
-                .expect("receive forwarded channel")
-                .expect("fixture opened forwarded channel");
-        let mut forwarded_payload = Vec::new();
-        tokio::time::timeout(Duration::from_secs(2), forwarded.read_to_end(&mut forwarded_payload))
+        let mut forwarded = tokio::time::timeout(Duration::from_secs(2), forwarded_channels.recv())
             .await
-            .expect("read forwarded payload")
-            .expect("forwarded stream closes cleanly");
+            .expect("receive forwarded channel")
+            .expect("fixture opened forwarded channel");
+        let mut forwarded_payload = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            forwarded.read_to_end(&mut forwarded_payload),
+        )
+        .await
+        .expect("read forwarded payload")
+        .expect("forwarded stream closes cleanly");
         assert_eq!(forwarded_payload, b"forwarded-fixture".to_vec());
         session
             .cancel_remote_forward("127.0.0.1", bound_port)
             .await
             .expect("cancel remote forward");
-        session.disconnect().await.expect("disconnect fixture session");
+        session
+            .disconnect()
+            .await
+            .expect("disconnect fixture session");
 
         server_handle.shutdown("fixture completed".to_owned());
         tokio::time::timeout(Duration::from_secs(2), &mut server)

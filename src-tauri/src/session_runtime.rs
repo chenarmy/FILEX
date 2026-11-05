@@ -395,10 +395,7 @@ impl Default for SessionRuntime {
 }
 
 impl SessionRuntime {
-    async fn session_handle(
-        &self,
-        session_id: &str,
-    ) -> Result<Arc<ConnectedSshSession>, AppError> {
+    async fn session_handle(&self, session_id: &str) -> Result<Arc<ConnectedSshSession>, AppError> {
         let connections = self.connections.lock().await;
         connections
             .get(session_id)
@@ -1711,6 +1708,8 @@ impl SessionRuntime {
                     } else {
                         metadata.permissions.map(|mode| mode & 0o7777)
                     },
+                    uid: metadata.uid,
+                    gid: metadata.gid,
                 }
             })
             .collect::<Vec<_>>();
@@ -1722,6 +1721,30 @@ impl SessionRuntime {
         });
         let _ = sftp.close().await;
         Ok(result)
+    }
+
+    pub async fn update_remote_entry_mode(
+        &self,
+        session_id: &str,
+        path: &str,
+        mode: u32,
+    ) -> Result<(), AppError> {
+        if path.is_empty() || path.contains('\0') {
+            return Err(invalid_remote_path_error());
+        }
+        if mode > 0o7777 {
+            return Err(remote_mode_error("REMOTE_MODE_INVALID"));
+        }
+        let session = self.session_handle(session_id).await?;
+        let sftp = session
+            .open_sftp()
+            .await
+            .map_err(|error| ssh_error(&error))?;
+        let mut attributes = FileAttributes::empty();
+        attributes.permissions = Some(mode);
+        let result = sftp.set_metadata(path, attributes).await;
+        let _ = sftp.close().await;
+        result.map_err(|_| remote_mode_error("REMOTE_MODE_UPDATE_FAILED"))
     }
 
     pub async fn preview_remote_text(
@@ -2173,7 +2196,9 @@ impl SessionRuntime {
         if target_directory.is_empty()
             || target_directory.len() > 4_096
             || target_directory.contains('\0')
-            || target_directory.split('/').any(|component| component == "..")
+            || target_directory
+                .split('/')
+                .any(|component| component == "..")
         {
             return Err(invalid_remote_path_error());
         }
@@ -2230,7 +2255,8 @@ impl SessionRuntime {
             if source_metadata.is_dir()
                 && !source_metadata.is_symlink()
                 && (destination_parent == source
-                    || destination_parent.starts_with(&format!("{}/", source.trim_end_matches('/'))))
+                    || destination_parent
+                        .starts_with(&format!("{}/", source.trim_end_matches('/'))))
             {
                 return Err(invalid_remote_path_error());
             }
@@ -2290,13 +2316,9 @@ impl SessionRuntime {
                     .open_sftp_directory_reader()
                     .await
                     .map_err(|_| remote_copy_error())?;
-                let scan_result = scan_remote_transfer_tree(
-                    &directory_reader,
-                    &source,
-                    None,
-                    Some(copy_control),
-                )
-                .await;
+                let scan_result =
+                    scan_remote_transfer_tree(&directory_reader, &source, None, Some(copy_control))
+                        .await;
                 let reader_close_result = directory_reader.close();
                 let entries = scan_result?;
                 reader_close_result.map_err(|_| remote_copy_error())?;
@@ -2305,7 +2327,9 @@ impl SessionRuntime {
                     .filter(|entry| !entry.is_directory)
                     .filter_map(|entry| entry.size)
                     .try_fold(0_u64, |total, size| {
-                        total.checked_add(size).ok_or_else(remote_copy_too_large_error)
+                        total
+                            .checked_add(size)
+                            .ok_or_else(remote_copy_too_large_error)
                     })?;
                 if known_size > REMOTE_COPY_MAX_BYTES {
                     return Err(remote_copy_too_large_error());
@@ -2346,7 +2370,8 @@ impl SessionRuntime {
 
                 for entry in entries.iter().filter(|entry| entry.is_directory) {
                     copy_control.check_cancelled()?;
-                    let target_path = remote_transfer_child_path(&temporary_path, &entry.relative_path);
+                    let target_path =
+                        remote_transfer_child_path(&temporary_path, &entry.relative_path);
                     if target_path.len() > 4_096 {
                         return Err(invalid_remote_path_error());
                     }
@@ -2363,7 +2388,8 @@ impl SessionRuntime {
                     if source_metadata.is_symlink() || !source_metadata.is_regular() {
                         return Err(remote_copy_unsupported_error());
                     }
-                    let target_path = remote_transfer_child_path(&temporary_path, &entry.relative_path);
+                    let target_path =
+                        remote_transfer_child_path(&temporary_path, &entry.relative_path);
                     if target_path.len() > 4_096 {
                         return Err(invalid_remote_path_error());
                     }
@@ -2418,7 +2444,8 @@ impl SessionRuntime {
                 }
                 for entry in entries.iter().rev().filter(|entry| entry.is_directory) {
                     if let Some(permissions) = entry.permissions {
-                        let target_path = remote_transfer_child_path(&temporary_path, &entry.relative_path);
+                        let target_path =
+                            remote_transfer_child_path(&temporary_path, &entry.relative_path);
                         let mut attributes = FileAttributes::empty();
                         attributes.permissions = Some(permissions);
                         sftp.set_metadata(target_path, attributes)
@@ -2479,10 +2506,7 @@ impl SessionRuntime {
             if temporary_path.len() > 4_096 {
                 return Err(invalid_remote_path_error());
             }
-            let source_file = sftp
-                .open(source)
-                .await
-                .map_err(|_| remote_copy_error())?;
+            let source_file = sftp.open(source).await.map_err(|_| remote_copy_error())?;
             let mut temporary = sftp
                 .open_with_flags(
                     temporary_path.clone(),
@@ -2551,15 +2575,13 @@ impl SessionRuntime {
             temporary_for_cleanup = None;
             Ok(())
         };
-        let result = match tokio::time::timeout(
-            Duration::from_secs(REMOTE_COPY_TIMEOUT_SECONDS),
-            operation,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(remote_copy_timeout_error()),
-        };
+        let result =
+            match tokio::time::timeout(Duration::from_secs(REMOTE_COPY_TIMEOUT_SECONDS), operation)
+                .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(remote_copy_timeout_error()),
+            };
         if let Some((temporary_path, is_directory)) = temporary_for_cleanup {
             if is_directory {
                 let _ = tokio::time::timeout(
@@ -2568,11 +2590,9 @@ impl SessionRuntime {
                 )
                 .await;
             } else {
-                let _ = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    sftp.remove_file(temporary_path),
-                )
-                .await;
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(5), sftp.remove_file(temporary_path))
+                        .await;
             }
         }
         let _ = tokio::time::timeout(Duration::from_secs(2), sftp.close()).await;
@@ -3364,16 +3384,13 @@ impl SessionRuntime {
         summary: Arc<Mutex<TunnelSummary>>,
         cancellation: CancellationToken,
     ) -> Result<(), AppError> {
-        self.tunnels
-            .lock()
-            .await
-            .insert(
-                id,
-                TunnelRuntime {
-                    summary,
-                    cancellation,
-                },
-            );
+        self.tunnels.lock().await.insert(
+            id,
+            TunnelRuntime {
+                summary,
+                cancellation,
+            },
+        );
         Ok(())
     }
 
@@ -3521,9 +3538,9 @@ impl SessionRuntime {
             last_error: None,
         }));
         let cancellation = CancellationToken::new();
-        if let Err(error) =
-            self.register_tunnel(id, summary.clone(), cancellation.clone())
-                .await
+        if let Err(error) = self
+            .register_tunnel(id, summary.clone(), cancellation.clone())
+            .await
         {
             let cleanup_session = session.clone();
             let cleanup_address = address.clone();
@@ -3708,10 +3725,7 @@ impl SessionRuntime {
         Ok(())
     }
 
-    async fn mark_disconnected_remote_tunnels(
-        &self,
-        session_id: &str,
-    ) -> Result<(), AppError> {
+    async fn mark_disconnected_remote_tunnels(&self, session_id: &str) -> Result<(), AppError> {
         let tunnels = self.tunnels.lock().await;
         for tunnel in tunnels.values() {
             let mut summary = tunnel.summary.lock().map_err(|_| session_lock_error())?;
@@ -4183,6 +4197,20 @@ fn invalid_remote_path_error() -> AppError {
 const REMOTE_TEXT_PREVIEW_MAX_BYTES: u32 = 1024 * 1024;
 const EXTERNAL_OPEN_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
+fn remote_mode_error(code: &str) -> AppError {
+    AppError {
+        code: code.to_owned(),
+        message_key: match code {
+            "REMOTE_MODE_INVALID" => "errors.remoteModeInvalid",
+            _ => "errors.remoteModeUpdateFailed",
+        }
+        .to_owned(),
+        retryable: code == "REMOTE_MODE_UPDATE_FAILED",
+        remote_state: RemoteState::Unknown,
+        field: None,
+    }
+}
+
 fn sftp_preview_error(code: &str, message_key: &str) -> AppError {
     AppError {
         code: code.to_owned(),
@@ -4249,7 +4277,7 @@ async fn read_bounded_remote_text(
     })
 }
 
-fn text_revision(bytes: &[u8]) -> String {
+pub(crate) fn text_revision(bytes: &[u8]) -> String {
     let mut revision = String::with_capacity(64);
     for byte in Sha256::digest(bytes) {
         revision.push_str(&format!("{byte:02x}"));
@@ -4489,7 +4517,7 @@ printf 'HOST=%s\nOS=%s\n' "$HOST" "$OS"
 case "$KERNEL" in
   Linux*)
     awk '{print "UPTIME="$1}' /proc/uptime 2>/dev/null || true
-    awk '{print "LOAD1="$1}' /proc/loadavg 2>/dev/null || true
+    awk '{print "LOAD1="$1; print "LOAD5="$2; print "LOAD15="$3}' /proc/loadavg 2>/dev/null || true
     awk '/^MemTotal:/ {print "MEM_TOTAL="$2} /^MemAvailable:/ {print "MEM_AVAILABLE="$2} /^SwapTotal:/ {swap_total=$2; print "SWAP_TOTAL="$2; seen_total=1} /^SwapFree:/ {swap_free=$2; seen_free=1} END {if (seen_total && seen_free) printf "SWAP_USED=%.0f\n", swap_total-swap_free}' /proc/meminfo 2>/dev/null || true
     cpu_sample() {
       awk '/^cpu / {total=0; for (i=2; i<=NF && i<=9; i++) total+=$i; idle=$5+$6; printf "%.0f %.0f\n", total, idle}' /proc/stat 2>/dev/null
@@ -4520,7 +4548,7 @@ case "$KERNEL" in
     if [ -n "$BOOT_TIME" ] && [ -n "$NOW" ]; then
       awk -v now="$NOW" -v boot="$BOOT_TIME" 'BEGIN {if (now >= boot) printf "UPTIME=%.0f\n", now-boot}'
     fi
-    sysctl -n vm.loadavg 2>/dev/null | tr -d '{}' | awk '{if ($1 ~ /^[0-9]+([.][0-9]+)?$/) print "LOAD1="$1}'
+    sysctl -n vm.loadavg 2>/dev/null | tr -d '{}' | awk '{if ($1 ~ /^[0-9]+([.][0-9]+)?$/ && $2 ~ /^[0-9]+([.][0-9]+)?$/ && $3 ~ /^[0-9]+([.][0-9]+)?$/) {print "LOAD1="$1; print "LOAD5="$2; print "LOAD15="$3}}'
     TOTAL_BYTES=$(sysctl -n hw.memsize 2>/dev/null || true)
     PAGE_SIZE=$(sysctl -n hw.pagesize 2>/dev/null || true)
     if [ -n "$TOTAL_BYTES" ]; then
@@ -4553,7 +4581,8 @@ case "$KERNEL" in
     awk -v before="$NET_BEFORE" -v after="$NET_AFTER" 'BEGIN {if (split(before, a, /[[:space:]]+/)==2 && split(after, b, /[[:space:]]+/)==2) {rx=b[1]-a[1]; tx=b[2]-a[2]; if (rx>=0 && tx>=0) printf "NET_RX_BPS=%.0f\nNET_TX_BPS=%.0f\n", rx, tx}}'
     ;;
 esac
-df -Pk / 2>/dev/null | awk 'NR==2 {print "ROOT_TOTAL="$2; print "ROOT_AVAILABLE="$4}' || true"#;
+df -Pk / 2>/dev/null | awk 'NR==2 {print "ROOT_TOTAL="$2; print "ROOT_AVAILABLE="$4}' || true
+df -Pk 2>/dev/null | awk 'NR>1 && n<12 { total=$2; avail=$4; line=$0; sub(/^[^ ]+[[:space:]]+[^ ]+[[:space:]]+[^ ]+[[:space:]]+[^ ]+[[:space:]]+[^ ]+[[:space:]]+/, "", line); if (total ~ /^[0-9]+$/ && avail ~ /^[0-9]+$/ && line != "" && index(line, "|") == 0) { printf "MOUNT=%s|%s|%s\n", line, total, avail; n++ } }' || true"#;
 
 const WINDOWS_MONITOR_SCRIPT: &str = r#"if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { exit 42 }
 Write-Output 'PLATFORM=WINDOWS'
@@ -4569,6 +4598,15 @@ Write-Output "MEM_TOTAL=$($os.TotalVisibleMemorySize)"
 Write-Output "MEM_AVAILABLE=$($os.FreePhysicalMemory)"
 if ($null -ne $disk.Size) { Write-Output "ROOT_TOTAL=$([math]::Floor($disk.Size / 1024))" }
 if ($null -ne $disk.FreeSpace) { Write-Output "ROOT_AVAILABLE=$([math]::Floor($disk.FreeSpace / 1024))" }
+try {
+  $localDisks = @(Get-CimInstance Win32_LogicalDisk -ErrorAction Stop | Where-Object { $_.DriveType -eq 3 -and $null -ne $_.Size -and $_.Size -gt 0 } | Select-Object -First 12)
+  foreach ($localDisk in $localDisks) {
+    $mountPath = "$($localDisk.DeviceID)\"
+    if ($mountPath.IndexOf('|') -lt 0) {
+      Write-Output "MOUNT=$mountPath|$([math]::Floor($localDisk.Size / 1024))|$([math]::Floor($localDisk.FreeSpace / 1024))"
+    }
+  }
+} catch {}
 try {
   $processors = @(Get-CimInstance Win32_Processor -ErrorAction Stop)
   $cpuLoad = $processors | Measure-Object -Property LoadPercentage -Average
@@ -4834,10 +4872,7 @@ fn decode_process_name(value: &str, hexadecimal: bool) -> Option<String> {
             .collect()
     };
     let decoded = String::from_utf8_lossy(&bytes);
-    let basename = decoded
-        .rsplit(|character| character == '/' || character == '\\')
-        .next()
-        .unwrap_or_default();
+    let basename = decoded.rsplit(['/', '\\']).next().unwrap_or_default();
     let mut name = String::new();
     for character in basename.chars().take(96) {
         if character.is_control() || character == '\n' || character == '\r' {
@@ -4916,11 +4951,11 @@ fn remote_metadata_changed(before: &FileAttributes, after: &FileAttributes) -> b
 }
 
 async fn scan_local_directory_tree(
-    root: &PathBuf,
+    root: &std::path::Path,
     cancellation: &CancellationToken,
 ) -> Result<BTreeMap<String, DirectorySyncNode>, AppError> {
     let mut entries = BTreeMap::new();
-    let mut directories = vec![(root.clone(), String::new(), 0_usize)];
+    let mut directories = vec![(root.to_path_buf(), String::new(), 0_usize)];
 
     while let Some((directory_path, relative_parent, depth)) = directories.pop() {
         let mut directory = tokio::select! {
@@ -5642,9 +5677,7 @@ async fn upload(
     control: &TransferControl,
     on_progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
 ) -> Result<u64, AppError> {
-    if task.local_path.is_empty()
-        || task.local_path.len() > 4_096
-        || task.remote_path.len() > 4_096
+    if task.local_path.is_empty() || task.local_path.len() > 4_096 || task.remote_path.len() > 4_096
     {
         return Err(directory_tree_limit_error());
     }
@@ -5760,7 +5793,9 @@ async fn upload_directory(
         .iter()
         .filter(|entry| !entry.is_directory)
         .try_fold(0_u64, |total, entry| {
-            total.checked_add(entry.size).ok_or_else(directory_tree_limit_error)
+            total
+                .checked_add(entry.size)
+                .ok_or_else(directory_tree_limit_error)
         })?;
     on_progress(control.bytes_transferred(), Some(total_size));
     let staging_root = if merge_existing {
@@ -5818,7 +5853,10 @@ async fn upload_directory(
         if let Some(staging_root) = staging_root.as_ref() {
             control.begin_commit().await?;
             let commit_result = async {
-                if remote_transfer_metadata(sftp, &target_root).await?.is_some() {
+                if remote_transfer_metadata(sftp, &target_root)
+                    .await?
+                    .is_some()
+                {
                     return Err(transfer_conflict_error());
                 }
                 sftp.rename(staging_root.clone(), target_root.clone())
@@ -5888,14 +5926,17 @@ async fn upload_directory_file(
         )
         .await
         .map_err(|_| transfer_io_error("SFTP_CREATE_FAILED", "errors.sftpFailed"))?;
-    let bytes = match copy_transfer_stream(&mut local, &mut remote, control, on_progress, base_bytes).await {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            let _ = tokio::time::timeout(Duration::from_secs(2), remote.close()).await;
-            let _ = tokio::time::timeout(Duration::from_secs(3), sftp.remove_file(temporary)).await;
-            return Err(error);
-        }
-    };
+    let bytes =
+        match copy_transfer_stream(&mut local, &mut remote, control, on_progress, base_bytes).await
+        {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = tokio::time::timeout(Duration::from_secs(2), remote.close()).await;
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(3), sftp.remove_file(temporary)).await;
+                return Err(error);
+            }
+        };
     if let Err(error) = control.begin_commit().await {
         let _ = tokio::time::timeout(Duration::from_secs(2), remote.close()).await;
         let _ = tokio::time::timeout(Duration::from_secs(3), sftp.remove_file(temporary)).await;
@@ -5922,7 +5963,11 @@ async fn upload_directory_file(
         } else {
             None
         };
-        if sftp.rename(temporary.clone(), target.clone()).await.is_err() {
+        if sftp
+            .rename(temporary.clone(), target.clone())
+            .await
+            .is_err()
+        {
             if let Some(backup) = backup.as_ref() {
                 let _ = sftp.rename(backup.clone(), target.clone()).await;
             }
@@ -6016,26 +6061,26 @@ async fn download_regular_file(
             .create_new(true)
             .open(&temporary)
             .await
-            .map_err(|_| transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed"))?;
+            .map_err(|_| {
+                transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed")
+            })?;
         let bytes = copy_transfer_stream(&mut remote, &mut local, control, on_progress, 0).await?;
         control.begin_commit().await?;
-        local
-            .flush()
-            .await
-            .map_err(|_| transfer_io_error("LOCAL_FILE_FLUSH_FAILED", "errors.localFileWriteFailed"))?;
-        local
-            .sync_all()
-            .await
-            .map_err(|_| transfer_io_error("LOCAL_FILE_SYNC_FAILED", "errors.localFileWriteFailed"))?;
+        local.flush().await.map_err(|_| {
+            transfer_io_error("LOCAL_FILE_FLUSH_FAILED", "errors.localFileWriteFailed")
+        })?;
+        local.sync_all().await.map_err(|_| {
+            transfer_io_error("LOCAL_FILE_SYNC_FAILED", "errors.localFileWriteFailed")
+        })?;
         remote
             .close()
             .await
             .map_err(|_| transfer_io_error("SFTP_CLOSE_FAILED", "errors.sftpFailed"))?;
         drop(local);
         if tokio::fs::try_exists(&target).await.unwrap_or(false) {
-            tokio::fs::remove_file(&target)
-                .await
-                .map_err(|_| transfer_io_error("LOCAL_REPLACE_FAILED", "errors.localFileWriteFailed"))?;
+            tokio::fs::remove_file(&target).await.map_err(|_| {
+                transfer_io_error("LOCAL_REPLACE_FAILED", "errors.localFileWriteFailed")
+            })?;
         }
         tokio::fs::rename(&temporary, &target)
             .await
@@ -6064,19 +6109,17 @@ async fn download_directory(
         .open_sftp_directory_reader()
         .await
         .map_err(|error| ssh_error(&error))?;
-    let scan_result = scan_remote_transfer_tree(
-        &directory_reader,
-        &source_root,
-        Some(control),
-        None,
-    )
-    .await;
+    let scan_result =
+        scan_remote_transfer_tree(&directory_reader, &source_root, Some(control), None).await;
     let close_result = directory_reader.close();
     let entries = scan_result?;
     close_result.map_err(|_| transfer_io_error("SFTP_CLOSE_FAILED", "errors.sftpFailed"))?;
     let mut target_root = PathBuf::from(&task.local_path);
     if target_root.as_os_str().is_empty() || target_root.to_string_lossy().len() > 4_096 {
-        return Err(transfer_io_error("LOCAL_PATH_INVALID", "errors.localPathInvalid"));
+        return Err(transfer_io_error(
+            "LOCAL_PATH_INVALID",
+            "errors.localPathInvalid",
+        ));
     }
     let root_metadata = local_transfer_metadata(&target_root).await?;
     let mut merge_existing = false;
@@ -6130,13 +6173,8 @@ async fn download_directory(
         Some(path)
     };
     let working_root = staging_root.as_deref().unwrap_or(&target_root);
-    validate_local_transfer_destinations(
-        working_root,
-        &entries,
-        &task.conflict_policy,
-        control,
-    )
-    .await?;
+    validate_local_transfer_destinations(working_root, &entries, &task.conflict_policy, control)
+        .await?;
     control.wait_until_running().await?;
     tokio::fs::create_dir_all(parent)
         .await
@@ -6175,7 +6213,9 @@ async fn download_directory(
                 }
                 tokio::fs::rename(staging_root, &target_root)
                     .await
-                    .map_err(|_| transfer_io_error("LOCAL_COMMIT_FAILED", "errors.localFileWriteFailed"))
+                    .map_err(|_| {
+                        transfer_io_error("LOCAL_COMMIT_FAILED", "errors.localFileWriteFailed")
+                    })
             }
             .await;
             if commit_result.is_err() {
@@ -6298,7 +6338,10 @@ async fn ensure_remote_transfer_directory(
 
 async fn ensure_local_transfer_directory(path: &std::path::Path) -> Result<(), AppError> {
     if path.as_os_str().is_empty() || path.to_string_lossy().len() > 4_096 {
-        return Err(transfer_io_error("LOCAL_PATH_INVALID", "errors.localPathInvalid"));
+        return Err(transfer_io_error(
+            "LOCAL_PATH_INVALID",
+            "errors.localPathInvalid",
+        ));
     }
     if let Some(metadata) = local_transfer_metadata(path).await? {
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
@@ -6360,18 +6403,19 @@ async fn download_directory_file(
             .create_new(true)
             .open(&temporary)
             .await
-            .map_err(|_| transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed"))?;
-        let bytes = copy_transfer_stream(&mut remote, &mut local, control, on_progress, base_bytes).await?;
+            .map_err(|_| {
+                transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed")
+            })?;
+        let bytes =
+            copy_transfer_stream(&mut remote, &mut local, control, on_progress, base_bytes).await?;
         control.begin_commit().await?;
         let commit_result = async {
-            local
-                .flush()
-                .await
-                .map_err(|_| transfer_io_error("LOCAL_FILE_FLUSH_FAILED", "errors.localFileWriteFailed"))?;
-            local
-                .sync_all()
-                .await
-                .map_err(|_| transfer_io_error("LOCAL_FILE_SYNC_FAILED", "errors.localFileWriteFailed"))?;
+            local.flush().await.map_err(|_| {
+                transfer_io_error("LOCAL_FILE_FLUSH_FAILED", "errors.localFileWriteFailed")
+            })?;
+            local.sync_all().await.map_err(|_| {
+                transfer_io_error("LOCAL_FILE_SYNC_FAILED", "errors.localFileWriteFailed")
+            })?;
             remote
                 .close()
                 .await
@@ -6382,9 +6426,9 @@ async fn download_directory_file(
                 if backup.to_string_lossy().len() > 4_096 {
                     return Err(directory_tree_limit_error());
                 }
-                tokio::fs::rename(&target, &backup)
-                    .await
-                    .map_err(|_| transfer_io_error("LOCAL_REPLACE_FAILED", "errors.localFileWriteFailed"))?;
+                tokio::fs::rename(&target, &backup).await.map_err(|_| {
+                    transfer_io_error("LOCAL_REPLACE_FAILED", "errors.localFileWriteFailed")
+                })?;
                 Some(backup)
             } else {
                 None
@@ -6393,7 +6437,10 @@ async fn download_directory_file(
                 if let Some(backup) = backup.as_ref() {
                     let _ = tokio::fs::rename(backup, &target).await;
                 }
-                return Err(transfer_io_error("LOCAL_COMMIT_FAILED", "errors.localFileWriteFailed"));
+                return Err(transfer_io_error(
+                    "LOCAL_COMMIT_FAILED",
+                    "errors.localFileWriteFailed",
+                ));
             }
             if let Some(backup) = backup {
                 let _ = tokio::fs::remove_file(backup).await;
@@ -6442,7 +6489,10 @@ async fn scan_local_transfer_tree(
             let Some(entry) = next else {
                 break;
             };
-            let name = entry.file_name().into_string().map_err(|_| directory_tree_unsupported_error())?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| directory_tree_unsupported_error())?;
             if !valid_directory_sync_segment(&name) {
                 return Err(directory_tree_unsupported_error());
             }
@@ -6514,11 +6564,7 @@ async fn scan_remote_transfer_tree(
         let remaining = DIRECTORY_SYNC_MAX_ENTRIES.saturating_sub(entries.len());
         let listed = if let Some(control) = control {
             directory_reader
-                .read_dir_limited(
-                    &directory_path,
-                    remaining,
-                    control.cancellation.cancelled(),
-                )
+                .read_dir_limited(&directory_path, remaining, control.cancellation.cancelled())
                 .await
                 .map_err(map_transfer_directory_read_error)?
         } else if let Some(copy_control) = copy_control {
@@ -6532,11 +6578,7 @@ async fn scan_remote_transfer_tree(
                 .map_err(map_transfer_directory_read_error)?
         } else {
             directory_reader
-                .read_dir_limited(
-                    &directory_path,
-                    remaining,
-                    std::future::pending::<()>(),
-                )
+                .read_dir_limited(&directory_path, remaining, std::future::pending::<()>())
                 .await
                 .map_err(map_transfer_directory_read_error)?
         };
@@ -6761,7 +6803,10 @@ async fn local_transfer_metadata(
     match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) => Ok(Some(metadata)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(transfer_io_error("LOCAL_PATH_INVALID", "errors.localPathInvalid")),
+        Err(_) => Err(transfer_io_error(
+            "LOCAL_PATH_INVALID",
+            "errors.localPathInvalid",
+        )),
     }
 }
 
@@ -6770,34 +6815,37 @@ async fn remove_local_transfer_tree(root: &std::path::Path) -> Result<(), AppErr
     let mut visited_entries = 0_usize;
     while let Some((path, depth, remove_directory)) = pending.pop() {
         if remove_directory {
-            tokio::fs::remove_dir(&path)
-                .await
-                .map_err(|_| transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed"))?;
+            tokio::fs::remove_dir(&path).await.map_err(|_| {
+                transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed")
+            })?;
             continue;
         }
         let metadata = match tokio::fs::symlink_metadata(&path).await {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return Err(transfer_io_error("LOCAL_PATH_INVALID", "errors.localPathInvalid")),
+            Err(_) => {
+                return Err(transfer_io_error(
+                    "LOCAL_PATH_INVALID",
+                    "errors.localPathInvalid",
+                ));
+            }
         };
         let file_type = metadata.file_type();
         if file_type.is_symlink() || file_type.is_file() {
-            tokio::fs::remove_file(&path)
-                .await
-                .map_err(|_| transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed"))?;
+            tokio::fs::remove_file(&path).await.map_err(|_| {
+                transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed")
+            })?;
         } else if file_type.is_dir() {
             if depth > DIRECTORY_SYNC_MAX_DEPTH {
                 return Err(directory_tree_limit_error());
             }
-            let mut directory = tokio::fs::read_dir(&path)
-                .await
-                .map_err(|_| transfer_io_error("LOCAL_DIRECTORY_FAILED", "errors.localFileWriteFailed"))?;
+            let mut directory = tokio::fs::read_dir(&path).await.map_err(|_| {
+                transfer_io_error("LOCAL_DIRECTORY_FAILED", "errors.localFileWriteFailed")
+            })?;
             pending.push((path, depth, true));
-            while let Some(entry) = directory
-                .next_entry()
-                .await
-                .map_err(|_| transfer_io_error("LOCAL_DIRECTORY_FAILED", "errors.localFileWriteFailed"))?
-            {
+            while let Some(entry) = directory.next_entry().await.map_err(|_| {
+                transfer_io_error("LOCAL_DIRECTORY_FAILED", "errors.localFileWriteFailed")
+            })? {
                 visited_entries = visited_entries.saturating_add(1);
                 if visited_entries > DIRECTORY_SYNC_MAX_ENTRIES {
                     return Err(directory_tree_limit_error());
@@ -6862,7 +6910,9 @@ where
 
         copied = copied.saturating_add(read as u64);
         let aggregate = base_bytes.saturating_add(copied);
-        control.bytes_transferred.store(aggregate, Ordering::Release);
+        control
+            .bytes_transferred
+            .store(aggregate, Ordering::Release);
         if last_reported_at.elapsed() >= PROGRESS_INTERVAL {
             on_progress(aggregate, None);
             reported_bytes = aggregate;
@@ -6872,7 +6922,9 @@ where
 
     let aggregate = base_bytes.saturating_add(copied);
     if aggregate != reported_bytes {
-        control.bytes_transferred.store(aggregate, Ordering::Release);
+        control
+            .bytes_transferred
+            .store(aggregate, Ordering::Release);
         on_progress(aggregate, None);
     }
     Ok(copied)

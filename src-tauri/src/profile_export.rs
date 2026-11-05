@@ -22,53 +22,58 @@ pub(crate) async fn export_connection_profiles(
     settings: State<'_, SettingsService>,
 ) -> Result<OperationResult<Option<MaintenanceArtifact>>, ()> {
     Ok(async {
-    let exported_at_ms = match current_time_ms() {
-        Ok(value) => value,
-        Err(error) => return OperationResult::failure(error),
-    };
-    let payload = match profiles.portable_export(exported_at_ms) {
-        Ok(payload) => payload,
-        Err(error) => return OperationResult::failure(error),
-    };
+        let exported_at_ms = match current_time_ms() {
+            Ok(value) => value,
+            Err(error) => return OperationResult::failure(error),
+        };
+        let payload = match profiles.portable_export(exported_at_ms) {
+            Ok(payload) => payload,
+            Err(error) => return OperationResult::failure(error),
+        };
 
-    let locale = settings
-        .load()
-        .map(|settings| settings.locale)
-        .unwrap_or_else(|_| "zh-CN".to_owned());
-    let (dialog_title, filter_label) = if locale == "zh-CN" {
-        ("导出 FILEX 连接资料", "FILEX 连接资料")
-    } else {
-        (
-            "Export FILEX connection profiles",
-            "FILEX connection profiles",
-        )
-    };
+        let locale = settings
+            .load()
+            .map(|settings| settings.locale)
+            .unwrap_or_else(|_| "zh-CN".to_owned());
+        let (dialog_title, filter_label) = if locale == "zh-CN" {
+            ("导出 FILEX 连接资料", "FILEX 连接资料")
+        } else {
+            (
+                "Export FILEX connection profiles",
+                "FILEX connection profiles",
+            )
+        };
 
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .file()
-        .set_title(dialog_title)
-        .set_file_name("filex-connections.json")
-        .add_filter(filter_label, &["json"])
-        .save_file(move |selected_path| {
-            let _ = sender.send(selected_path);
-        });
-    let selected_path = match receiver.await {
-        Ok(Some(path)) => path,
-        Ok(None) => return OperationResult::success(None),
-        Err(_) => {
-            return OperationResult::failure(profile_export_error("PROFILE_EXPORT_DIALOG_FAILED"));
-        }
-    };
-    let path = match selected_path.into_path() {
-        Ok(path) => path,
-        Err(_) => {
-            return OperationResult::failure(profile_export_error("PROFILE_EXPORT_PATH_INVALID"));
-        }
-    };
-    let write_path = path.clone();
-    let write_result =
-        tauri::async_runtime::spawn_blocking(move || write_atomically(&write_path, &payload)).await;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        app.dialog()
+            .file()
+            .set_title(dialog_title)
+            .set_file_name("filex-connections.json")
+            .add_filter(filter_label, &["json"])
+            .save_file(move |selected_path| {
+                let _ = sender.send(selected_path);
+            });
+        let selected_path = match receiver.await {
+            Ok(Some(path)) => path,
+            Ok(None) => return OperationResult::success(None),
+            Err(_) => {
+                return OperationResult::failure(profile_export_error(
+                    "PROFILE_EXPORT_DIALOG_FAILED",
+                ));
+            }
+        };
+        let path = match selected_path.into_path() {
+            Ok(path) => path,
+            Err(_) => {
+                return OperationResult::failure(profile_export_error(
+                    "PROFILE_EXPORT_PATH_INVALID",
+                ));
+            }
+        };
+        let write_path = path.clone();
+        let write_result =
+            tauri::async_runtime::spawn_blocking(move || write_atomically(&write_path, &payload))
+                .await;
         match write_result {
             Ok(Ok(byte_count)) => OperationResult::success(Some(MaintenanceArtifact {
                 kind: "connection_profiles".to_owned(),
@@ -83,7 +88,8 @@ pub(crate) async fn export_connection_profiles(
                 OperationResult::failure(profile_export_error("PROFILE_EXPORT_WRITE_FAILED"))
             }
         }
-    }.await)
+    }
+    .await)
 }
 
 enum ProfileExportWriteError {

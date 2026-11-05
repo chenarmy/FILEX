@@ -21,6 +21,7 @@
     "@xterm/addon-search": "^0.15.0",
     "@xterm/xterm": "^5.5.0",
     "lucide-vue-next": "^0.468.0",
+    "monaco-editor": "^0.57.0",
     "pinia": "^3.0.3",
     "vue": "^3.5.22"
   },

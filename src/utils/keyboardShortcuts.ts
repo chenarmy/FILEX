@@ -8,6 +8,7 @@ export const DEFAULT_KEYBOARD_SHORTCUTS: KeyboardShortcuts = {
   previousSession: 'mod+shift+tab',
   terminalSearch: 'mod+f',
   toggleFiles: 'mod+shift+f',
+  toggleFocusMode: 'mod+shift+m',
   toggleTaskDrawer: 'mod+j',
   commandPalette: 'mod+shift+p',
   toggleAssistant: 'mod+shift+a',

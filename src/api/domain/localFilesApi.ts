@@ -1,6 +1,12 @@
 import { invoke } from '@tauri-apps/api/core';
 import { failure, isTauriRuntime, normalizeUnknownError } from '@/api/common';
-import type { LocalDirectoryListing, LocalFileEntry, OperationResult } from '@/types/contracts';
+import type {
+  LocalDirectoryListing,
+  LocalFileEntry,
+  LocalTextPreview,
+  LocalTextSaveResult,
+  OperationResult,
+} from '@/types/contracts';
 
 export async function listLocalDirectory(path?: string): Promise<OperationResult<LocalDirectoryListing>> {
   if (!isTauriRuntime()) {
@@ -61,6 +67,48 @@ export function copyLocalEntry(
 
 export function deleteLocalEntry(path: string): Promise<OperationResult<void>> {
   return runLocalOperation('delete_local_entry', { path }, 'LOCAL_FILE_OPERATION_FAILED');
+}
+
+export async function previewLocalText(
+  path: string,
+): Promise<OperationResult<LocalTextPreview>> {
+  if (!isTauriRuntime()) {
+    return failure({
+      code: 'LOCAL_FILES_DESKTOP_ONLY',
+      messageKey: 'errors.localFilesDesktopOnly',
+      retryable: false,
+      remoteState: 'not_applicable',
+    });
+  }
+  try {
+    return await invoke<OperationResult<LocalTextPreview>>('preview_local_text', { path });
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'LOCAL_TEXT_PREVIEW_FAILED'));
+  }
+}
+
+export async function saveLocalText(
+  path: string,
+  content: string,
+  expectedRevision: string,
+): Promise<OperationResult<LocalTextSaveResult>> {
+  if (!isTauriRuntime()) {
+    return failure({
+      code: 'LOCAL_FILES_DESKTOP_ONLY',
+      messageKey: 'errors.localFilesDesktopOnly',
+      retryable: false,
+      remoteState: 'not_applicable',
+    });
+  }
+  try {
+    return await invoke<OperationResult<LocalTextSaveResult>>('save_local_text', {
+      path,
+      content,
+      expectedRevision,
+    });
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'LOCAL_TEXT_SAVE_FAILED'));
+  }
 }
 
 async function runLocalOperation(

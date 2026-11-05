@@ -1,5 +1,28 @@
 # FILEX verification evidence
 
+## 2026-11-05 — Phase 5.5 workspace experience alignment
+
+Scope: FileTerm-style shell restyle (top session tab bar, left host monitor panel, floating command input bar, bottom dual-pane file browser with transfer footer), plus the aligned feature additions — OSC 7 follow-terminal, chmod permission editing with uid/gid columns, multi-mount disk list with load 1/5/15, network rate history chart, virtualized file lists, Monaco editor panel, snippet folders, and focus mode.
+
+| Check | Command | Observed result |
+| --- | --- | --- |
+| Front-end lint | `pnpm lint` | Passed with zero warnings |
+| TypeScript | `pnpm typecheck` | Passed in strict mode |
+| Unit tests | `pnpm test` | 4 files, 14 tests passed (permissions, virtual window, settings clamps, connections) |
+| Production build | `pnpm build` | Passed; Monaco split into a lazy `monaco-*.js` chunk plus a separate editor worker |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust compile | `cargo check --workspace` | Passed |
+| Rust tests | `cargo test --workspace` (`CARGO_PROFILE_DEV_DEBUG=0` for disk space) | All crates pass, including the previously unrun `filex-ssh` loopback fixture after fixing `request_remote_forward` (see below) |
+| Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed after fixing latent pre-existing lints (redactor ordering, redundant closures, complex types, `&PathBuf`, sort_by_key, cfg-gated `set_readonly`) that also fire on the previous commit with this toolchain |
+| Browser E2E | `pnpm test:e2e` | 5/5 passed. Three spec expectations were corrected to match shipped behavior (ambiguous profile-button locators that also matched the favorite toggle, the `Control+1` connections-search shortcut instead of `Control+K`, and the zh-CN desktop-boundary message); all five scenarios failed before this phase on the previous commit |
+| Visual inspection | `pnpm dev` + browser | Dark and light themes, empty and populated states, focus-mode collapse and teleported session tab strip inspected at 1440x900 |
+
+Notable fixes surfaced by verification: the assistant redactor now applies the API-token rule before generic key/value assignments so tokens keep `[REDACTED_TOKEN]`; the virtual list clamps its start index when scrolled past the content; the tab-strip Teleport uses `defer` to avoid a Vue `emitsOptions` patch error on reload; and FileBrowserPanel declares its inline-dialog state before its immediate watchers (temporal-dead-zone crash).
+
+`request_remote_forward` port handling: per RFC 4254 a successful `tcpip-forward` reply has an empty body when a specific port was requested, which russh 0.65 maps to `Ok(0)`; the wrapper previously required the echoed port to equal the requested one, so every remote-forward request against a compliant server failed with `RemoteForwardUnavailable`. `Ok(0)` for a non-zero request is now treated as success, and the loopback fixture (host-key rejection, password auth, PTY round-trip, remote forward, forwarded-channel delivery, cancellation, disconnect) runs green on Windows.
+
+Still pending: live-host verification of the new probe fields (`mounts`, `load5/15`), setstat chmod, OSC 7 follow-terminal against a real shell, Monaco save round-trips, and cross-platform acceptance. FTP/FTPS remains deferred per `docs/PRODUCT_DESIGN.md`.
+
 ## 2026-11-01 — Phase 1 foundation slice
 
 Scope:

@@ -52,14 +52,16 @@ test('creates and restores a safe connection profile', async ({ page }) => {
   await dialog.getByLabel('主机', { exact: true }).fill('192.0.2.50');
   await dialog.getByLabel('用户名').fill('operator');
   await dialog.getByRole('button', { name: '保存资料' }).click();
-  await expect(page.getByRole('button', { name: /e2e-node/ })).toBeVisible();
+  const connectionRow = page.locator('.connection-row', { hasText: 'e2e-node' });
+  await expect(connectionRow).toBeVisible();
   await page.reload();
-  await expect(page.getByRole('button', { name: /e2e-node/ })).toBeVisible();
+  await expect(connectionRow).toBeVisible();
 });
 
 test('supports keyboard shortcuts and accessible pane resizing', async ({ page }) => {
-  await page.keyboard.press('Control+K');
-  await expect(page.getByPlaceholder('搜索连接或输入 user@host')).toBeFocused();
+  await page.keyboard.press('Control+1');
+  await expect(page.getByPlaceholder('筛选连接')).toBeFocused();
+  await page.getByPlaceholder('筛选连接').blur();
 
   await page.keyboard.press('Control+J');
   await expect(page.locator('.task-drawer')).toHaveCount(0);
@@ -96,7 +98,7 @@ test('blocks ProxyJump profiles before opening an SSH trust or password dialog',
   });
   await page.reload();
 
-  await page.getByRole('button', { name: /dev-sandbox/ }).click();
+  await page.locator('.connection-row', { hasText: 'dev-sandbox' }).click();
   await page.getByRole('button', { name: '重新连接' }).click();
 
   await expect(page.getByRole('alert')).toContainText('ProxyJump');
@@ -104,9 +106,9 @@ test('blocks ProxyJump profiles before opening an SSH trust or password dialog',
 });
 
 test('allows SSH Agent profiles through preflight and reaches the desktop runtime boundary', async ({ page }) => {
-  await page.getByRole('button', { name: /worker-canary/ }).click();
+  await page.locator('.connection-row', { hasText: 'worker-canary' }).click();
   await page.getByRole('button', { name: '重新连接' }).click();
 
-  await expect(page.getByRole('alert')).toContainText('desktop app');
+  await expect(page.getByRole('alert')).toContainText('桌面应用');
   await expect(page.getByRole('dialog')).toHaveCount(0);
 });

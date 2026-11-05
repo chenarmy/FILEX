@@ -177,8 +177,7 @@ impl TerminalLogRuntime {
             let mut overflow_status = None;
             for chunk in data.chunks(TERMINAL_LOG_QUEUE_CHUNK_BYTES) {
                 if let Err(mpsc::error::TrySendError::Full(_))
-                | Err(mpsc::error::TrySendError::Closed(_)) =
-                    sender.try_send(chunk.to_vec())
+                | Err(mpsc::error::TrySendError::Closed(_)) = sender.try_send(chunk.to_vec())
                 {
                     overflow_status = active.remove(session_id).map(|control| {
                         control.cancellation.cancel();
@@ -251,7 +250,12 @@ impl TerminalLogRuntime {
             .active
             .lock()
             .ok()
-            .map(|mut active| active.drain().map(|(_, control)| control).collect::<Vec<_>>())
+            .map(|mut active| {
+                active
+                    .drain()
+                    .map(|(_, control)| control)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let mut completions = Vec::with_capacity(controls.len());
         for control in controls {
@@ -359,8 +363,8 @@ impl TerminalLogRuntime {
                 let _ = tokio::fs::remove_file(path).await;
                 continue;
             }
-            let position = newest
-                .partition_point(|(_, candidate_modified)| *candidate_modified >= modified);
+            let position =
+                newest.partition_point(|(_, candidate_modified)| *candidate_modified >= modified);
             newest.insert(position, (path, modified));
             if newest.len() > TERMINAL_LOG_MAX_FILES {
                 if let Some((path, _)) = newest.pop() {
@@ -371,6 +375,7 @@ impl TerminalLogRuntime {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // writer task wiring, all eight are required
 async fn run_writer(
     app: AppHandle,
     session_id: String,
@@ -434,8 +439,7 @@ async fn run_writer(
             terminal_state = Some(TerminalLogState::LimitReached);
             break;
         }
-        let remaining =
-            usize::try_from(TERMINAL_LOG_MAX_BYTES - written).unwrap_or(usize::MAX);
+        let remaining = usize::try_from(TERMINAL_LOG_MAX_BYTES - written).unwrap_or(usize::MAX);
         let take = data.len().min(remaining);
         if file.write_all(&data[..take]).await.is_err() {
             final_error = Some(terminal_log_write_error());
@@ -451,9 +455,7 @@ async fn run_writer(
         final_error = Some(terminal_log_write_error());
     }
     let abnormal = final_error.is_some() || terminal_state.is_some();
-    if abnormal
-        && remove_matching_control(&active, &session_id, &path)
-    {
+    if abnormal && remove_matching_control(&active, &session_id, &path) {
         let status = TerminalLogStatus {
             session_id,
             state: terminal_state.unwrap_or_else(|| {

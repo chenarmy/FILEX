@@ -6,7 +6,10 @@ use std::{
     path::Path,
 };
 
-use base64::{Engine as _, engine::general_purpose::{STANDARD, STANDARD_NO_PAD}};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+};
 use filex_contracts::{
     AppError, KnownHostsImportCandidate, KnownHostsImportPreview, KnownHostsImportWarning,
     KnownHostsImportWarningKind, RemoteState,
@@ -46,8 +49,12 @@ pub fn preview_file(path: &Path) -> Result<KnownHostsImportPreview, AppError> {
             "errors.trustImportFileTooLarge",
         ));
     }
-    let text = String::from_utf8(bytes)
-        .map_err(|_| import_error("TRUST_IMPORT_FILE_ENCODING", "errors.trustImportFileEncoding"))?;
+    let text = String::from_utf8(bytes).map_err(|_| {
+        import_error(
+            "TRUST_IMPORT_FILE_ENCODING",
+            "errors.trustImportFileEncoding",
+        )
+    })?;
     if text.contains('\0') {
         return Err(import_error(
             "TRUST_IMPORT_FILE_ENCODING",
@@ -82,32 +89,50 @@ fn parse_known_hosts(
         }
         let fields = line.split_whitespace().collect::<Vec<_>>();
         if fields.len() < 3 {
-            add_warning(&mut warning_counts, KnownHostsImportWarningKind::InvalidEntry);
+            add_warning(
+                &mut warning_counts,
+                KnownHostsImportWarningKind::InvalidEntry,
+            );
             continue;
         }
         if fields[0].starts_with('@') {
-            add_warning(&mut warning_counts, KnownHostsImportWarningKind::MarkedEntry);
+            add_warning(
+                &mut warning_counts,
+                KnownHostsImportWarningKind::MarkedEntry,
+            );
             continue;
         }
 
         let declared_algorithm = fields[1];
         if declared_algorithm.ends_with("-cert-v01@openssh.com") {
-            add_warning(&mut warning_counts, KnownHostsImportWarningKind::UnsupportedKey);
+            add_warning(
+                &mut warning_counts,
+                KnownHostsImportWarningKind::UnsupportedKey,
+            );
             continue;
         }
         let key_blob = match STANDARD.decode(fields[2]) {
             Ok(blob) if !blob.is_empty() && blob.len() <= SSH_KEY_BLOB_MAX_BYTES => blob,
             _ => {
-                add_warning(&mut warning_counts, KnownHostsImportWarningKind::InvalidEntry);
+                add_warning(
+                    &mut warning_counts,
+                    KnownHostsImportWarningKind::InvalidEntry,
+                );
                 continue;
             }
         };
         let Some(blob_algorithm) = ssh_blob_algorithm(&key_blob) else {
-            add_warning(&mut warning_counts, KnownHostsImportWarningKind::InvalidEntry);
+            add_warning(
+                &mut warning_counts,
+                KnownHostsImportWarningKind::InvalidEntry,
+            );
             continue;
         };
         if blob_algorithm != declared_algorithm {
-            add_warning(&mut warning_counts, KnownHostsImportWarningKind::InvalidEntry);
+            add_warning(
+                &mut warning_counts,
+                KnownHostsImportWarningKind::InvalidEntry,
+            );
             continue;
         }
         if declared_algorithm.is_empty()
@@ -116,11 +141,17 @@ fn parse_known_hosts(
                 byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'@' | b'+')
             })
         {
-            add_warning(&mut warning_counts, KnownHostsImportWarningKind::UnsupportedKey);
+            add_warning(
+                &mut warning_counts,
+                KnownHostsImportWarningKind::UnsupportedKey,
+            );
             continue;
         }
 
-        let fingerprint_sha256 = format!("SHA256:{}", STANDARD_NO_PAD.encode(Sha256::digest(&key_blob)));
+        let fingerprint_sha256 = format!(
+            "SHA256:{}",
+            STANDARD_NO_PAD.encode(Sha256::digest(&key_blob))
+        );
         for host_pattern in fields[0].split(',') {
             if host_pattern.starts_with('|') {
                 add_warning(&mut warning_counts, KnownHostsImportWarningKind::HashedHost);
@@ -130,14 +161,24 @@ fn parse_known_hosts(
                 .chars()
                 .any(|character| matches!(character, '*' | '?' | '!'))
             {
-                add_warning(&mut warning_counts, KnownHostsImportWarningKind::HostPattern);
+                add_warning(
+                    &mut warning_counts,
+                    KnownHostsImportWarningKind::HostPattern,
+                );
                 continue;
             }
             let Some((host, port)) = parse_host_endpoint(host_pattern) else {
-                add_warning(&mut warning_counts, KnownHostsImportWarningKind::InvalidEntry);
+                add_warning(
+                    &mut warning_counts,
+                    KnownHostsImportWarningKind::InvalidEntry,
+                );
                 continue;
             };
-            let key = (host.to_ascii_lowercase(), port, declared_algorithm.to_owned());
+            let key = (
+                host.to_ascii_lowercase(),
+                port,
+                declared_algorithm.to_owned(),
+            );
             if conflicting.contains(&key) {
                 continue;
             }
@@ -146,7 +187,10 @@ fn parse_known_hosts(
                 Some(_) => {
                     entries.remove(&key);
                     conflicting.insert(key);
-                    add_warning(&mut warning_counts, KnownHostsImportWarningKind::ConflictingKey);
+                    add_warning(
+                        &mut warning_counts,
+                        KnownHostsImportWarningKind::ConflictingKey,
+                    );
                 }
                 None => {
                     entries.insert(
@@ -225,9 +269,9 @@ fn normalize_host(host: &str) -> Option<String> {
     let valid = host.split('.').all(|label| {
         !label.is_empty()
             && label.len() <= 63
-            && label.chars().all(|character| {
-                character.is_ascii_alphanumeric() || character == '-'
-            })
+            && label
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
     });
     valid.then(|| host.to_owned())
 }

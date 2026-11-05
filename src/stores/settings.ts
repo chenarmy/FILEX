@@ -21,6 +21,7 @@ export const useSettingsStore = defineStore('settings', () => {
     root.style.setProperty('--connections-pane-width', `${value.connectionsPaneWidth}px`);
     const inspectorWidth = value.dualPaneSftp ? Math.max(540, value.inspectorPaneWidth) : value.inspectorPaneWidth;
     root.style.setProperty('--inspector-pane-width', `${inspectorWidth}px`);
+    root.style.setProperty('--host-panel-width', `${value.hostPanelWidth}px`);
     root.style.setProperty('--task-drawer-height', `${value.taskDrawerHeight}px`);
     setLocale(value.locale);
   }

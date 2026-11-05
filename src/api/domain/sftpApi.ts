@@ -200,3 +200,23 @@ export async function copyRemoteEntry(
     return failure(normalizeUnknownError(error, 'SFTP_COPY_FAILED'));
   }
 }
+
+export async function updateRemoteEntryMode(
+  sessionId: string,
+  path: string,
+  mode: number,
+): Promise<OperationResult<void>> {
+  if (!isTauriRuntime()) {
+    return failure({
+      code: 'SFTP_DESKTOP_ONLY',
+      messageKey: 'errors.sshDesktopOnly',
+      retryable: false,
+      remoteState: 'not_applicable',
+    });
+  }
+  try {
+    return await invoke<OperationResult<void>>('update_remote_entry_mode', { sessionId, path, mode });
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'REMOTE_MODE_UPDATE_FAILED'));
+  }
+}

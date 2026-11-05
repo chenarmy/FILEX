@@ -14,6 +14,7 @@ const events = useEventsStore();
 const ui = useUiStore();
 const selectedId = ref<string | null>(null);
 const name = ref('');
+const folder = ref('');
 const command = ref('');
 const parameterValues = reactive<Record<string, string>>({});
 const parameters = computed(() => [...new Set(
@@ -33,6 +34,7 @@ const previewBytes = computed(() => new TextEncoder().encode(preview.value).byte
 const previewTooLong = computed(() => previewBytes.value > 10_000);
 
 function confirmationCommand(value: string): string {
+  // eslint-disable-next-line no-control-regex -- control characters are escaped on purpose
   return value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, (character) => {
     return `\\x${character.charCodeAt(0).toString(16).padStart(2, '0')}`;
   }).replace(/\r/g, '\\r').replace(/\t/g, '\\t');
@@ -43,6 +45,7 @@ onMounted(() => { void snippets.load(); });
 function clearEditor(): void {
   selectedId.value = null;
   name.value = '';
+  folder.value = '';
   command.value = '';
   Object.keys(parameterValues).forEach((key) => delete parameterValues[key]);
 }
@@ -50,14 +53,32 @@ function clearEditor(): void {
 function editSnippet(snippet: CommandSnippet): void {
   selectedId.value = snippet.id;
   name.value = snippet.name;
+  folder.value = snippet.folder ?? '';
   command.value = snippet.command;
   Object.keys(parameterValues).forEach((key) => delete parameterValues[key]);
 }
 
 async function save(): Promise<void> {
-  const saved = await snippets.save({ id: selectedId.value, name: name.value, command: command.value });
+  const trimmedFolder = folder.value.trim();
+  const saved = await snippets.save({
+    id: selectedId.value,
+    name: name.value,
+    folder: trimmedFolder || null,
+    command: command.value,
+  });
   if (saved) ui.notify(t('snippet.saved'));
 }
+
+const groupedItems = computed(() => {
+  const groups = new Map<string, CommandSnippet[]>();
+  for (const snippet of snippets.items) {
+    const key = snippet.folder?.trim() || '';
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(snippet);
+    else groups.set(key, [snippet]);
+  }
+  return [...groups.entries()].map(([groupFolder, items]) => ({ folder: groupFolder, items }));
+});
 
 async function remove(): Promise<void> {
   const snippet = snippets.items.find((item) => item.id === selectedId.value);
@@ -106,13 +127,17 @@ async function sendToTerminal(): Promise<void> {
       <button type="button" class="icon-button" :aria-label="t('snippet.new')" :title="t('snippet.new')" @click="clearEditor"><Plus :size="14" /></button>
     </header>
     <div class="snippet-list">
-      <button v-for="snippet in snippets.items" :key="snippet.id" type="button" class="snippet-item" :class="{ selected: selectedId === snippet.id }" @click="editSnippet(snippet)">
-        <strong>{{ snippet.name }}</strong><code>{{ snippet.command }}</code>
-      </button>
+      <section v-for="group in groupedItems" :key="group.folder || '_'" class="snippet-group">
+        <h3 v-if="group.folder">{{ group.folder }}</h3>
+        <button v-for="snippet in group.items" :key="snippet.id" type="button" class="snippet-item" :class="{ selected: selectedId === snippet.id }" @click="editSnippet(snippet)">
+          <strong>{{ snippet.name }}</strong><code>{{ snippet.command }}</code>
+        </button>
+      </section>
       <p v-if="!snippets.loading && snippets.items.length === 0" class="snippet-empty">{{ t('snippet.empty') }}</p>
     </div>
     <div class="snippet-editor">
       <label>{{ t('snippet.name') }}<input v-model="name" maxlength="100" :placeholder="t('snippet.namePlaceholder')"></label>
+      <label>{{ t('snippet.folder') }}<input v-model="folder" maxlength="64" :placeholder="t('snippet.folderPlaceholder')"></label>
       <label>{{ t('snippet.command') }}<textarea v-model="command" rows="4" maxlength="10000" spellcheck="false" :placeholder="t('snippet.commandPlaceholder')" /></label>
       <div v-if="parameters.length" class="snippet-parameters">
         <label v-for="parameter in parameters" :key="parameter">{{ parameter }}<input v-model="parameterValues[parameter]" maxlength="4096" :placeholder="parameter"></label>
@@ -135,7 +160,8 @@ async function sendToTerminal(): Promise<void> {
 .snippet-heading { display: flex; align-items: flex-start; justify-content: space-between; padding: 10px 10px 8px; border-bottom: 1px solid hsl(var(--border)); }
 .snippet-heading div { display: grid; gap: 4px; }
 .snippet-heading small, .snippet-preview small { color: hsl(var(--muted-foreground)); }
-.snippet-list { max-height: 150px; overflow: auto; border-bottom: 1px solid hsl(var(--border)); }
+.snippet-list { max-height: 180px; overflow: auto; border-bottom: 1px solid hsl(var(--border)); }
+.snippet-group h3 { margin: 8px 10px 2px; color: hsl(var(--muted-foreground)); font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
 .snippet-item { display: grid; gap: 4px; width: 100%; padding: 8px 10px; text-align: left; color: inherit; border: 0; border-bottom: 1px solid hsl(var(--border)); background: transparent; cursor: pointer; }
 .snippet-item:hover, .snippet-item.selected { background: hsl(var(--accent)); }
 .snippet-item code { overflow: hidden; color: hsl(var(--muted-foreground)); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }

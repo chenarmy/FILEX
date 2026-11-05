@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { CopyPlus, FileText, LockKeyhole, Plus, Search, SplitSquareVertical, X } from 'lucide-vue-next';
+import { CopyPlus, FileText, LockKeyhole, Plus, RefreshCw, Search, SplitSquareVertical, X } from 'lucide-vue-next';
 import TerminalPane from '@/components/terminal/TerminalPane.vue';
 import { isTauriRuntime } from '@/api/common';
 import { useConnectionsStore } from '@/stores/connections';
@@ -58,6 +58,19 @@ function formatLogBytes(bytes: number): string {
 function showLogError(): void {
   if (!terminalLogs.error) return;
   ui.notify(t(terminalLogs.error.messageKey as Parameters<typeof t>[0]));
+}
+
+const canReconnect = computed(() => Boolean(connections.activeProfile) && !sessions.busy && !sessions.challenge);
+const canDisconnect = computed(() => sessions.activeSession?.state === 'connected' && !sessions.busy);
+
+async function reconnect(): Promise<void> {
+  if (!canReconnect.value) return;
+  if (
+    sessions.activeSession
+    && connections.activeProfile?.id === sessions.activeSession.profileId
+    && ['disconnected', 'failed'].includes(sessions.activeSession.state)
+  ) await sessions.reconnectActive();
+  else if (connections.activeProfile) await sessions.begin(connections.activeProfile);
 }
 
 async function toggleTerminalLog(): Promise<void> {
@@ -278,114 +291,132 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
 
 <template>
   <section class="terminal-workspace" aria-label="Terminal workspace">
-    <div class="terminal-tabs" role="tablist" :aria-label="t('terminal.sessions')">
-      <div
-        v-for="session in sessions.summaries"
-        :key="session.id"
-        class="terminal-tab-item"
-        role="presentation"
-      >
+    <Teleport defer to="#session-tabs-slot">
+      <div class="terminal-tabs" role="tablist" :aria-label="t('terminal.sessions')">
+        <div
+          v-for="session in sessions.summaries"
+          :key="session.id"
+          class="terminal-tab-item"
+          role="presentation"
+        >
+          <button
+            type="button"
+            class="terminal-tab"
+            :class="{ active: session.id === sessions.activeSessionId }"
+            role="tab"
+            :aria-selected="session.id === sessions.activeSessionId"
+            @click="selectSessionTab(session.id)"
+          >
+            <span class="state-dot" :class="session.state" />
+            <span class="terminal-tab-name">{{ sessionName(session.profileId) }}</span>
+            <FileText
+              v-if="terminalLogs.statusFor(session.id)?.state === 'active'"
+              class="terminal-tab-log"
+              :size="10"
+              :aria-label="t('terminal.logActive', { size: formatLogBytes(terminalLogs.statusFor(session.id)?.bytes ?? 0) })"
+            />
+            <LockKeyhole v-if="session.state === 'connected'" class="terminal-tab-trust" :size="11" :aria-label="t('terminal.strictHostTrust')" :title="t('terminal.strictHostTrust')" />
+          </button>
+          <button
+            type="button"
+            class="terminal-tab-close"
+            :aria-label="t('terminal.closeSession')"
+            :title="t('terminal.closeSession')"
+            @click="sessions.closeSession(session.id)"
+          >
+            <X :size="12" />
+          </button>
+        </div>
         <button
           type="button"
-          class="terminal-tab"
-          :class="{ active: session.id === sessions.activeSessionId }"
-          role="tab"
-          :aria-selected="session.id === sessions.activeSessionId"
-          @click="selectSessionTab(session.id)"
+          class="icon-button"
+          :aria-label="t('terminal.newSession')"
+          :title="t('terminal.newSession')"
+          :disabled="!canStartSession"
+          @click="startNewSession"
         >
-          <span class="state-dot" :class="session.state" />
-          <span class="terminal-tab-name">{{ sessionName(session.profileId) }}</span>
-          <FileText
-            v-if="terminalLogs.statusFor(session.id)?.state === 'active'"
-            class="terminal-tab-log"
-            :size="10"
-            :aria-label="t('terminal.logActive', { size: formatLogBytes(terminalLogs.statusFor(session.id)?.bytes ?? 0) })"
-          />
-          <LockKeyhole v-if="session.state === 'connected'" class="terminal-tab-trust" :size="11" :aria-label="t('terminal.strictHostTrust')" :title="t('terminal.strictHostTrust')" />
+          <Plus :size="13" />
         </button>
         <button
           type="button"
-          class="terminal-tab-close"
-          :aria-label="t('terminal.closeSession')"
-          :title="t('terminal.closeSession')"
-          @click="sessions.closeSession(session.id)"
+          class="icon-button"
+          :aria-label="t('terminal.duplicateSession')"
+          :title="t('terminal.duplicateSession')"
+          :disabled="!canDuplicateActive"
+          @click="duplicateActiveSession"
         >
-          <X :size="12" />
+          <CopyPlus :size="13" />
+        </button>
+        <span class="terminal-tabs-spacer" />
+        <button
+          type="button"
+          class="terminal-layout-button"
+          :class="{ active: layout === 'vertical' }"
+          :aria-label="t('terminal.splitVertical')"
+          :title="t('terminal.splitVertical')"
+          :disabled="!canDuplicateActive"
+          @click="createSplit('vertical')"
+        >
+          <SplitSquareVertical :size="13" />
+        </button>
+        <button
+          type="button"
+          class="terminal-layout-button"
+          :class="{ active: layout === 'horizontal' }"
+          :aria-label="t('terminal.splitHorizontal')"
+          :title="t('terminal.splitHorizontal')"
+          :disabled="!canDuplicateActive"
+          @click="createSplit('horizontal')"
+        >
+          <SplitSquareVertical class="horizontal-split-icon" :size="13" />
+        </button>
+        <span
+          v-if="logStatusText"
+          class="terminal-log-indicator"
+          :class="{ active: activeLogRunning }"
+          role="status"
+        >{{ logStatusText }}</span>
+        <button
+          type="button"
+          class="terminal-layout-button"
+          :class="{ active: activeLogRunning }"
+          :aria-label="t(activeLogRunning ? 'terminal.logStop' : 'terminal.logStart')"
+          :aria-pressed="activeLogRunning"
+          :title="t(activeLogRunning ? 'terminal.logStop' : 'terminal.logStart')"
+          :disabled="!canToggleLog"
+          @click="toggleTerminalLog"
+        >
+          <FileText :size="13" />
+        </button>
+        <button
+          type="button"
+          class="icon-button"
+          :aria-label="t('terminal.search')"
+          :title="t('terminal.search')"
+          :disabled="!sessions.activeSession"
+          @click="openSearch()"
+        >
+          <Search :size="13" />
+        </button>
+        <span class="terminal-tabs-spacer compact" />
+        <button
+          type="button"
+          class="toolbar-button reconnect-button"
+          :disabled="!canReconnect"
+          @click="reconnect"
+        >
+          <RefreshCw :size="13" />{{ t('terminal.reconnect') }}
+        </button>
+        <button
+          type="button"
+          class="toolbar-button"
+          :disabled="!canDisconnect"
+          @click="sessions.disconnectActive"
+        >
+          <X :size="13" />{{ t('terminal.disconnect') }}
         </button>
       </div>
-      <button
-        type="button"
-        class="icon-button"
-        :aria-label="t('terminal.newSession')"
-        :title="t('terminal.newSession')"
-        :disabled="!canStartSession"
-        @click="startNewSession"
-      >
-        <Plus :size="13" />
-      </button>
-      <button
-        type="button"
-        class="icon-button"
-        :aria-label="t('terminal.duplicateSession')"
-        :title="t('terminal.duplicateSession')"
-        :disabled="!canDuplicateActive"
-        @click="duplicateActiveSession"
-      >
-        <CopyPlus :size="13" />
-      </button>
-      <span class="terminal-tabs-spacer" />
-      <button
-        type="button"
-        class="terminal-layout-button"
-        :class="{ active: layout === 'vertical' }"
-        :aria-label="t('terminal.splitVertical')"
-        :title="t('terminal.splitVertical')"
-        :disabled="!canDuplicateActive"
-        @click="createSplit('vertical')"
-      >
-        <SplitSquareVertical :size="13" />
-      </button>
-      <button
-        type="button"
-        class="terminal-layout-button"
-        :class="{ active: layout === 'horizontal' }"
-        :aria-label="t('terminal.splitHorizontal')"
-        :title="t('terminal.splitHorizontal')"
-        :disabled="!canDuplicateActive"
-        @click="createSplit('horizontal')"
-      >
-        <SplitSquareVertical class="horizontal-split-icon" :size="13" />
-      </button>
-      <span
-        v-if="logStatusText"
-        class="terminal-log-indicator"
-        :class="{ active: activeLogRunning }"
-        role="status"
-      >{{ logStatusText }}</span>
-      <button
-        type="button"
-        class="terminal-layout-button"
-        :class="{ active: activeLogRunning }"
-        :aria-label="t(activeLogRunning ? 'terminal.logStop' : 'terminal.logStart')"
-        :aria-pressed="activeLogRunning"
-        :title="t(activeLogRunning ? 'terminal.logStop' : 'terminal.logStart')"
-        :disabled="!canToggleLog"
-        @click="toggleTerminalLog"
-      >
-        <FileText :size="13" />
-      </button>
-      <button
-        type="button"
-        class="icon-button"
-        :aria-label="t('terminal.search')"
-        :title="t('terminal.search')"
-        :disabled="!sessions.activeSession"
-        @click="openSearch()"
-      >
-        <Search :size="13" />
-      </button>
-      <span class="terminal-tabs-spacer compact" />
-    </div>
+    </Teleport>
 
     <div class="terminal-pane-grid" :class="'layout-' + layout">
       <TerminalPane
@@ -409,13 +440,15 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
 <style scoped>
 .terminal-workspace {
   display: grid;
-  grid-template-rows: 31px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   width: 100%;
   height: 100%;
   min-width: 0;
   min-height: 0;
 }
 
+/* The tab strip is teleported into the shell's #session-tabs-slot; keep its
+   layout here so all tab behavior stays in one component. */
 .terminal-tabs {
   display: flex;
   min-width: 0;
@@ -423,8 +456,7 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
   gap: 3px;
   padding-inline: 4px;
   overflow-x: auto;
-  background: hsl(var(--card));
-  border-bottom: 1px solid hsl(var(--border));
+  background: transparent;
   scrollbar-width: thin;
 }
 

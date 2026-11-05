@@ -1,5 +1,5 @@
-mod profile_export;
 mod known_hosts;
+mod profile_export;
 mod session_runtime;
 mod terminal_logging;
 
@@ -17,17 +17,17 @@ use std::{
 };
 
 use filex_contracts::{
-    AppError, AuthenticationMethod, CommandSnippet, ConnectionProfile,
-    ConnectionState, CreateConnectionProfileInput, CreateLocalTunnelInput, CreateTransferInput,
+    AppError, AuthenticationMethod, CommandSnippet, ConnectionProfile, ConnectionState,
+    CreateConnectionProfileInput, CreateLocalTunnelInput, CreateTransferInput,
     CreateTunnelRuleInput, CredentialStoreStatus, DirectorySyncPreview, EnvironmentKind,
     FileChecksumComparison, HostKeyChallenge, HostTrustEvaluation, HostTrustRecord,
-    ImportKnownHostsInput, ImportKnownHostsResult, KnownHostsImportPreview,
-    LocalDirectoryListing, LocalFileEntry, MaintenanceArtifact, OperationResult, ProcessSnapshot,
-    QuickConnectInput, RecordHostTrustInput, RemoteFileEntry, RemoteState, RemoteTextPreview,
-    RemoteTextSaveResult, RuntimePaths,
-    SafeSettings, SaveCommandSnippetInput, SessionConnectionProgress, SessionSummary, SshConfigImportPreview,
-    SystemMonitorSnapshot, TransferState, TransferTask, TunnelRule, TunnelSummary,
-    UpdateConnectionProfileInput, UpdateStatus, UpdateTunnelRuleInput,
+    ImportKnownHostsInput, ImportKnownHostsResult, KnownHostsImportPreview, LocalDirectoryListing,
+    LocalFileEntry, LocalTextPreview, LocalTextSaveResult, MaintenanceArtifact, OperationResult,
+    ProcessSnapshot, QuickConnectInput, RecordHostTrustInput, RemoteFileEntry, RemoteState,
+    RemoteTextPreview, RemoteTextSaveResult, RuntimePaths, SafeSettings, SaveCommandSnippetInput,
+    SessionConnectionProgress, SessionSummary, SshConfigImportPreview, SystemMonitorSnapshot,
+    TransferState, TransferTask, TunnelRule, TunnelSummary, UpdateConnectionProfileInput,
+    UpdateStatus, UpdateTunnelRuleInput,
 };
 use filex_core::{
     HostTrustService, ProfileService, SettingsService, TransferService, TunnelRuleService,
@@ -39,11 +39,11 @@ use filex_storage::SqliteProfileRepository;
 use futures_util::StreamExt;
 use serde::Serialize;
 use session_runtime::{CopyOperationControl, SessionRuntime};
-use terminal_logging::TerminalLogRuntime;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_updater::UpdaterExt;
 use tempfile::NamedTempFile;
+use terminal_logging::TerminalLogRuntime;
 use tokio_util::sync::CancellationToken;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -141,6 +141,7 @@ fn save_command_snippet(
             return OperationResult::failure(snippet_error("SNIPPET_NOT_FOUND"));
         };
         snippet.name = normalized_name.to_owned();
+        snippet.folder = normalized_folder(&input.folder);
         snippet.command = input.command.trim().to_owned();
         snippet.updated_at_ms = now;
         snippet.clone()
@@ -148,6 +149,7 @@ fn save_command_snippet(
         let snippet = CommandSnippet {
             id: uuid::Uuid::new_v4().to_string(),
             name: normalized_name.to_owned(),
+            folder: normalized_folder(&input.folder),
             command: input.command.trim().to_owned(),
             created_at_ms: now,
             updated_at_ms: now,
@@ -220,6 +222,12 @@ fn validate_snippet(input: &SaveCommandSnippetInput) -> Result<(), AppError> {
     if name.is_empty() || name.chars().count() > 100 || command.is_empty() {
         return Err(snippet_error("SNIPPET_INVALID"));
     }
+    if let Some(folder) = input.folder.as_deref() {
+        let folder = folder.trim();
+        if folder.chars().count() > 64 || folder.contains('\0') {
+            return Err(snippet_error("SNIPPET_INVALID"));
+        }
+    }
     if command.len() > 10_000 || command.contains('\0') {
         return Err(snippet_error("SNIPPET_INVALID"));
     }
@@ -256,6 +264,14 @@ fn validate_snippet(input: &SaveCommandSnippetInput) -> Result<(), AppError> {
         return Err(snippet_error("SNIPPET_INVALID"));
     }
     Ok(())
+}
+
+fn normalized_folder(folder: &Option<String>) -> Option<String> {
+    folder
+        .as_deref()
+        .map(str::trim)
+        .filter(|folder| !folder.is_empty())
+        .map(str::to_owned)
 }
 
 fn snippet_error(code: &str) -> AppError {
@@ -391,9 +407,9 @@ impl CopyOperationRuntime {
     fn register(&self, operation_id: &str) -> Result<CopyOperationLease, AppError> {
         if operation_id.is_empty()
             || operation_id.len() > 64
-            || !operation_id
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+            || !operation_id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
         {
             return Err(local_file_operation_error());
         }
@@ -641,56 +657,58 @@ async fn select_assistant_context_file(
     assistant: State<'_, AssistantRuntime>,
 ) -> Result<OperationResult<Option<AssistantContextFileReference>>, ()> {
     Ok(async {
-    let locale = settings
-        .load()
-        .map(|settings| settings.locale)
-        .unwrap_or_else(|_| "zh-CN".to_owned());
-    let (dialog_title, filter_label) = if locale == "zh-CN" {
-        ("选择 AI 助手上下文文件", "文本与配置文件")
-    } else {
-        ("Select an AI assistant context file", "Text and configuration files")
-    };
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .file()
-        .set_title(dialog_title)
-        .add_filter(filter_label, ASSISTANT_CONTEXT_FILE_EXTENSIONS)
-        .pick_file(move |selected_path| {
-            let _ = sender.send(selected_path);
-        });
-    let selected_path = match receiver.await {
-        Ok(Some(path)) => path,
-        Ok(None) => return OperationResult::success(None),
-        Err(_) => {
-            return OperationResult::failure(assistant_error(
-                "ASSISTANT_CONTEXT_FILE_DIALOG_FAILED",
-            ));
-        }
-    };
-    let path = match selected_path.into_path() {
-        Ok(path) => path,
-        Err(_) => {
-            return OperationResult::failure(assistant_error("ASSISTANT_CONTEXT_FILE_INVALID"));
-        }
-    };
-    let file = tauri::async_runtime::spawn_blocking(move || {
-        read_assistant_context_file(&path)
-    })
-    .await;
-    let file = match file {
-        Ok(Ok(file)) => file,
-        Ok(Err(error)) => return OperationResult::failure(error),
-        Err(_) => {
-            return OperationResult::failure(assistant_error(
-                "ASSISTANT_CONTEXT_FILE_READ_FAILED",
-            ));
-        }
-    };
+        let locale = settings
+            .load()
+            .map(|settings| settings.locale)
+            .unwrap_or_else(|_| "zh-CN".to_owned());
+        let (dialog_title, filter_label) = if locale == "zh-CN" {
+            ("选择 AI 助手上下文文件", "文本与配置文件")
+        } else {
+            (
+                "Select an AI assistant context file",
+                "Text and configuration files",
+            )
+        };
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        app.dialog()
+            .file()
+            .set_title(dialog_title)
+            .add_filter(filter_label, ASSISTANT_CONTEXT_FILE_EXTENSIONS)
+            .pick_file(move |selected_path| {
+                let _ = sender.send(selected_path);
+            });
+        let selected_path = match receiver.await {
+            Ok(Some(path)) => path,
+            Ok(None) => return OperationResult::success(None),
+            Err(_) => {
+                return OperationResult::failure(assistant_error(
+                    "ASSISTANT_CONTEXT_FILE_DIALOG_FAILED",
+                ));
+            }
+        };
+        let path = match selected_path.into_path() {
+            Ok(path) => path,
+            Err(_) => {
+                return OperationResult::failure(assistant_error("ASSISTANT_CONTEXT_FILE_INVALID"));
+            }
+        };
+        let file =
+            tauri::async_runtime::spawn_blocking(move || read_assistant_context_file(&path)).await;
+        let file = match file {
+            Ok(Ok(file)) => file,
+            Ok(Err(error)) => return OperationResult::failure(error),
+            Err(_) => {
+                return OperationResult::failure(assistant_error(
+                    "ASSISTANT_CONTEXT_FILE_READ_FAILED",
+                ));
+            }
+        };
         match assistant.store_context_file(file) {
             Ok(reference) => OperationResult::success(Some(reference)),
             Err(error) => OperationResult::failure(error),
         }
-    }.await)
+    }
+    .await)
 }
 
 #[tauri::command]
@@ -720,24 +738,23 @@ fn read_assistant_context_file(path: &Path) -> Result<AssistantContextFileData, 
         .map(str::to_ascii_lowercase)
         .filter(|extension| ASSISTANT_CONTEXT_FILE_EXTENSIONS.contains(&extension.as_str()))
         .ok_or_else(|| assistant_error("ASSISTANT_CONTEXT_FILE_INVALID"))?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| {
-            !name.is_empty()
-                && name.chars().count() <= 255
-                && !name.contains('/')
-                && !name.contains('\\')
-                && !name.chars().any(|character| {
+    let file_name =
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| {
+                !name.is_empty()
+                    && name.chars().count() <= 255
+                    && !name.contains('/')
+                    && !name.contains('\\') && !name.chars().any(|character| {
                     character.is_control()
                         || matches!(character, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
                 })
-        })
-        .ok_or_else(|| assistant_error("ASSISTANT_CONTEXT_FILE_INVALID"))?
-        .to_owned();
+            })
+            .ok_or_else(|| assistant_error("ASSISTANT_CONTEXT_FILE_INVALID"))?
+            .to_owned();
 
-    let file = fs::File::open(path)
-        .map_err(|_| assistant_error("ASSISTANT_CONTEXT_FILE_INVALID"))?;
+    let file =
+        fs::File::open(path).map_err(|_| assistant_error("ASSISTANT_CONTEXT_FILE_INVALID"))?;
     let mut reader = file.take((ASSISTANT_CONTEXT_FILE_MAX_BYTES + 1) as u64);
     let mut bytes = Zeroizing::new(Vec::with_capacity(ASSISTANT_CONTEXT_FILE_MAX_BYTES + 1));
     reader
@@ -1176,160 +1193,140 @@ async fn stream_assistant_response(
     assistant: State<'_, AssistantRuntime>,
 ) -> Result<OperationResult<()>, ()> {
     Ok(async {
-    let request_id = request.request_id.clone();
-    let fail = |code: &str| {
-        let error = assistant_error(code);
-        let _ = app.emit(
-            "assistant-chunk",
-            AssistantChunk {
-                request_id: request_id.clone(),
-                text: String::new(),
-                done: true,
-                error: Some(error),
-            },
-        );
-        OperationResult::failure(assistant_error(code))
-    };
-    if request_id.is_empty() || request_id.len() > 128 {
-        return fail("ASSISTANT_PROMPT_INVALID");
-    }
-    let request_guard = match assistant.start(&request_id) {
-        Ok(guard) => guard,
-        Err(error) => return OperationResult::failure(error),
-    };
-    let token = request_guard.token().clone();
-    if request.prompt.trim().is_empty()
-        || request.prompt.len() > 20_000
-        || !matches!(request.mode.as_str(), "explain" | "draft")
-        || request.history.len() > 12
-        || request.history.iter().any(|turn| {
-            (turn.role != "user" && turn.role != "assistant") || turn.content.len() > 32_000
-        })
-        || request.context_file_ids.len() > ASSISTANT_CONTEXT_FILE_REQUEST_LIMIT
-        || request
-            .context_file_ids
-            .iter()
-            .any(|id| id.is_empty() || id.len() > 128)
-        || request.context_file_ids.iter().collect::<HashSet<_>>().len()
-            != request.context_file_ids.len()
-    {
-        return fail("ASSISTANT_PROMPT_INVALID");
-    }
-    if request
-        .context
-        .as_ref()
-        .is_some_and(|context| context.len() > ASSISTANT_CONTEXT_INPUT_MAX_BYTES)
-    {
-        return fail("ASSISTANT_CONTEXT_INVALID");
-    }
-    let provider_guard = match assistant.provider_lock.lock() {
-        Ok(guard) => guard,
-        Err(_) => return fail("ASSISTANT_CONFIG_INVALID"),
-    };
-    let Some(raw) = (match repository.read_app_setting(ASSISTANT_PROVIDER_KEY) {
-        Ok(raw) => raw,
-        Err(error) => return OperationResult::failure(error),
-    }) else {
-        return fail("ASSISTANT_NOT_CONFIGURED");
-    };
-    let provider = match serde_json::from_str::<AssistantProvider>(&raw) {
-        Ok(provider) if valid_assistant_provider(&provider) => provider,
-        _ => return fail("ASSISTANT_CONFIG_INVALID"),
-    };
-    if !provider.external_data_consent {
-        return fail("ASSISTANT_CONSENT_REQUIRED");
-    }
-    let endpoint = match assistant_completion_endpoint(&provider.endpoint) {
-        Some(endpoint) => endpoint,
-        None => return fail("ASSISTANT_CONFIG_INVALID"),
-    };
-    let mut context_files = Vec::with_capacity(request.context_file_ids.len());
-    for id in &request.context_file_ids {
-        match assistant.context_file_content(id) {
-            Ok(content) => context_files.push(content),
-            Err(error) => return fail(&error.code),
+        let request_id = request.request_id.clone();
+        let fail = |code: &str| {
+            let error = assistant_error(code);
+            let _ = app.emit(
+                "assistant-chunk",
+                AssistantChunk {
+                    request_id: request_id.clone(),
+                    text: String::new(),
+                    done: true,
+                    error: Some(error),
+                },
+            );
+            OperationResult::failure(assistant_error(code))
+        };
+        if request_id.is_empty() || request_id.len() > 128 {
+            return fail("ASSISTANT_PROMPT_INVALID");
         }
-    }
-    let secret = match credentials.get(&provider.credential_ref) {
-        Ok(secret) => secret,
-        Err(error) => return OperationResult::failure(map_credential_error(&error)),
-    };
-    drop(provider_guard);
-    let client = match reqwest::Client::builder()
-        .connect_timeout(ASSISTANT_CONNECT_TIMEOUT)
-        .timeout(ASSISTANT_REQUEST_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return fail("ASSISTANT_PROVIDER_FAILED"),
-    };
-    let mut messages = build_assistant_messages_with_context_files(
-        &request.mode,
-        &request.prompt,
-        request.context.as_deref(),
-        &context_files,
-        &request.history,
-    );
-    drop(context_files);
-    let provider_request = assistant_provider_request(
-        &client,
-        endpoint,
-        secret.expose(),
-        &provider.model,
-        &messages,
-    );
-    zeroize_assistant_messages(&mut messages);
-    let request = match provider_request {
-        Some(request) => request,
-        None => return fail("ASSISTANT_PROVIDER_FAILED"),
-    };
-    let send = client.execute(request);
-    let response = tokio::select! {
-        biased;
-        _ = token.cancelled() => {
-            return fail("ASSISTANT_CANCELLED");
-        }
-        response = send => response
-    };
-    let response = match response {
-        Ok(response) if response.status().is_success() => response,
-        Ok(response) if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
-            return fail("ASSISTANT_RATE_LIMITED");
-        }
-        Ok(response)
-            if response.status() == reqwest::StatusCode::UNAUTHORIZED
-                || response.status() == reqwest::StatusCode::FORBIDDEN =>
+        let request_guard = match assistant.start(&request_id) {
+            Ok(guard) => guard,
+            Err(error) => return OperationResult::failure(error),
+        };
+        let token = request_guard.token().clone();
+        if request.prompt.trim().is_empty()
+            || request.prompt.len() > 20_000
+            || !matches!(request.mode.as_str(), "explain" | "draft")
+            || request.history.len() > 12
+            || request.history.iter().any(|turn| {
+                (turn.role != "user" && turn.role != "assistant") || turn.content.len() > 32_000
+            })
+            || request.context_file_ids.len() > ASSISTANT_CONTEXT_FILE_REQUEST_LIMIT
+            || request
+                .context_file_ids
+                .iter()
+                .any(|id| id.is_empty() || id.len() > 128)
+            || request
+                .context_file_ids
+                .iter()
+                .collect::<HashSet<_>>()
+                .len()
+                != request.context_file_ids.len()
         {
-            return fail("ASSISTANT_PROVIDER_AUTH_FAILED");
+            return fail("ASSISTANT_PROMPT_INVALID");
         }
-        Ok(_) => {
-            return fail("ASSISTANT_PROVIDER_FAILED");
+        if request
+            .context
+            .as_ref()
+            .is_some_and(|context| context.len() > ASSISTANT_CONTEXT_INPUT_MAX_BYTES)
+        {
+            return fail("ASSISTANT_CONTEXT_INVALID");
         }
-        Err(error) if error.is_timeout() => {
-            return fail("ASSISTANT_PROVIDER_TIMEOUT");
+        let provider_guard = match assistant.provider_lock.lock() {
+            Ok(guard) => guard,
+            Err(_) => return fail("ASSISTANT_CONFIG_INVALID"),
+        };
+        let Some(raw) = (match repository.read_app_setting(ASSISTANT_PROVIDER_KEY) {
+            Ok(raw) => raw,
+            Err(error) => return OperationResult::failure(error),
+        }) else {
+            return fail("ASSISTANT_NOT_CONFIGURED");
+        };
+        let provider = match serde_json::from_str::<AssistantProvider>(&raw) {
+            Ok(provider) if valid_assistant_provider(&provider) => provider,
+            _ => return fail("ASSISTANT_CONFIG_INVALID"),
+        };
+        if !provider.external_data_consent {
+            return fail("ASSISTANT_CONSENT_REQUIRED");
         }
-        Err(_) => {
-            return fail("ASSISTANT_PROVIDER_FAILED");
+        let endpoint = match assistant_completion_endpoint(&provider.endpoint) {
+            Some(endpoint) => endpoint,
+            None => return fail("ASSISTANT_CONFIG_INVALID"),
+        };
+        let mut context_files = Vec::with_capacity(request.context_file_ids.len());
+        for id in &request.context_file_ids {
+            match assistant.context_file_content(id) {
+                Ok(content) => context_files.push(content),
+                Err(error) => return fail(&error.code),
+            }
         }
-    };
-    let mut stream = response.bytes_stream();
-    let mut pending = Vec::new();
-    let mut event_data = String::new();
-    let mut response_bytes = 0_usize;
-    let mut malformed_stream = false;
-    let mut stream_done = false;
-    'stream: loop {
-        let next = tokio::select! {
+        let secret = match credentials.get(&provider.credential_ref) {
+            Ok(secret) => secret,
+            Err(error) => return OperationResult::failure(map_credential_error(&error)),
+        };
+        drop(provider_guard);
+        let client = match reqwest::Client::builder()
+            .connect_timeout(ASSISTANT_CONNECT_TIMEOUT)
+            .timeout(ASSISTANT_REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+        {
+            Ok(client) => client,
+            Err(_) => return fail("ASSISTANT_PROVIDER_FAILED"),
+        };
+        let mut messages = build_assistant_messages_with_context_files(
+            &request.mode,
+            &request.prompt,
+            request.context.as_deref(),
+            &context_files,
+            &request.history,
+        );
+        drop(context_files);
+        let provider_request = assistant_provider_request(
+            &client,
+            endpoint,
+            secret.expose(),
+            &provider.model,
+            &messages,
+        );
+        zeroize_assistant_messages(&mut messages);
+        let request = match provider_request {
+            Some(request) => request,
+            None => return fail("ASSISTANT_PROVIDER_FAILED"),
+        };
+        let send = client.execute(request);
+        let response = tokio::select! {
             biased;
             _ = token.cancelled() => {
                 return fail("ASSISTANT_CANCELLED");
             }
-            item = stream.next() => item,
+            response = send => response
         };
-        let Some(item) = next else { break };
-        let bytes = match item {
-            Ok(bytes) => bytes,
+        let response = match response {
+            Ok(response) if response.status().is_success() => response,
+            Ok(response) if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                return fail("ASSISTANT_RATE_LIMITED");
+            }
+            Ok(response)
+                if response.status() == reqwest::StatusCode::UNAUTHORIZED
+                    || response.status() == reqwest::StatusCode::FORBIDDEN =>
+            {
+                return fail("ASSISTANT_PROVIDER_AUTH_FAILED");
+            }
+            Ok(_) => {
+                return fail("ASSISTANT_PROVIDER_FAILED");
+            }
             Err(error) if error.is_timeout() => {
                 return fail("ASSISTANT_PROVIDER_TIMEOUT");
             }
@@ -1337,53 +1334,78 @@ async fn stream_assistant_response(
                 return fail("ASSISTANT_PROVIDER_FAILED");
             }
         };
-        response_bytes = response_bytes.saturating_add(bytes.len());
-        pending.extend_from_slice(&bytes);
-        if pending.len() > 256_000 || response_bytes > 1_000_000 {
-            return fail("ASSISTANT_RESPONSE_LIMIT");
-        }
-        while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
-            let line = pending.drain(..=newline).collect::<Vec<_>>();
-            let line = String::from_utf8_lossy(&line);
-            match consume_assistant_sse_line(&line, &mut event_data, &app, &request_id) {
-                Ok(true) => {
-                    stream_done = true;
-                    break 'stream;
+        let mut stream = response.bytes_stream();
+        let mut pending = Vec::new();
+        let mut event_data = String::new();
+        let mut response_bytes = 0_usize;
+        let mut malformed_stream = false;
+        let mut stream_done = false;
+        'stream: loop {
+            let next = tokio::select! {
+                biased;
+                _ = token.cancelled() => {
+                    return fail("ASSISTANT_CANCELLED");
                 }
-                Ok(false) => {}
-                Err(()) => {
-                    malformed_stream = true;
-                    break 'stream;
+                item = stream.next() => item,
+            };
+            let Some(item) = next else { break };
+            let bytes = match item {
+                Ok(bytes) => bytes,
+                Err(error) if error.is_timeout() => {
+                    return fail("ASSISTANT_PROVIDER_TIMEOUT");
+                }
+                Err(_) => {
+                    return fail("ASSISTANT_PROVIDER_FAILED");
+                }
+            };
+            response_bytes = response_bytes.saturating_add(bytes.len());
+            pending.extend_from_slice(&bytes);
+            if pending.len() > 256_000 || response_bytes > 1_000_000 {
+                return fail("ASSISTANT_RESPONSE_LIMIT");
+            }
+            while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+                let line = pending.drain(..=newline).collect::<Vec<_>>();
+                let line = String::from_utf8_lossy(&line);
+                match consume_assistant_sse_line(&line, &mut event_data, &app, &request_id) {
+                    Ok(true) => {
+                        stream_done = true;
+                        break 'stream;
+                    }
+                    Ok(false) => {}
+                    Err(()) => {
+                        malformed_stream = true;
+                        break 'stream;
+                    }
                 }
             }
         }
-    }
-    if malformed_stream {
-        return fail("ASSISTANT_PROVIDER_FAILED");
-    }
-    if !stream_done && !pending.is_empty() {
-        let line = String::from_utf8_lossy(&pending);
-        if consume_assistant_sse_line(&line, &mut event_data, &app, &request_id).is_err() {
+        if malformed_stream {
             return fail("ASSISTANT_PROVIDER_FAILED");
         }
-    }
-    if !stream_done
-        && !event_data.is_empty()
-        && emit_assistant_sse_event(&event_data, &app, &request_id).is_err()
-    {
-        return fail("ASSISTANT_PROVIDER_FAILED");
-    }
-    let _ = app.emit(
-        "assistant-chunk",
-        AssistantChunk {
-            request_id,
-            text: String::new(),
-            done: true,
-            error: None,
-        },
-    );
+        if !stream_done && !pending.is_empty() {
+            let line = String::from_utf8_lossy(&pending);
+            if consume_assistant_sse_line(&line, &mut event_data, &app, &request_id).is_err() {
+                return fail("ASSISTANT_PROVIDER_FAILED");
+            }
+        }
+        if !stream_done
+            && !event_data.is_empty()
+            && emit_assistant_sse_event(&event_data, &app, &request_id).is_err()
+        {
+            return fail("ASSISTANT_PROVIDER_FAILED");
+        }
+        let _ = app.emit(
+            "assistant-chunk",
+            AssistantChunk {
+                request_id,
+                text: String::new(),
+                done: true,
+                error: None,
+            },
+        );
         OperationResult::success(())
-    }.await)
+    }
+    .await)
 }
 
 #[tauri::command]
@@ -1522,9 +1544,8 @@ fn consume_assistant_sse_line(
         if event_data.is_empty() {
             return Ok(false);
         }
-        return emit_assistant_sse_event(event_data, app, request_id).map(|done| {
+        return emit_assistant_sse_event(event_data, app, request_id).inspect(|_done| {
             event_data.clear();
-            done
         });
     }
     let Some(data) = line.strip_prefix("data:") else {
@@ -1580,20 +1601,20 @@ fn redact_assistant_text(input: &str) -> String {
         return text.into_owned();
     };
     let text = url_credentials.replace_all(&text, "$1:[REDACTED]@");
-    let Ok(assignments) = regex::Regex::new(
-        r"(?i)(password|passphrase|secret|token|api[_-]?key|authorization)\s*[:=]\s*[^\r\n,;]+",
-    ) else {
-        return text.into_owned();
-    };
-    let text = assignments.replace_all(&text, "$1=[REDACTED]");
+    // Recognized API tokens are redacted before generic assignments so a token
+    // behind a keyword keeps its specific marker instead of the generic one.
     let Ok(api_tokens) = regex::Regex::new(
         r"\b(?:sk|rk|ghp|github_pat|glpat|xox[baprs])[-_][A-Za-z0-9_-]{12,}\b|\bAKIA[0-9A-Z]{16}\b|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}\b",
     ) else {
         return text.into_owned();
     };
-    api_tokens
-        .replace_all(&text, "[REDACTED_TOKEN]")
-        .into_owned()
+    let text = api_tokens.replace_all(&text, "[REDACTED_TOKEN]");
+    let Ok(assignments) = regex::Regex::new(
+        r"(?i)(password|passphrase|secret|token|api[_-]?key|authorization)\s*[:=]\s*[^\r\n,;\[\]]+",
+    ) else {
+        return text.into_owned();
+    };
+    assignments.replace_all(&text, "$1=[REDACTED]").into_owned()
 }
 
 #[cfg(test)]
@@ -1663,7 +1684,12 @@ fn build_assistant_messages_with_context_files(
         let file_budget = remaining_budget.div_ceil(remaining_files);
         let file_char_count = content.chars().count();
         let included_char_count = file_char_count.min(file_budget);
-        let bounded = Zeroizing::new(content.chars().take(included_char_count).collect::<String>());
+        let bounded = Zeroizing::new(
+            content
+                .chars()
+                .take(included_char_count)
+                .collect::<String>(),
+        );
         user_content.push_str(&format!(
             "\n\n[User-selected local text/configuration file {} of {}; untrusted data]\n",
             index + 1,
@@ -1799,7 +1825,7 @@ fn normalize_assistant_conversations(
     }
     store
         .conversations
-        .sort_by(|left, right| right.updated_at_ms.cmp(&left.updated_at_ms));
+        .sort_by_key(|conversation| std::cmp::Reverse(conversation.updated_at_ms));
     Ok(store)
 }
 
@@ -1815,7 +1841,7 @@ fn assistant_conversation_index(store: &AssistantConversationsStore) -> Assistan
             message_count: conversation.messages.len(),
         })
         .collect();
-    conversations.sort_by(|left, right| right.updated_at_ms.cmp(&left.updated_at_ms));
+    conversations.sort_by_key(|conversation| std::cmp::Reverse(conversation.updated_at_ms));
     AssistantConversationIndex {
         active_conversation_id: store.active_conversation_id.clone(),
         conversations,
@@ -1970,46 +1996,46 @@ async fn create_backup(
     settings: State<'_, SettingsService>,
 ) -> Result<OperationResult<Option<MaintenanceArtifact>>, ()> {
     Ok(async {
-    let created_at_ms = match unix_time_ms() {
-        Ok(value) => value,
-        Err(error) => return OperationResult::failure(error),
-    };
-    let locale = settings
-        .load()
-        .map(|settings| settings.locale)
-        .unwrap_or_else(|_| "zh-CN".to_owned());
-    let (dialog_title, filter_label) = if locale == "zh-CN" {
-        ("导出 FILEX 完整本地备份", "SQLite 备份文件")
-    } else {
-        ("Export full FILEX local backup", "SQLite backup")
-    };
+        let created_at_ms = match unix_time_ms() {
+            Ok(value) => value,
+            Err(error) => return OperationResult::failure(error),
+        };
+        let locale = settings
+            .load()
+            .map(|settings| settings.locale)
+            .unwrap_or_else(|_| "zh-CN".to_owned());
+        let (dialog_title, filter_label) = if locale == "zh-CN" {
+            ("导出 FILEX 完整本地备份", "SQLite 备份文件")
+        } else {
+            ("Export full FILEX local backup", "SQLite backup")
+        };
 
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .file()
-        .set_title(dialog_title)
-        .set_file_name(format!("filex-backup-{created_at_ms}.sqlite3"))
-        .add_filter(filter_label, &["sqlite3", "sqlite", "db"])
-        .save_file(move |selected_path| {
-            let _ = sender.send(selected_path);
-        });
-    let selected_path = match receiver.await {
-        Ok(Some(path)) => path,
-        Ok(None) => return OperationResult::success(None),
-        Err(_) => return OperationResult::failure(maintenance_error("BACKUP_DIALOG_FAILED")),
-    };
-    let path = match selected_path.into_path() {
-        Ok(path) => path,
-        Err(_) => return OperationResult::failure(maintenance_error("BACKUP_PATH_INVALID")),
-    };
-    if path.exists() {
-        return OperationResult::failure(backup_destination_exists_error());
-    }
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        app.dialog()
+            .file()
+            .set_title(dialog_title)
+            .set_file_name(format!("filex-backup-{created_at_ms}.sqlite3"))
+            .add_filter(filter_label, &["sqlite3", "sqlite", "db"])
+            .save_file(move |selected_path| {
+                let _ = sender.send(selected_path);
+            });
+        let selected_path = match receiver.await {
+            Ok(Some(path)) => path,
+            Ok(None) => return OperationResult::success(None),
+            Err(_) => return OperationResult::failure(maintenance_error("BACKUP_DIALOG_FAILED")),
+        };
+        let path = match selected_path.into_path() {
+            Ok(path) => path,
+            Err(_) => return OperationResult::failure(maintenance_error("BACKUP_PATH_INVALID")),
+        };
+        if path.exists() {
+            return OperationResult::failure(backup_destination_exists_error());
+        }
 
-    let output_path = path.clone();
-    let repository = repository.inner().clone();
-    let backup_result =
-        tauri::async_runtime::spawn_blocking(move || repository.backup_to(&output_path)).await;
+        let output_path = path.clone();
+        let repository = repository.inner().clone();
+        let backup_result =
+            tauri::async_runtime::spawn_blocking(move || repository.backup_to(&output_path)).await;
         match backup_result {
             Ok(Ok(bytes)) => OperationResult::success(Some(MaintenanceArtifact {
                 kind: "backup".to_owned(),
@@ -2023,7 +2049,8 @@ async fn create_backup(
             Ok(Err(error)) => OperationResult::failure(error),
             Err(_) => OperationResult::failure(maintenance_error("BACKUP_CREATE_FAILED")),
         }
-    }.await)
+    }
+    .await)
 }
 
 #[tauri::command]
@@ -2034,26 +2061,27 @@ async fn restore_backup(
     transfers: State<'_, TransferService>,
 ) -> Result<OperationResult<()>, ()> {
     Ok(async {
-    match sessions.is_restore_busy().await {
-        Ok(true) => return OperationResult::failure(backup_restore_busy_error()),
-        Ok(false) => {}
-        Err(error) => return OperationResult::failure(error),
-    }
-    match transfers.list() {
-        Ok(tasks)
-            if tasks
-                .iter()
-                .any(|task| task.state == TransferState::Running) =>
-        {
-            return OperationResult::failure(backup_restore_busy_error());
+        match sessions.is_restore_busy().await {
+            Ok(true) => return OperationResult::failure(backup_restore_busy_error()),
+            Ok(false) => {}
+            Err(error) => return OperationResult::failure(error),
         }
-        Ok(_) => {}
-        Err(error) => return OperationResult::failure(error),
-    }
-    let repository = repository.inner().clone();
-    let path = std::path::PathBuf::from(backup_path.trim());
-    let restored =
-        tauri::async_runtime::spawn_blocking(move || repository.restore_from_backup(&path)).await;
+        match transfers.list() {
+            Ok(tasks)
+                if tasks
+                    .iter()
+                    .any(|task| task.state == TransferState::Running) =>
+            {
+                return OperationResult::failure(backup_restore_busy_error());
+            }
+            Ok(_) => {}
+            Err(error) => return OperationResult::failure(error),
+        }
+        let repository = repository.inner().clone();
+        let path = std::path::PathBuf::from(backup_path.trim());
+        let restored =
+            tauri::async_runtime::spawn_blocking(move || repository.restore_from_backup(&path))
+                .await;
         match restored {
             Ok(Ok(_)) => match sessions.reset_after_backup_restore().await {
                 Ok(()) => OperationResult::success(()),
@@ -2062,7 +2090,8 @@ async fn restore_backup(
             Ok(Err(error)) => OperationResult::failure(error),
             Err(_) => OperationResult::failure(maintenance_error("BACKUP_RESTORE_FAILED")),
         }
-    }.await)
+    }
+    .await)
 }
 
 #[tauri::command]
@@ -2073,96 +2102,95 @@ async fn create_diagnostics(
     settings: State<'_, SettingsService>,
 ) -> Result<OperationResult<Option<MaintenanceArtifact>>, ()> {
     Ok(async {
-    let created_at_ms = match unix_time_ms() {
-        Ok(value) => value,
-        Err(error) => return OperationResult::failure(error),
-    };
-    let repository = repository.inner().clone();
-    let storage = match tauri::async_runtime::spawn_blocking(move || {
-        repository.diagnostics_snapshot()
-    })
-    .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(_) => filex_storage::StorageDiagnosticsSnapshot::unavailable(),
-    };
-    let update_channel = configured_update_channel(&settings);
-    let payload = DiagnosticsPayload {
-        format: "filex.diagnostics",
-        format_version: 2,
-        generated_at_ms: created_at_ms,
-        application: DiagnosticsApplication {
-            version: app.package_info().version.to_string(),
-        },
-        platform: DiagnosticsPlatform {
-            operating_system: std::env::consts::OS,
-            architecture: std::env::consts::ARCH,
-        },
-        runtime: DiagnosticsRuntime {
-            credential_store: credentials.status(),
-            updater_configured: update_status(&app, &update_channel).configured,
-        },
-        storage: DiagnosticsStorage {
-            sqlite_version: storage.sqlite_version,
-            schema_version: storage.schema_version,
-            database_file_bytes: storage.database_file_bytes,
-            integrity_check: storage.integrity_check,
-            foreign_key_check: storage.foreign_key_check,
-        },
-        security: DiagnosticsSecurity {
-            contains_secrets: false,
-            contains_profile_endpoints: false,
-            contains_user_content: false,
-            strict_host_key_policy: true,
-        },
-    };
-    let bytes = match serde_json::to_vec_pretty(&payload) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return OperationResult::failure(maintenance_error("DIAGNOSTICS_ENCODE_FAILED"));
+        let created_at_ms = match unix_time_ms() {
+            Ok(value) => value,
+            Err(error) => return OperationResult::failure(error),
+        };
+        let repository = repository.inner().clone();
+        let storage =
+            match tauri::async_runtime::spawn_blocking(move || repository.diagnostics_snapshot())
+                .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(_) => filex_storage::StorageDiagnosticsSnapshot::unavailable(),
+            };
+        let update_channel = configured_update_channel(&settings);
+        let payload = DiagnosticsPayload {
+            format: "filex.diagnostics",
+            format_version: 2,
+            generated_at_ms: created_at_ms,
+            application: DiagnosticsApplication {
+                version: app.package_info().version.to_string(),
+            },
+            platform: DiagnosticsPlatform {
+                operating_system: std::env::consts::OS,
+                architecture: std::env::consts::ARCH,
+            },
+            runtime: DiagnosticsRuntime {
+                credential_store: credentials.status(),
+                updater_configured: update_status(&app, &update_channel).configured,
+            },
+            storage: DiagnosticsStorage {
+                sqlite_version: storage.sqlite_version,
+                schema_version: storage.schema_version,
+                database_file_bytes: storage.database_file_bytes,
+                integrity_check: storage.integrity_check,
+                foreign_key_check: storage.foreign_key_check,
+            },
+            security: DiagnosticsSecurity {
+                contains_secrets: false,
+                contains_profile_endpoints: false,
+                contains_user_content: false,
+                strict_host_key_policy: true,
+            },
+        };
+        let bytes = match serde_json::to_vec_pretty(&payload) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return OperationResult::failure(maintenance_error("DIAGNOSTICS_ENCODE_FAILED"));
+            }
+        };
+        if bytes.len() > DIAGNOSTICS_MAX_BYTES {
+            return OperationResult::failure(maintenance_error("DIAGNOSTICS_TOO_LARGE"));
         }
-    };
-    if bytes.len() > DIAGNOSTICS_MAX_BYTES {
-        return OperationResult::failure(maintenance_error("DIAGNOSTICS_TOO_LARGE"));
-    }
 
-    let locale = settings
-        .load()
-        .map(|settings| settings.locale)
-        .unwrap_or_else(|_| "zh-CN".to_owned());
-    let (dialog_title, filter_label) = if locale == "zh-CN" {
-        ("导出 FILEX 诊断信息", "FILEX 诊断 JSON")
-    } else {
-        ("Export FILEX diagnostics", "FILEX diagnostics JSON")
-    };
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .file()
-        .set_title(dialog_title)
-        .set_file_name(format!("filex-diagnostics-{created_at_ms}.json"))
-        .add_filter(filter_label, &["json"])
-        .save_file(move |selected_path| {
-            let _ = sender.send(selected_path);
-        });
-    let selected_path = match receiver.await {
-        Ok(Some(path)) => path,
-        Ok(None) => return OperationResult::success(None),
-        Err(_) => {
-            return OperationResult::failure(maintenance_error("DIAGNOSTICS_DIALOG_FAILED"));
-        }
-    };
-    let path = match selected_path.into_path() {
-        Ok(path) => path,
-        Err(_) => {
-            return OperationResult::failure(maintenance_error("DIAGNOSTICS_PATH_INVALID"));
-        }
-    };
-    let byte_count = bytes.len() as u64;
-    let write_path = path.clone();
-    let write_result = tauri::async_runtime::spawn_blocking(move || {
-        write_diagnostics_atomically(&write_path, &bytes)
-    })
-    .await;
+        let locale = settings
+            .load()
+            .map(|settings| settings.locale)
+            .unwrap_or_else(|_| "zh-CN".to_owned());
+        let (dialog_title, filter_label) = if locale == "zh-CN" {
+            ("导出 FILEX 诊断信息", "FILEX 诊断 JSON")
+        } else {
+            ("Export FILEX diagnostics", "FILEX diagnostics JSON")
+        };
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        app.dialog()
+            .file()
+            .set_title(dialog_title)
+            .set_file_name(format!("filex-diagnostics-{created_at_ms}.json"))
+            .add_filter(filter_label, &["json"])
+            .save_file(move |selected_path| {
+                let _ = sender.send(selected_path);
+            });
+        let selected_path = match receiver.await {
+            Ok(Some(path)) => path,
+            Ok(None) => return OperationResult::success(None),
+            Err(_) => {
+                return OperationResult::failure(maintenance_error("DIAGNOSTICS_DIALOG_FAILED"));
+            }
+        };
+        let path = match selected_path.into_path() {
+            Ok(path) => path,
+            Err(_) => {
+                return OperationResult::failure(maintenance_error("DIAGNOSTICS_PATH_INVALID"));
+            }
+        };
+        let byte_count = bytes.len() as u64;
+        let write_path = path.clone();
+        let write_result = tauri::async_runtime::spawn_blocking(move || {
+            write_diagnostics_atomically(&write_path, &bytes)
+        })
+        .await;
         match write_result {
             Ok(Ok(())) => OperationResult::success(Some(MaintenanceArtifact {
                 kind: "diagnostics".to_owned(),
@@ -2174,7 +2202,8 @@ async fn create_diagnostics(
                 OperationResult::failure(maintenance_error("DIAGNOSTICS_WRITE_FAILED"))
             }
         }
-    }.await)
+    }
+    .await)
 }
 
 fn write_diagnostics_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -2204,15 +2233,15 @@ async fn check_for_updates(
     settings: State<'_, SettingsService>,
 ) -> Result<OperationResult<UpdateStatus>, ()> {
     Ok(async {
-    let channel = configured_update_channel(&settings);
-    let mut status = update_status(&app, &channel);
-    if !status.configured {
-        return OperationResult::failure(update_error("UPDATE_NOT_CONFIGURED"));
-    }
-    let updater = match build_channel_updater(&app, &channel) {
-        Ok(updater) => updater,
-        Err(error) => return OperationResult::failure(error),
-    };
+        let channel = configured_update_channel(&settings);
+        let mut status = update_status(&app, &channel);
+        if !status.configured {
+            return OperationResult::failure(update_error("UPDATE_NOT_CONFIGURED"));
+        }
+        let updater = match build_channel_updater(&app, &channel) {
+            Ok(updater) => updater,
+            Err(error) => return OperationResult::failure(error),
+        };
         match updater.check().await {
             Ok(Some(update)) => {
                 status.available_version = Some(update.version.clone());
@@ -2225,7 +2254,8 @@ async fn check_for_updates(
             Ok(None) => OperationResult::success(status),
             Err(_) => OperationResult::failure(update_error("UPDATE_CHECK_FAILED")),
         }
-    }.await)
+    }
+    .await)
 }
 
 #[tauri::command]
@@ -2235,20 +2265,20 @@ async fn install_update(
     expected_version: String,
 ) -> Result<OperationResult<()>, ()> {
     Ok(async {
-    if expected_version.is_empty() || expected_version.len() > 64 {
-        return OperationResult::failure(update_error("UPDATE_STALE"));
-    }
-    let channel = configured_update_channel(&settings);
-    let updater = match build_channel_updater(&app, &channel) {
-        Ok(updater) => updater,
-        Err(error) => return OperationResult::failure(error),
-    };
-    let update = match updater.check().await {
-        Ok(Some(update)) if update.version == expected_version => update,
-        Ok(Some(_)) => return OperationResult::failure(update_error("UPDATE_STALE")),
-        Ok(None) => return OperationResult::failure(update_error("UPDATE_NO_AVAILABLE")),
-        Err(_) => return OperationResult::failure(update_error("UPDATE_CHECK_FAILED")),
-    };
+        if expected_version.is_empty() || expected_version.len() > 64 {
+            return OperationResult::failure(update_error("UPDATE_STALE"));
+        }
+        let channel = configured_update_channel(&settings);
+        let updater = match build_channel_updater(&app, &channel) {
+            Ok(updater) => updater,
+            Err(error) => return OperationResult::failure(error),
+        };
+        let update = match updater.check().await {
+            Ok(Some(update)) if update.version == expected_version => update,
+            Ok(Some(_)) => return OperationResult::failure(update_error("UPDATE_STALE")),
+            Ok(None) => return OperationResult::failure(update_error("UPDATE_NO_AVAILABLE")),
+            Err(_) => return OperationResult::failure(update_error("UPDATE_CHECK_FAILED")),
+        };
         match update.download_and_install(|_, _| {}, || {}).await {
             Ok(()) => {
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2257,7 +2287,8 @@ async fn install_update(
             }
             Err(_) => OperationResult::failure(update_error("UPDATE_INSTALL_FAILED")),
         }
-    }.await)
+    }
+    .await)
 }
 
 fn configured_update_channel(settings: &SettingsService) -> String {
@@ -2415,7 +2446,7 @@ fn prune_auto_backups(directory: &Path) {
             Some((timestamp, path))
         })
         .collect::<Vec<_>>();
-    backups.sort_by(|left, right| right.0.cmp(&left.0));
+    backups.sort_by_key(|(timestamp, _)| std::cmp::Reverse(*timestamp));
     for (_, path) in backups.into_iter().skip(AUTO_BACKUP_RETENTION_COUNT) {
         let _ = fs::remove_file(path);
     }
@@ -2515,7 +2546,7 @@ fn delete_connection_profile(
             if let Some(reference) = profile
                 .credential_ref
                 .as_deref()
-                .filter(|reference| is_profile_credential_reference(*reference))
+                .filter(|reference| is_profile_credential_reference(reference))
             {
                 let _ = credentials.delete(reference);
             }
@@ -2630,29 +2661,31 @@ async fn preview_known_hosts_import(
     trust: State<'_, HostTrustService>,
 ) -> Result<OperationResult<KnownHostsImportPreview>, ()> {
     Ok(async {
-    let path = PathBuf::from(file_path);
-    let parsed = tauri::async_runtime::spawn_blocking(move || known_hosts::preview_file(&path)).await;
-    let mut preview = match parsed {
-        Ok(Ok(preview)) => preview,
-        Ok(Err(error)) => return OperationResult::failure(error),
-        Err(_) => {
-            return OperationResult::failure(known_hosts_import_error(
-                "TRUST_IMPORT_FILE_INVALID",
-                "errors.trustImportFileInvalid",
-            ));
-        }
-    };
-    for candidate in &mut preview.candidates {
-        match trust.latest(&candidate.host, candidate.port, &candidate.algorithm) {
-            Ok(current) => {
-                candidate.current_fingerprint_sha256 =
-                    current.map(|record| record.fingerprint_sha256);
+        let path = PathBuf::from(file_path);
+        let parsed =
+            tauri::async_runtime::spawn_blocking(move || known_hosts::preview_file(&path)).await;
+        let mut preview = match parsed {
+            Ok(Ok(preview)) => preview,
+            Ok(Err(error)) => return OperationResult::failure(error),
+            Err(_) => {
+                return OperationResult::failure(known_hosts_import_error(
+                    "TRUST_IMPORT_FILE_INVALID",
+                    "errors.trustImportFileInvalid",
+                ));
             }
-            Err(error) => return OperationResult::failure(error),
+        };
+        for candidate in &mut preview.candidates {
+            match trust.latest(&candidate.host, candidate.port, &candidate.algorithm) {
+                Ok(current) => {
+                    candidate.current_fingerprint_sha256 =
+                        current.map(|record| record.fingerprint_sha256);
+                }
+                Err(error) => return OperationResult::failure(error),
+            }
         }
-    }
         OperationResult::success(preview)
-    }.await)
+    }
+    .await)
 }
 
 #[tauri::command]
@@ -2687,12 +2720,13 @@ fn credential_store_status(
 fn runtime_paths(app: tauri::AppHandle) -> OperationResult<RuntimePaths> {
     match app.path().app_data_dir() {
         Ok(data_directory) => OperationResult::success(RuntimePaths {
-            backup_directory: data_directory.join("backups").to_string_lossy().into_owned(),
+            backup_directory: data_directory
+                .join("backups")
+                .to_string_lossy()
+                .into_owned(),
             data_directory: data_directory.to_string_lossy().into_owned(),
         }),
-        Err(_) => OperationResult::failure(maintenance_error(
-            "RUNTIME_DATA_DIRECTORY_UNAVAILABLE",
-        )),
+        Err(_) => OperationResult::failure(maintenance_error("RUNTIME_DATA_DIRECTORY_UNAVAILABLE")),
     }
 }
 
@@ -2803,13 +2837,15 @@ async fn reprobe_session_host_key(
     match sessions.quick_profile(&session_id) {
         Ok(Some(profile)) => {
             let route = vec![profile.clone()];
-            return Ok(match sessions
-                .reprobe_route(&session_id, &profile, &route, &trust)
-                .await
-            {
-                Ok(challenge) => OperationResult::success(challenge),
-                Err(error) => OperationResult::failure(error),
-            });
+            return Ok(
+                match sessions
+                    .reprobe_route(&session_id, &profile, &route, &trust)
+                    .await
+                {
+                    Ok(challenge) => OperationResult::success(challenge),
+                    Err(error) => OperationResult::failure(error),
+                },
+            );
         }
         Ok(None) => {}
         Err(error) => return Ok(OperationResult::failure(error)),
@@ -2912,7 +2948,9 @@ async fn connect_password_session(
         return Ok(OperationResult::failure(error));
     }
     if profile.authentication_method != AuthenticationMethod::Password {
-        return Ok(OperationResult::failure(authentication_method_mismatch_error()));
+        return Ok(OperationResult::failure(
+            authentication_method_mismatch_error(),
+        ));
     }
     let Some(reference) = profile.credential_ref.as_deref() else {
         return Ok(OperationResult::failure(credential_error(
@@ -3016,7 +3054,9 @@ async fn connect_private_key_session(
         return Ok(OperationResult::failure(error));
     }
     if profile.authentication_method != AuthenticationMethod::PrivateKey {
-        return Ok(OperationResult::failure(authentication_method_mismatch_error()));
+        return Ok(OperationResult::failure(
+            authentication_method_mismatch_error(),
+        ));
     }
     let passphrase = match profile.credential_ref.as_deref() {
         Some(reference) => {
@@ -3068,7 +3108,9 @@ async fn connect_agent_session(
         return Ok(OperationResult::failure(error));
     }
     if profile.authentication_method != AuthenticationMethod::Agent {
-        return Ok(OperationResult::failure(authentication_method_mismatch_error()));
+        return Ok(OperationResult::failure(
+            authentication_method_mismatch_error(),
+        ));
     }
     let result = sessions
         .connect_route_agent(&session_id, &route, &profile, &trust)
@@ -3147,11 +3189,7 @@ async fn route_auth_context(
     Ok((route, current_profile))
 }
 
-fn spawn_terminal_output(
-    app: tauri::AppHandle,
-    session_id: String,
-    mut output: TerminalOutput,
-) {
+fn spawn_terminal_output(app: tauri::AppHandle, session_id: String, mut output: TerminalOutput) {
     tauri::async_runtime::spawn(async move {
         loop {
             let event = output.next().await;
@@ -3201,10 +3239,12 @@ async fn write_terminal(
     encoding: String,
     sessions: State<'_, SessionRuntime>,
 ) -> Result<OperationResult<()>, ()> {
-    Ok(match sessions.write_terminal(&session_id, data, &encoding).await {
-        Ok(()) => OperationResult::success(()),
-        Err(error) => OperationResult::failure(error),
-    })
+    Ok(
+        match sessions.write_terminal(&session_id, data, &encoding).await {
+            Ok(()) => OperationResult::success(()),
+            Err(error) => OperationResult::failure(error),
+        },
+    )
 }
 
 #[tauri::command]
@@ -3357,6 +3397,187 @@ fn inspect_local_entry(path: String) -> OperationResult<LocalFileEntry> {
     })
 }
 
+const LOCAL_TEXT_MAX_BYTES: u32 = 1024 * 1024;
+
+fn local_text_error(code: &str) -> AppError {
+    AppError {
+        code: code.to_owned(),
+        message_key: match code {
+            "LOCAL_TEXT_CONFLICT" => "errors.localTextConflict",
+            "LOCAL_TEXT_TOO_LARGE" => "errors.localTextTooLarge",
+            "LOCAL_TEXT_ENCODING" => "errors.localTextEncoding",
+            "LOCAL_TEXT_SAVE_FAILED" => "errors.localTextSaveFailed",
+            "LOCAL_TEXT_RECOVERY" => "errors.localTextRecovery",
+            _ => "errors.localTextPreviewFailed",
+        }
+        .to_owned(),
+        retryable: false,
+        remote_state: RemoteState::NotApplicable,
+        field: None,
+    }
+}
+
+fn is_supported_local_text(content: &str) -> bool {
+    !content.chars().any(|character| {
+        character == '\0' || (character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    })
+}
+
+fn read_local_text_for_revision(path: &Path) -> Result<String, AppError> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .and_then(|mut file| file.read_to_end(&mut bytes))
+        .map_err(|_| local_text_error("LOCAL_TEXT_PREVIEW_FAILED"))?;
+    if bytes.len() > LOCAL_TEXT_MAX_BYTES as usize {
+        return Err(local_text_error("LOCAL_TEXT_TOO_LARGE"));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| local_text_error("LOCAL_TEXT_ENCODING"))?;
+    if !is_supported_local_text(&text) {
+        return Err(local_text_error("LOCAL_TEXT_ENCODING"));
+    }
+    Ok(text)
+}
+
+#[tauri::command]
+fn preview_local_text(path: String) -> OperationResult<LocalTextPreview> {
+    let (entry_path, _) = match canonical_local_entry(&path) {
+        Ok(paths) => paths,
+        Err(error) => return OperationResult::failure(error),
+    };
+    let metadata = match fs::symlink_metadata(&entry_path) {
+        Ok(metadata) => metadata,
+        Err(_) => return OperationResult::failure(local_text_error("LOCAL_TEXT_PREVIEW_FAILED")),
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return OperationResult::failure(local_text_error("LOCAL_TEXT_PREVIEW_FAILED"));
+    }
+    let mut bytes = Vec::new();
+    let read_failed = fs::File::open(&entry_path)
+        .and_then(|file| {
+            file.take(u64::from(LOCAL_TEXT_MAX_BYTES) + 4)
+                .read_to_end(&mut bytes)
+        })
+        .is_err();
+    if read_failed {
+        return OperationResult::failure(local_text_error("LOCAL_TEXT_PREVIEW_FAILED"));
+    }
+    let truncated = bytes.len() > LOCAL_TEXT_MAX_BYTES as usize
+        || metadata.len() > u64::from(LOCAL_TEXT_MAX_BYTES);
+    bytes.truncate(LOCAL_TEXT_MAX_BYTES as usize);
+    let content = match String::from_utf8(bytes) {
+        Ok(content) => content,
+        Err(error) if error.utf8_error().error_len().is_none() && truncated => {
+            let valid_up_to = error.utf8_error().valid_up_to();
+            match String::from_utf8(error.into_bytes()[..valid_up_to].to_vec()) {
+                Ok(content) => content,
+                Err(_) => return OperationResult::failure(local_text_error("LOCAL_TEXT_ENCODING")),
+            }
+        }
+        Err(_) => return OperationResult::failure(local_text_error("LOCAL_TEXT_ENCODING")),
+    };
+    if !is_supported_local_text(&content) {
+        return OperationResult::failure(local_text_error("LOCAL_TEXT_ENCODING"));
+    }
+    OperationResult::success(LocalTextPreview {
+        path: entry_path.to_string_lossy().into_owned(),
+        bytes: u32::try_from(content.len()).unwrap_or(LOCAL_TEXT_MAX_BYTES),
+        revision: session_runtime::text_revision(content.as_bytes()),
+        content,
+        truncated,
+    })
+}
+
+#[tauri::command]
+fn save_local_text(
+    path: String,
+    content: String,
+    expected_revision: String,
+) -> OperationResult<LocalTextSaveResult> {
+    if content.len() > LOCAL_TEXT_MAX_BYTES as usize {
+        return OperationResult::failure(local_text_error("LOCAL_TEXT_TOO_LARGE"));
+    }
+    if !is_supported_local_text(&content) {
+        return OperationResult::failure(local_text_error("LOCAL_TEXT_ENCODING"));
+    }
+    let (source, parent) = match canonical_local_entry(&path) {
+        Ok(paths) => paths,
+        Err(error) => return OperationResult::failure(error),
+    };
+    let metadata = match fs::symlink_metadata(&source) {
+        Ok(metadata) => metadata,
+        Err(_) => return OperationResult::failure(local_text_error("LOCAL_TEXT_SAVE_FAILED")),
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return OperationResult::failure(local_text_error("LOCAL_TEXT_SAVE_FAILED"));
+    }
+    let current = match read_local_text_for_revision(&source) {
+        Ok(current) => current,
+        Err(error) => return OperationResult::failure(error),
+    };
+    if session_runtime::text_revision(current.as_bytes()) != expected_revision {
+        return OperationResult::failure(local_text_error("LOCAL_TEXT_CONFLICT"));
+    }
+
+    let temporary_path = parent.join(format!(".filex-part-{}", uuid::Uuid::new_v4()));
+    let backup_path = parent.join(format!(".filex-recovery-{}", uuid::Uuid::new_v4()));
+    let write_result = (|| -> io::Result<()> {
+        let mut temporary = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)?;
+        temporary.write_all(content.as_bytes())?;
+        temporary.sync_all()?;
+        drop(temporary);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                &temporary_path,
+                fs::Permissions::from_mode(metadata.permissions().mode() & 0o7777),
+            )?;
+        }
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+        return OperationResult::failure(local_text_error("LOCAL_TEXT_SAVE_FAILED"));
+    }
+
+    // Re-check the source revision right before swapping so a concurrent edit
+    // does not get overwritten by the staged replacement.
+    match read_local_text_for_revision(&source) {
+        Ok(latest) if session_runtime::text_revision(latest.as_bytes()) == expected_revision => {}
+        Ok(_) => {
+            let _ = fs::remove_file(&temporary_path);
+            return OperationResult::failure(local_text_error("LOCAL_TEXT_CONFLICT"));
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temporary_path);
+            return OperationResult::failure(error);
+        }
+    }
+
+    if fs::rename(&source, &backup_path).is_err() {
+        let _ = fs::remove_file(&temporary_path);
+        if backup_path.exists() {
+            return OperationResult::failure(local_text_error("LOCAL_TEXT_RECOVERY"));
+        }
+        return OperationResult::failure(local_text_error("LOCAL_TEXT_SAVE_FAILED"));
+    }
+    if fs::rename(&temporary_path, &source).is_err() {
+        if fs::rename(&backup_path, &source).is_err() {
+            return OperationResult::failure(local_text_error("LOCAL_TEXT_RECOVERY"));
+        }
+        return OperationResult::failure(local_text_error("LOCAL_TEXT_SAVE_FAILED"));
+    }
+    let _ = fs::remove_file(&backup_path);
+    OperationResult::success(LocalTextSaveResult {
+        path: source.to_string_lossy().into_owned(),
+        bytes: u32::try_from(content.len()).unwrap_or(LOCAL_TEXT_MAX_BYTES),
+        revision: session_runtime::text_revision(content.as_bytes()),
+    })
+}
+
 #[tauri::command]
 fn create_local_directory(parent_path: String, name: String) -> OperationResult<()> {
     if let Err(error) = validate_local_basename(&name) {
@@ -3452,25 +3673,26 @@ async fn copy_local_entry(
     copy_operations: State<'_, CopyOperationRuntime>,
 ) -> Result<OperationResult<()>, ()> {
     Ok(async {
-    let operation = match copy_operations.register(&operation_id) {
-        Ok(operation) => operation,
-        Err(error) => return OperationResult::failure(error),
-    };
-    let control = operation.control.clone();
-    // Keep the lease on the blocking worker so shutdown still tracks it if
-    // this command future is dropped while the worker is finishing cleanup.
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        let result = copy_local_entry_sync(path, target_directory, target_name, &control);
-        operation.control.finish();
-        drop(operation);
-        result
-    })
-    .await;
+        let operation = match copy_operations.register(&operation_id) {
+            Ok(operation) => operation,
+            Err(error) => return OperationResult::failure(error),
+        };
+        let control = operation.control.clone();
+        // Keep the lease on the blocking worker so shutdown still tracks it if
+        // this command future is dropped while the worker is finishing cleanup.
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let result = copy_local_entry_sync(path, target_directory, target_name, &control);
+            operation.control.finish();
+            drop(operation);
+            result
+        })
+        .await;
         match result {
             Ok(result) => result,
             Err(_) => OperationResult::failure(local_file_operation_error()),
         }
-    }.await)
+    }
+    .await)
 }
 
 #[tauri::command]
@@ -3539,8 +3761,7 @@ fn copy_local_entry_sync(
     }
 
     let result = (|| -> Result<(), AppError> {
-        let mut source_file = fs::File::open(&source)
-            .map_err(|_| local_file_operation_error())?;
+        let mut source_file = fs::File::open(&source).map_err(|_| local_file_operation_error())?;
         let mut temporary = tempfile::Builder::new()
             .prefix(".filex-copy-")
             .suffix(".part")
@@ -3615,8 +3836,8 @@ fn copy_local_directory_tree(
             if destination.to_string_lossy().len() > 4_096 {
                 return Err(directory_tree_limit_error());
             }
-            let mut source = fs::File::open(&entry.source_path)
-                .map_err(|_| local_file_operation_error())?;
+            let mut source =
+                fs::File::open(&entry.source_path).map_err(|_| local_file_operation_error())?;
             let mut target_file = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -3690,8 +3911,8 @@ fn scan_local_copy_tree(
             if source_path.to_string_lossy().len() > 4_096 {
                 return Err(directory_tree_limit_error());
             }
-            let metadata = fs::symlink_metadata(&source_path)
-                .map_err(|_| local_file_operation_error())?;
+            let metadata =
+                fs::symlink_metadata(&source_path).map_err(|_| local_file_operation_error())?;
             let file_type = metadata.file_type();
             if file_type.is_symlink() || (!file_type.is_dir() && !file_type.is_file()) {
                 return Err(directory_tree_unsupported_error());
@@ -3763,6 +3984,8 @@ fn remove_local_copy_tree(root: &Path) -> io::Result<()> {
                 #[cfg(not(unix))]
                 if metadata.permissions().readonly() {
                     let mut permissions = metadata.permissions();
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    // Windows-only clear of the readonly bit
                     permissions.set_readonly(false);
                     fs::set_permissions(&path, permissions)?;
                 }
@@ -3788,13 +4011,18 @@ fn remove_local_copy_tree(root: &Path) -> io::Result<()> {
             #[cfg(not(unix))]
             if metadata.permissions().readonly() {
                 let mut permissions = metadata.permissions();
+                #[allow(clippy::permissions_set_readonly_false)]
+                // Windows-only clear of the readonly bit
                 permissions.set_readonly(false);
                 fs::set_permissions(&path, permissions)?;
             }
             fs::remove_file(path)?;
         } else if file_type.is_dir() {
             if depth > 16 {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "directory cleanup depth exceeded"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "directory cleanup depth exceeded",
+                ));
             }
             make_local_copy_directory_removable(&path, &metadata)?;
             let children = fs::read_dir(&path)?;
@@ -3803,12 +4031,18 @@ fn remove_local_copy_tree(root: &Path) -> io::Result<()> {
                 let child = child?;
                 visited_entries = visited_entries.saturating_add(1);
                 if visited_entries > 5_000 {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "directory cleanup entry limit exceeded"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "directory cleanup entry limit exceeded",
+                    ));
                 }
                 pending.push((child.path(), depth + 1, false));
             }
         } else {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported directory cleanup entry"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported directory cleanup entry",
+            ));
         }
     }
     Ok(())
@@ -3823,6 +4057,7 @@ fn make_local_copy_directory_removable(path: &Path, metadata: &fs::Metadata) -> 
         permissions.set_mode(mode);
     }
     #[cfg(not(unix))]
+    #[allow(clippy::permissions_set_readonly_false)] // Windows-only clear of the readonly bit
     permissions.set_readonly(false);
     fs::set_permissions(path, permissions)
 }
@@ -3836,7 +4071,10 @@ fn valid_directory_copy_segment(name: &str) -> bool {
         || name.ends_with('.')
         || name.chars().any(|character| {
             character.is_control()
-                || matches!(character, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+                || matches!(
+                    character,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+                )
         })
     {
         return false;
@@ -3848,9 +4086,28 @@ fn valid_directory_copy_segment(name: &str) -> bool {
         .to_ascii_uppercase();
     !matches!(
         windows_base.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5"
-            | "COM6" | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4"
-            | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
     )
 }
 
@@ -3947,6 +4204,24 @@ async fn preview_remote_text(
     Ok(
         match sessions.preview_remote_text(&session_id, &path).await {
             Ok(preview) => OperationResult::success(preview),
+            Err(error) => OperationResult::failure(error),
+        },
+    )
+}
+
+#[tauri::command]
+async fn update_remote_entry_mode(
+    session_id: String,
+    path: String,
+    mode: u32,
+    sessions: State<'_, SessionRuntime>,
+) -> Result<OperationResult<()>, ()> {
+    Ok(
+        match sessions
+            .update_remote_entry_mode(&session_id, &path, mode)
+            .await
+        {
+            Ok(()) => OperationResult::success(()),
             Err(error) => OperationResult::failure(error),
         },
     )
@@ -4208,12 +4483,10 @@ async fn copy_remote_entry(
         .await;
     control.finish();
     drop(operation);
-    Ok(
-        match result {
-            Ok(()) => OperationResult::success(()),
-            Err(error) => OperationResult::failure(error),
-        },
-    )
+    Ok(match result {
+        Ok(()) => OperationResult::success(()),
+        Err(error) => OperationResult::failure(error),
+    })
 }
 
 #[tauri::command]
@@ -4347,7 +4620,8 @@ async fn stop_tunnel(
             Ok(tunnel) => OperationResult::success(tunnel),
             Err(error) => OperationResult::failure(error),
         }
-    }.await)
+    }
+    .await)
 }
 
 #[tauri::command]
@@ -4506,100 +4780,98 @@ async fn resume_transfer(
     session_id: String,
 ) -> Result<OperationResult<TransferTask>, ()> {
     Ok(async {
-    let existing = match transfers.get(&id) {
-        Ok(task) => task,
-        Err(error) => return OperationResult::failure(error),
-    };
-    let session = match sessions.summary(&session_id) {
-        Ok(session)
-            if session.profile_id == existing.profile_id
-                && session.state == filex_contracts::SessionState::Connected =>
-        {
-            session
-        }
-        _ => return OperationResult::failure(transfer_session_unavailable_error()),
-    };
+        let existing = match transfers.get(&id) {
+            Ok(task) => task,
+            Err(error) => return OperationResult::failure(error),
+        };
+        let session = match sessions.summary(&session_id) {
+            Ok(session)
+                if session.profile_id == existing.profile_id
+                    && session.state == filex_contracts::SessionState::Connected =>
+            {
+                session
+            }
+            _ => return OperationResult::failure(transfer_session_unavailable_error()),
+        };
 
-    if existing.state == TransferState::Paused {
-        match sessions
-            .prepare_transfer_resume(&id, &session.id)
-            .await
-        {
-            Ok(true) => {
-                let resumed = match transfers.resume(&id) {
-                    Ok(task) => task,
-                    Err(error) => return OperationResult::failure(error),
-                };
-                match sessions.resume_transfer_control(&id, &session.id) {
-                    Ok(true) => {
-                        let _ = app.emit("transfer-updated", resumed.clone());
-                        return OperationResult::success(resumed);
-                    }
-                    Ok(false) => {
-                        let _ = transfers.pause(&id, resumed.bytes_transferred);
-                        if let Ok(current) = transfers.get(&id)
-                            && current.state == TransferState::Completed
-                        {
-                            return OperationResult::success(current);
+        if existing.state == TransferState::Paused {
+            match sessions.prepare_transfer_resume(&id, &session.id).await {
+                Ok(true) => {
+                    let resumed = match transfers.resume(&id) {
+                        Ok(task) => task,
+                        Err(error) => return OperationResult::failure(error),
+                    };
+                    match sessions.resume_transfer_control(&id, &session.id) {
+                        Ok(true) => {
+                            let _ = app.emit("transfer-updated", resumed.clone());
+                            return OperationResult::success(resumed);
+                        }
+                        Ok(false) => {
+                            let _ = transfers.pause(&id, resumed.bytes_transferred);
+                            if let Ok(current) = transfers.get(&id)
+                                && current.state == TransferState::Completed
+                            {
+                                return OperationResult::success(current);
+                            }
+                        }
+                        Err(error) => {
+                            let _ = transfers.pause(&id, resumed.bytes_transferred);
+                            return OperationResult::failure(error);
                         }
                     }
-                    Err(error) => {
-                        let _ = transfers.pause(&id, resumed.bytes_transferred);
-                        return OperationResult::failure(error);
-                    }
                 }
+                Ok(false) => {}
+                Err(error) => return OperationResult::failure(error),
             }
-            Ok(false) => {}
-            Err(error) => return OperationResult::failure(error),
         }
-    }
 
-    let queued = match transfers.retry(&id) {
-        Ok(task) => task,
-        Err(error) => return OperationResult::failure(error),
-    };
-    if let Err(error) = sessions.prepare_transfer(&queued.id, &session.id) {
-        return OperationResult::failure(error);
-    }
-    let running = match transfers.start(&queued.id, &session.id) {
-        Ok(task) => task,
-        Err(error) => {
-            let _ = sessions.finish_transfer(&queued.id);
+        let queued = match transfers.retry(&id) {
+            Ok(task) => task,
+            Err(error) => return OperationResult::failure(error),
+        };
+        if let Err(error) = sessions.prepare_transfer(&queued.id, &session.id) {
             return OperationResult::failure(error);
         }
-    };
-    let worker_task = running.clone();
-    tauri::async_runtime::spawn(async move {
-        let progress_app = app.clone();
-        let progress_task_id = worker_task.id.clone();
-        let result = app
-            .state::<SessionRuntime>()
-            .execute_transfer(&session_id, &worker_task, move |bytes, total_bytes| {
-                let transfers = progress_app.state::<TransferService>();
-                let updated = if let Some(total_bytes) = total_bytes {
-                    transfers.set_total_bytes(&progress_task_id, total_bytes)
-                } else {
-                    transfers.progress(&progress_task_id, bytes)
-                };
-                if let Ok(task) = updated {
-                    let _ = progress_app.emit("transfer-updated", task);
-                }
-            })
-            .await;
-        let transfers = app.state::<TransferService>();
-        let updated = match result {
-            Ok(bytes) => transfers.complete(&worker_task.id, bytes),
-            Err(error) => transfers.fail(&worker_task.id, error),
+        let running = match transfers.start(&queued.id, &session.id) {
+            Ok(task) => task,
+            Err(error) => {
+                let _ = sessions.finish_transfer(&queued.id);
+                return OperationResult::failure(error);
+            }
         };
-        let _ = app
-            .state::<SessionRuntime>()
-            .finish_transfer(&worker_task.id);
-        if let Ok(task) = updated {
-            let _ = app.emit("transfer-updated", task);
-        }
-    });
+        let worker_task = running.clone();
+        tauri::async_runtime::spawn(async move {
+            let progress_app = app.clone();
+            let progress_task_id = worker_task.id.clone();
+            let result = app
+                .state::<SessionRuntime>()
+                .execute_transfer(&session_id, &worker_task, move |bytes, total_bytes| {
+                    let transfers = progress_app.state::<TransferService>();
+                    let updated = if let Some(total_bytes) = total_bytes {
+                        transfers.set_total_bytes(&progress_task_id, total_bytes)
+                    } else {
+                        transfers.progress(&progress_task_id, bytes)
+                    };
+                    if let Ok(task) = updated {
+                        let _ = progress_app.emit("transfer-updated", task);
+                    }
+                })
+                .await;
+            let transfers = app.state::<TransferService>();
+            let updated = match result {
+                Ok(bytes) => transfers.complete(&worker_task.id, bytes),
+                Err(error) => transfers.fail(&worker_task.id, error),
+            };
+            let _ = app
+                .state::<SessionRuntime>()
+                .finish_transfer(&worker_task.id);
+            if let Ok(task) = updated {
+                let _ = app.emit("transfer-updated", task);
+            }
+        });
         OperationResult::success(running)
-    }.await)
+    }
+    .await)
 }
 
 #[tauri::command]
@@ -4610,19 +4882,19 @@ async fn pause_transfer(
     id: String,
 ) -> Result<OperationResult<TransferTask>, ()> {
     Ok(async {
-    let current = match transfers.get(&id) {
-        Ok(task) => task,
-        Err(error) => return OperationResult::failure(error),
-    };
-    let bytes_transferred = match current.state {
-        TransferState::Queued => 0,
-        TransferState::Running => match sessions.pause_transfer(&id) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return OperationResult::failure(transfer_session_unavailable_error()),
+        let current = match transfers.get(&id) {
+            Ok(task) => task,
             Err(error) => return OperationResult::failure(error),
-        },
-        _ => return OperationResult::failure(transfer_transition_error()),
-    };
+        };
+        let bytes_transferred = match current.state {
+            TransferState::Queued => 0,
+            TransferState::Running => match sessions.pause_transfer(&id) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => return OperationResult::failure(transfer_session_unavailable_error()),
+                Err(error) => return OperationResult::failure(error),
+            },
+            _ => return OperationResult::failure(transfer_transition_error()),
+        };
         match transfers.pause(&id, bytes_transferred) {
             Ok(task) => {
                 let _ = app.emit("transfer-updated", task.clone());
@@ -4635,7 +4907,8 @@ async fn pause_transfer(
                 OperationResult::failure(error)
             }
         }
-    }.await)
+    }
+    .await)
 }
 
 #[tauri::command]
@@ -4710,7 +4983,10 @@ fn schedule_graceful_exit<R: tauri::Runtime>(
         if let Some(sessions) = app.try_state::<SessionRuntime>()
             && let Err(error) = sessions.shutdown().await
         {
-            eprintln!("FILEX graceful shutdown cleanup incomplete ({})", error.code);
+            eprintln!(
+                "FILEX graceful shutdown cleanup incomplete ({})",
+                error.code
+            );
         }
         if let Some(logs) = app.try_state::<TerminalLogRuntime>() {
             logs.shutdown().await;
@@ -4773,11 +5049,7 @@ pub fn run() {
                         && shutdown_state.load(Ordering::Acquire) != APP_SHUTDOWN_COMPLETE
                     {
                         api.prevent_close();
-                        schedule_graceful_exit(
-                            app_handle.clone(),
-                            shutdown_state.clone(),
-                            0,
-                        );
+                        schedule_graceful_exit(app_handle.clone(), shutdown_state.clone(), 0);
                     }
                 });
             }
@@ -4857,9 +5129,12 @@ pub fn run() {
             copy_local_entry,
             cancel_copy_operation,
             delete_local_entry,
+            preview_local_text,
+            save_local_text,
             preview_remote_text,
             open_remote_file_externally,
             save_remote_text,
+            update_remote_entry_mode,
             delete_remote_entry,
             create_remote_directory,
             rename_remote_entry,
@@ -4943,12 +5218,9 @@ fn save_profile_credential(
         let _ = credentials.delete(&reference);
         return Err(error);
     }
-    if let Some(previous) = previous_reference
-        .as_deref()
-        .filter(|previous| {
-            *previous != reference.as_str() && is_profile_credential_reference(*previous)
-        })
-    {
+    if let Some(previous) = previous_reference.as_deref().filter(|previous| {
+        *previous != reference.as_str() && is_profile_credential_reference(previous)
+    }) {
         let _ = credentials.delete(previous);
     }
     profiles.get(profile_id)
@@ -5055,7 +5327,9 @@ fn valid_quick_host(host: &str) -> bool {
         return false;
     }
     if host.starts_with('[') && host.ends_with(']') {
-        return host[1..host.len() - 1].parse::<std::net::Ipv6Addr>().is_ok();
+        return host[1..host.len() - 1]
+            .parse::<std::net::Ipv6Addr>()
+            .is_ok();
     }
     if host.parse::<std::net::IpAddr>().is_ok() {
         return true;
@@ -5199,8 +5473,7 @@ mod assistant_security_tests {
 
     #[test]
     fn provider_messages_redact_prompt_context_and_history() {
-        let private_key =
-            "-----BEGIN OPENSSH PRIVATE KEY-----\nkey-material-8162\n-----END OPENSSH PRIVATE KEY-----";
+        let private_key = "-----BEGIN OPENSSH PRIVATE KEY-----\nkey-material-8162\n-----END OPENSSH PRIVATE KEY-----";
         let provider_token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
         let context = format!(
             "https://operator:url-secret-7351@example.invalid/v1\n{private_key}\napi_key=provider-secret-4926"
@@ -5313,17 +5586,24 @@ mod assistant_security_tests {
         let request =
             assistant_provider_request(&client, endpoint, api_key, "fixture-model", &messages)
                 .expect("build provider request");
-        assert!(request
-            .headers()
-            .get(reqwest::header::AUTHORIZATION)
-            .is_some_and(reqwest::header::HeaderValue::is_sensitive));
-        let response = client.execute(request).await.expect("send provider request");
+        assert!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .is_some_and(reqwest::header::HeaderValue::is_sensitive)
+        );
+        let response = client
+            .execute(request)
+            .await
+            .expect("send provider request");
         assert!(response.status().is_success());
 
         let (headers, body) = server.join().expect("mock provider thread");
-        assert!(headers
-            .to_ascii_lowercase()
-            .contains("authorization: bearer provider-bearer-secret-8341"));
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer provider-bearer-secret-8341")
+        );
         let payload = String::from_utf8(body).expect("provider payload is UTF-8");
         for secret in [
             "prompt-secret-1182",
@@ -5332,7 +5612,10 @@ mod assistant_security_tests {
             "abcdefghijklmnopqrstuvwxyz0123456789",
             api_key,
         ] {
-            assert!(!payload.contains(secret), "provider payload leaked {secret}");
+            assert!(
+                !payload.contains(secret),
+                "provider payload leaked {secret}"
+            );
         }
         assert!(payload.contains("[REDACTED_PRIVATE_KEY]"));
         assert!(payload.contains("[REDACTED_TOKEN]"));

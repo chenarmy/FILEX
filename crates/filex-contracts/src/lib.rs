@@ -76,6 +76,8 @@ pub struct KeyboardShortcuts {
     pub previous_session: String,
     pub terminal_search: String,
     pub toggle_files: String,
+    #[serde(default = "default_toggle_focus_mode")]
+    pub toggle_focus_mode: String,
     pub toggle_task_drawer: String,
     pub command_palette: String,
     pub toggle_assistant: String,
@@ -84,6 +86,10 @@ pub struct KeyboardShortcuts {
     pub focus_inspector: String,
     pub open_settings: String,
     pub show_events: String,
+}
+
+fn default_toggle_focus_mode() -> String {
+    "mod+shift+m".to_owned()
 }
 
 impl Default for KeyboardShortcuts {
@@ -96,6 +102,7 @@ impl Default for KeyboardShortcuts {
             previous_session: "mod+shift+tab".to_owned(),
             terminal_search: "mod+f".to_owned(),
             toggle_files: "mod+shift+f".to_owned(),
+            toggle_focus_mode: "mod+shift+m".to_owned(),
             toggle_task_drawer: "mod+j".to_owned(),
             command_palette: "mod+shift+p".to_owned(),
             toggle_assistant: "mod+shift+a".to_owned(),
@@ -137,6 +144,20 @@ pub struct SafeSettings {
     pub connections_pane_width: u16,
     pub inspector_pane_width: u16,
     pub task_drawer_height: u16,
+    #[serde(default = "default_host_panel_open")]
+    pub host_panel_open: bool,
+    #[serde(default = "default_file_browser_open")]
+    pub file_browser_open: bool,
+    #[serde(default)]
+    pub follow_terminal_cwd: bool,
+    #[serde(default)]
+    pub focus_mode: bool,
+    #[serde(default)]
+    pub details_pane_open: bool,
+    #[serde(default = "default_host_panel_width")]
+    pub host_panel_width: u16,
+    #[serde(default = "default_file_browser_height")]
+    pub file_browser_height: u16,
     pub terminal_logging: bool,
     pub backup_schedule: String,
     pub update_channel: String,
@@ -146,6 +167,22 @@ pub struct SafeSettings {
 
 fn default_monitor_interval_seconds() -> u16 {
     30
+}
+
+fn default_host_panel_open() -> bool {
+    true
+}
+
+fn default_file_browser_open() -> bool {
+    true
+}
+
+fn default_host_panel_width() -> u16 {
+    280
+}
+
+fn default_file_browser_height() -> u16 {
+    260
 }
 
 fn default_terminal_theme() -> String {
@@ -209,6 +246,8 @@ pub struct TerminalLogStatus {
 pub struct CommandSnippet {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
     pub command: String,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
@@ -219,6 +258,8 @@ pub struct CommandSnippet {
 pub struct SaveCommandSnippetInput {
     pub id: Option<String>,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
     pub command: String,
 }
 
@@ -575,6 +616,10 @@ pub struct RemoteFileEntry {
     pub size: Option<u64>,
     pub modified_at_ms: Option<u64>,
     pub permissions_mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -617,6 +662,24 @@ pub struct RemoteTextSaveResult {
     pub recovery_copy_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalTextPreview {
+    pub path: String,
+    pub content: String,
+    pub bytes: u32,
+    pub truncated: bool,
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalTextSaveResult {
+    pub path: String,
+    pub bytes: u32,
+    pub revision: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum MonitorState {
@@ -635,6 +698,10 @@ pub struct SystemMonitorSnapshot {
     pub os_name: Option<String>,
     pub uptime_seconds: Option<u64>,
     pub load_one: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_five: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_fifteen: Option<f64>,
     pub cpu_percent: Option<f64>,
     pub memory_total_kib: Option<u64>,
     pub memory_available_kib: Option<u64>,
@@ -642,8 +709,19 @@ pub struct SystemMonitorSnapshot {
     pub swap_used_kib: Option<u64>,
     pub root_total_kib: Option<u64>,
     pub root_available_kib: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounts: Vec<DiskMount>,
     pub network_receive_bytes_per_second: Option<f64>,
     pub network_transmit_bytes_per_second: Option<f64>,
+}
+
+/// A bounded per-mount disk usage sample reported alongside the root aggregate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskMount {
+    pub path: String,
+    pub total_kib: u64,
+    pub available_kib: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -19,5 +19,12 @@ export default defineConfig({
     target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari13',
     minify: process.env.TAURI_ENV_DEBUG ? false : 'esbuild',
     sourcemap: Boolean(process.env.TAURI_ENV_DEBUG),
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          monaco: ['monaco-editor/editor/editor.api'],
+        },
+      },
+    },
   },
 });

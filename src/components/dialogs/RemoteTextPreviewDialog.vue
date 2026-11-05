@@ -134,7 +134,7 @@ async function openExternally(): Promise<void> {
         <p v-if="sftp.preview.truncated" class="dialog-note preview-truncated">{{ t('inspector.previewTruncated') }}</p>
         <p v-if="sftp.recoveryCopyPath" class="dialog-note preview-truncated">{{ t('inspector.recoveryCopyRetained', { path: sftp.recoveryCopyPath }) }}</p>
         <p v-if="editing && !draftWithinLimit" class="form-error">{{ t('inspector.editorSizeLimit') }}</p>
-        <textarea v-if="editing" v-model="draft" class="remote-text-editor" :disabled="sftp.savingPreview" spellcheck="false" :aria-label="t('inspector.previewTitle')"></textarea>
+        <textarea v-if="editing" v-model="draft" class="remote-text-editor" :disabled="sftp.savingPreview" spellcheck="false" :aria-label="t('inspector.previewTitle')" />
         <pre v-else class="remote-text-content" tabindex="0">{{ sftp.preview.content }}</pre>
         <div class="remote-preview-footer"><span>{{ t('inspector.previewBytes', { bytes: editing ? draftBytes : sftp.preview.bytes }) }}</span></div>
       </div>

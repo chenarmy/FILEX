@@ -2,14 +2,14 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import {
   Activity,
-  CircleAlert,
   Bot,
+  CircleAlert,
   Command,
   FolderOpen,
+  Info,
   KeyRound,
-  MonitorCog,
+  Maximize2,
   Plus,
-  RefreshCw,
   Search,
   Settings,
   ShieldCheck,
@@ -19,6 +19,9 @@ import {
 } from 'lucide-vue-next';
 import ConnectionsPane from '@/components/connections/ConnectionsPane.vue';
 import TerminalWorkspace from '@/components/terminal/TerminalWorkspace.vue';
+import CommandInputBar from '@/components/terminal/CommandInputBar.vue';
+import FileBrowserPanel from '@/components/files/FileBrowserPanel.vue';
+import HostPanel from '@/components/monitor/HostPanel.vue';
 import InspectorPane from '@/components/inspector/InspectorPane.vue';
 import CommandPalette from '@/components/dialogs/CommandPalette.vue';
 import AssistantPanel from '@/components/assistant/AssistantPanel.vue';
@@ -40,9 +43,6 @@ const connections = useConnectionsStore();
 const settings = useSettingsStore();
 const ui = useUiStore();
 const sessions = useSessionsStore();
-const activeName = computed(() => sessions.profileForSession(sessions.activeSession)?.name
-  ?? connections.activeProfile?.name
-  ?? '—');
 const sessionErrorVisible = computed(() => sessions.error !== null
   && sessions.passwordProfileId === null
   && sessions.privateKeyPassphraseProfileId === null
@@ -50,9 +50,20 @@ const sessionErrorVisible = computed(() => sessions.error !== null
 const sessionErrorText = computed(() => sessionErrorVisible.value && sessions.error
   ? t(sessions.error.messageKey as Parameters<typeof t>[0])
   : '');
-const connectionsPane = ref<InstanceType<typeof ConnectionsPane> | null>(null);
-const terminalWorkspace = ref<InstanceType<typeof TerminalWorkspace> | null>(null);
-const inspectorPane = ref<InstanceType<typeof InspectorPane> | null>(null);
+const connectionsPane = ref<{ focusFilter: () => void } | null>(null);
+const terminalWorkspace = ref<{
+  focusActiveTerminal: () => void;
+  openSearch: () => void;
+  selectRelativeSession: (direction: 1 | -1) => void;
+} | null>(null);
+const inspectorPane = ref<{ focusInspector: () => void } | null>(null);
+
+const focusMode = computed(() => settings.value.focusMode);
+const hasActiveSession = computed(() => sessions.activeSession !== null);
+const hostPanelVisible = computed(() => settings.value.hostPanelOpen && !focusMode.value && hasActiveSession.value);
+const fileBrowserVisible = computed(() => settings.value.fileBrowserOpen && !focusMode.value);
+const commandBarVisible = computed(() => !focusMode.value && hasActiveSession.value);
+const detailsPaneVisible = computed(() => !focusMode.value && settings.value.detailsPaneOpen);
 
 const commandPaletteCommands = computed<CommandPaletteCommand[]>(() => {
   const shortcuts = settings.value.shortcuts;
@@ -67,6 +78,7 @@ const commandPaletteCommands = computed<CommandPaletteCommand[]>(() => {
     { id: 'terminalSearch', label: t('commands.terminalSearch'), shortcut: shortcuts.terminalSearch, disabled: !activeSession },
     { id: 'toggleFiles', label: t('commands.showFiles'), shortcut: shortcuts.toggleFiles },
     { id: 'showMonitor', label: t('commands.showMonitor') },
+    { id: 'toggleFocusMode', label: t('commands.toggleFocusMode'), shortcut: shortcuts.toggleFocusMode },
     { id: 'toggleTaskDrawer', label: t('commands.toggleTaskDrawer'), shortcut: shortcuts.toggleTaskDrawer },
     { id: 'showEvents', label: t('commands.showEvents'), shortcut: shortcuts.showEvents },
     { id: 'toggleAssistant', label: t('commands.toggleAssistant'), shortcut: shortcuts.toggleAssistant },
@@ -94,13 +106,13 @@ async function createNewSession(): Promise<void> {
   else ui.openQuickConnect();
 }
 
-function showInspectorTab(tab: 'files' | 'monitor' | 'session'): void {
-  settings.value.inspectorTab = tab;
-  ui.assistantOpen = false;
+function toggleFocusMode(): void {
+  settings.value.focusMode = !settings.value.focusMode;
 }
 
 async function focusInspector(): Promise<void> {
   ui.assistantOpen = false;
+  settings.value.detailsPaneOpen = true;
   await nextTick();
   inspectorPane.value?.focusInspector();
 }
@@ -127,7 +139,10 @@ function runShortcutAction(action: KeyboardShortcutAction): void {
       terminalWorkspace.value?.openSearch();
       break;
     case 'toggleFiles':
-      showInspectorTab('files');
+      settings.value.fileBrowserOpen = !settings.value.fileBrowserOpen;
+      break;
+    case 'toggleFocusMode':
+      toggleFocusMode();
       break;
     case 'toggleTaskDrawer':
       settings.value.taskDrawerOpen = !settings.value.taskDrawerOpen;
@@ -159,7 +174,7 @@ function runShortcutAction(action: KeyboardShortcutAction): void {
 
 function runCommand(commandId: CommandPaletteCommandId): void {
   if (commandId === 'showMonitor') {
-    showInspectorTab('monitor');
+    settings.value.hostPanelOpen = true;
     return;
   }
   if (commandId === 'disconnectActiveSession') {
@@ -169,18 +184,32 @@ function runCommand(commandId: CommandPaletteCommandId): void {
   runShortcutAction(commandId);
 }
 
-function beginPaneResize(side: 'connections' | 'inspector', event: PointerEvent): void {
+async function startSessionForActiveProfile(): Promise<void> {
+  await startSession();
+}
+
+function beginPaneResize(side: 'connections' | 'inspector' | 'host', event: PointerEvent): void {
   event.preventDefault();
   const startX = event.clientX;
   const initial = side === 'connections'
     ? settings.value.connectionsPaneWidth
-    : settings.value.inspectorPaneWidth;
+    : side === 'host'
+      ? settings.value.hostPanelWidth
+      : settings.value.inspectorPaneWidth;
   const move = (next: PointerEvent) => {
-    const delta = side === 'connections' ? next.clientX - startX : startX - next.clientX;
-    const min = side === 'connections' ? 180 : settings.value.dualPaneSftp ? 540 : 220;
-    const max = side === 'connections' ? 420 : settings.value.dualPaneSftp ? 760 : 480;
+    const delta = side === 'inspector' ? startX - next.clientX : next.clientX - startX;
+    let min = 180;
+    let max = 420;
+    if (side === 'host') {
+      min = 200;
+      max = 420;
+    } else if (side === 'inspector') {
+      min = settings.value.dualPaneSftp ? 540 : 220;
+      max = settings.value.dualPaneSftp ? 760 : 480;
+    }
     const width = Math.min(max, Math.max(min, initial + delta));
     if (side === 'connections') settings.value.connectionsPaneWidth = width;
+    else if (side === 'host') settings.value.hostPanelWidth = width;
     else settings.value.inspectorPaneWidth = width;
   };
   const stop = () => {
@@ -191,17 +220,42 @@ function beginPaneResize(side: 'connections' | 'inspector', event: PointerEvent)
   window.addEventListener('pointerup', stop, { once: true });
 }
 
-function resizePaneByKeyboard(side: 'connections' | 'inspector', event: KeyboardEvent): void {
+function beginFileBrowserResize(event: PointerEvent): void {
+  event.preventDefault();
+  const startY = event.clientY;
+  const initial = settings.value.fileBrowserHeight;
+  const move = (next: PointerEvent) => {
+    const delta = startY - next.clientY;
+    settings.value.fileBrowserHeight = Math.min(480, Math.max(160, initial + delta));
+  };
+  const stop = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', stop);
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', stop, { once: true });
+}
+
+function resizePaneByKeyboard(side: 'connections' | 'inspector' | 'host', event: KeyboardEvent): void {
   if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
   event.preventDefault();
   const direction = event.key === 'ArrowRight' ? 1 : -1;
   if (side === 'connections') {
     settings.value.connectionsPaneWidth = Math.min(420, Math.max(180, settings.value.connectionsPaneWidth + direction * 12));
+  } else if (side === 'host') {
+    settings.value.hostPanelWidth = Math.min(420, Math.max(200, settings.value.hostPanelWidth + direction * 12));
   } else {
     const min = settings.value.dualPaneSftp ? 540 : 220;
     const max = settings.value.dualPaneSftp ? 760 : 480;
     settings.value.inspectorPaneWidth = Math.min(max, Math.max(min, settings.value.inspectorPaneWidth - direction * 12));
   }
+}
+
+function resizeFileBrowserByKeyboard(event: KeyboardEvent): void {
+  if (!['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+  event.preventDefault();
+  const direction = event.key === 'ArrowUp' ? 1 : -1;
+  settings.value.fileBrowserHeight = Math.min(480, Math.max(160, settings.value.fileBrowserHeight + direction * 12));
 }
 
 function handleShortcut(event: KeyboardEvent): void {
@@ -256,7 +310,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleShortcut, true
 </script>
 
 <template>
-  <main class="workbench-shell" :class="{ 'task-open': settings.value.taskDrawerOpen }">
+  <main class="workbench-shell" :class="{ 'task-open': settings.value.taskDrawerOpen, 'focus-mode': focusMode }">
     <header class="context-bar">
       <div class="brand" aria-label="FILEX">
         <span class="brand-mark"><Terminal :size="15" /></span>
@@ -272,7 +326,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleShortcut, true
         <input v-model="connections.query" type="search" :placeholder="t('app.searchPlaceholder')">
       </label>
       <div class="context-actions">
-        <button type="button" class="button primary" :disabled="sessions.busy" @click="startSession">
+        <button type="button" class="button primary" :disabled="sessions.busy" @click="startSessionForActiveProfile">
           <Plus :size="14" />
           <span>{{ t('app.newSession') }}</span>
         </button>
@@ -286,6 +340,74 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleShortcut, true
         >
           <Zap :size="15" />
         </button>
+        <span class="toolbar-divider" />
+        <button
+          type="button"
+          class="icon-button"
+          :class="{ active: fileBrowserVisible }"
+          :aria-pressed="fileBrowserVisible"
+          :aria-label="t('terminal.files')"
+          :title="`${t('terminal.files')} · ${formatKeyboardShortcut(settings.value.shortcuts.toggleFiles)}`"
+          @click="settings.value.fileBrowserOpen = !settings.value.fileBrowserOpen"
+        >
+          <FolderOpen :size="15" />
+        </button>
+        <button
+          type="button"
+          class="icon-button"
+          :class="{ active: hostPanelVisible }"
+          :aria-pressed="hostPanelVisible"
+          :aria-label="t('terminal.monitor')"
+          :title="t('terminal.monitor')"
+          :disabled="!hasActiveSession"
+          @click="settings.value.hostPanelOpen = !settings.value.hostPanelOpen"
+        >
+          <Activity :size="15" />
+        </button>
+        <button
+          type="button"
+          class="icon-button"
+          :aria-label="t('terminal.tunnel')"
+          :title="t('terminal.tunnel')"
+          :disabled="sessions.activeSession?.state !== 'connected' || sessions.isQuickProfile(sessions.activeSession?.profileId)"
+          @click="ui.openTunnel()"
+        >
+          <KeyRound :size="15" />
+        </button>
+        <button
+          type="button"
+          class="icon-button"
+          :class="{ active: ui.assistantOpen }"
+          :aria-pressed="ui.assistantOpen"
+          :aria-label="t('assistant.title')"
+          :title="t('assistant.title')"
+          @click="ui.toggleAssistant"
+        >
+          <Bot :size="15" />
+        </button>
+        <button
+          type="button"
+          class="icon-button"
+          :class="{ active: detailsPaneVisible }"
+          :aria-pressed="detailsPaneVisible"
+          :aria-label="t('terminal.details')"
+          :title="t('terminal.details')"
+          @click="settings.value.detailsPaneOpen = !settings.value.detailsPaneOpen"
+        >
+          <Info :size="15" />
+        </button>
+        <span class="toolbar-divider" />
+        <button
+          type="button"
+          class="icon-button"
+          :class="{ active: focusMode }"
+          :aria-pressed="focusMode"
+          :aria-label="t('commands.toggleFocusMode')"
+          :title="`${t('commands.toggleFocusMode')} · ${formatKeyboardShortcut(settings.value.shortcuts.toggleFocusMode)}`"
+          @click="toggleFocusMode"
+        >
+          <Maximize2 :size="15" />
+        </button>
         <button type="button" class="icon-button" :aria-label="t('commands.title')" :title="`${t('commands.title')} · ${formatKeyboardShortcut(settings.value.shortcuts.commandPalette)}`" @click="ui.openCommandPalette">
           <Command :size="15" />
         </button>
@@ -295,50 +417,65 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleShortcut, true
       </div>
     </header>
 
-    <div class="action-bar">
-      <div class="action-context">
-        <span class="environment-badge production">PROD</span>
-        <strong>{{ activeName }}</strong>
-      </div>
-      <div class="toolbar-actions">
-        <button type="button" class="toolbar-button" :disabled="!connections.activeProfile || sessions.busy" @click="startSession">
-          <RefreshCw :size="13" />{{ t('terminal.reconnect') }}
-        </button>
-        <button type="button" class="toolbar-button" :disabled="sessions.activeSession?.state !== 'connected' || sessions.busy" @click="sessions.disconnectActive">
-          <X :size="13" />{{ t('terminal.disconnect') }}
-        </button>
-        <span class="toolbar-divider" />
-        <button type="button" class="toolbar-button" :class="{ active: settings.value.inspectorTab === 'files' }" @click="settings.value.inspectorTab = 'files'">
-          <FolderOpen :size="13" />{{ t('terminal.files') }}
-        </button>
-        <button type="button" class="toolbar-button" :class="{ active: settings.value.inspectorTab === 'monitor' }" @click="settings.value.inspectorTab = 'monitor'">
-          <Activity :size="13" />{{ t('terminal.monitor') }}
-        </button>
-        <button type="button" class="toolbar-button" :disabled="sessions.activeSession?.state !== 'connected' || sessions.isQuickProfile(sessions.activeSession?.profileId)" @click="ui.openTunnel()">
-          <KeyRound :size="13" />{{ t('terminal.tunnel') }}
-        </button>
-        <button type="button" class="toolbar-button" :class="{ active: ui.assistantOpen }" @click="ui.toggleAssistant"><Bot :size="13" />{{ t('assistant.title') }}</button>
-      </div>
+    <div class="session-tabs-bar">
+      <div id="session-tabs-slot" class="session-tabs-slot" />
       <div v-if="sessionErrorVisible" class="security-summary error" role="alert" :title="sessionErrorText">
         <CircleAlert :size="13" />
         <span>{{ sessionErrorText }}</span>
         <button type="button" class="icon-button" :aria-label="t('app.dismissNotice')" :title="t('app.dismissNotice')" @click="sessions.clearError"><X :size="12" /></button>
       </div>
-      <div v-else class="security-summary">
+      <div v-else-if="!hasActiveSession" class="security-summary">
         <ShieldCheck :size="13" />
         <span>{{ t('inspector.trustUnknown') }}</span>
       </div>
     </div>
 
     <section class="workbench-main">
-      <ConnectionsPane ref="connectionsPane" />
-      <button class="pane-resizer" type="button" role="separator" aria-orientation="vertical" aria-label="Resize connections pane" @pointerdown="beginPaneResize('connections', $event)" @keydown="resizePaneByKeyboard('connections', $event)" />
+      <ConnectionsPane v-if="!focusMode" ref="connectionsPane" />
+      <button
+        v-if="!focusMode"
+        class="pane-resizer"
+        type="button"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize connections pane"
+        @pointerdown="beginPaneResize('connections', $event)"
+        @keydown="resizePaneByKeyboard('connections', $event)"
+      />
+      <template v-if="hostPanelVisible">
+        <HostPanel />
+        <button
+          class="pane-resizer"
+          type="button"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize host panel"
+          @pointerdown="beginPaneResize('host', $event)"
+          @keydown="resizePaneByKeyboard('host', $event)"
+        />
+      </template>
       <div class="center-column">
         <TerminalWorkspace ref="terminalWorkspace" />
+        <CommandInputBar v-if="commandBarVisible" />
+        <template v-if="fileBrowserVisible">
+          <button
+            class="pane-resizer horizontal"
+            type="button"
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize file browser"
+            @pointerdown="beginFileBrowserResize($event)"
+            @keydown="resizeFileBrowserByKeyboard($event)"
+          />
+          <div class="file-browser-panel-slot" :style="{ height: `${settings.value.fileBrowserHeight}px` }">
+            <FileBrowserPanel />
+          </div>
+        </template>
       </div>
-      <button class="pane-resizer" type="button" role="separator" aria-orientation="vertical" aria-label="Resize inspector pane" @pointerdown="beginPaneResize('inspector', $event)" @keydown="resizePaneByKeyboard('inspector', $event)" />
-      <AssistantPanel v-if="ui.assistantOpen" />
-      <InspectorPane v-else ref="inspectorPane" />
+      <template v-if="!focusMode">
+        <AssistantPanel v-if="ui.assistantOpen" />
+        <InspectorPane v-else-if="detailsPaneVisible" ref="inspectorPane" />
+      </template>
     </section>
 
     <TaskDrawer v-if="settings.value.taskDrawerOpen" />
@@ -352,6 +489,5 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleShortcut, true
     <div class="sr-only" role="status" aria-live="polite">
       {{ connections.activeProfile ? `Selected ${connections.activeProfile.name}` : '' }}
     </div>
-    <MonitorCog class="sr-only" />
   </main>
 </template>

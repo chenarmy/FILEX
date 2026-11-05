@@ -45,6 +45,9 @@ export const useSessionsStore = defineStore('sessions', () => {
   const outputBuffers = shallowRef<Record<string, Uint8Array[]>>({});
   const outputBufferStarts = shallowRef<Record<string, number>>({});
   const outputRevision = ref(0);
+  const sessionCwds = ref<Record<string, string>>({});
+  const commandHistory = ref<string[]>([]);
+  const COMMAND_HISTORY_LIMIT = 100;
   let unlistenTerminal: UnlistenFn | null = null;
   const autoReconnectInFlight = new Set<string>();
   const suppressAutoReconnect = new Set<string>();
@@ -656,6 +659,32 @@ export const useSessionsStore = defineStore('sessions', () => {
     if (summaries.value.some((item) => item.id === sessionId)) activeSessionId.value = sessionId;
   }
 
+  /** Records the OSC 7 working directory reported by the session's shell. */
+  function setSessionCwd(sessionId: string, cwd: string): void {
+    const trimmed = cwd.trim();
+    if (!trimmed.startsWith('/') || trimmed.length > 4096 || trimmed.includes('\0')) return;
+    if (sessionCwds.value[sessionId] === trimmed) return;
+    sessionCwds.value = { ...sessionCwds.value, [sessionId]: trimmed };
+  }
+
+  function sessionCwd(sessionId: string | null | undefined): string | null {
+    return sessionId ? sessionCwds.value[sessionId] ?? null : null;
+  }
+
+  /** Appends a sent command to the bounded in-memory history; never persisted. */
+  function recordCommandHistory(command: string): void {
+    const trimmed = command.trim();
+    if (!trimmed) return;
+    const next = commandHistory.value.filter((item) => item !== trimmed);
+    next.push(trimmed);
+    while (next.length > COMMAND_HISTORY_LIMIT) next.shift();
+    commandHistory.value = next;
+  }
+
+  function clearCommandHistory(): void {
+    commandHistory.value = [];
+  }
+
   async function closeSession(sessionId: string): Promise<void> {
     if (pendingConnectionSessionId.value === sessionId) await cancelPendingAttempt();
     const summary = summaries.value.find((item) => item.id === sessionId);
@@ -672,6 +701,9 @@ export const useSessionsStore = defineStore('sessions', () => {
     const nextBufferStarts = { ...outputBufferStarts.value };
     delete nextBufferStarts[sessionId];
     outputBufferStarts.value = nextBufferStarts;
+    const nextCwds = { ...sessionCwds.value };
+    delete nextCwds[sessionId];
+    sessionCwds.value = nextCwds;
     if (activeSessionId.value === sessionId) {
       activeSessionId.value = summaries.value.at(-1)?.id ?? null;
     }
@@ -760,6 +792,12 @@ export const useSessionsStore = defineStore('sessions', () => {
     outputBuffers,
     outputBufferStarts,
     outputRevision,
+    sessionCwds,
+    sessionCwd,
+    setSessionCwd,
+    commandHistory,
+    recordCommandHistory,
+    clearCommandHistory,
     profileForId,
     profileForSession,
     isQuickProfile,

@@ -4,13 +4,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use filex_contracts::{
     AppError, AuthenticationMethod, ConnectionProfile, ConnectionProfilesExport, ConnectionState,
-    CreateConnectionProfileInput, CreateTransferInput, CreateTunnelRuleInput, HostTrustEvaluation,
-    HostTrustRecord, ImportKnownHostsInput, ImportKnownHostsResult, KeyboardShortcuts,
-    MonitorState, PortableConnectionProfile, PortableConnectionRouteHop, RecordHostTrustInput,
-    RemoteState, SafeSettings, SessionState, SessionSummary, SshConfigImportCandidate,
-    SystemMonitorSnapshot,
-    TransferState, TransferTask, TunnelKind, TunnelRule, UpdateConnectionProfileInput,
-    UpdateTunnelRuleInput,
+    CreateConnectionProfileInput, CreateTransferInput, CreateTunnelRuleInput, DiskMount,
+    HostTrustEvaluation, HostTrustRecord, ImportKnownHostsInput, ImportKnownHostsResult,
+    KeyboardShortcuts, MonitorState, PortableConnectionProfile, PortableConnectionRouteHop,
+    RecordHostTrustInput, RemoteState, SafeSettings, SessionState, SessionSummary,
+    SshConfigImportCandidate, SystemMonitorSnapshot, TransferState, TransferTask, TunnelKind,
+    TunnelRule, UpdateConnectionProfileInput, UpdateTunnelRuleInput,
 };
 
 pub const PORTABLE_PROFILE_EXPORT_MAX_PROFILES: usize = 10_000;
@@ -67,6 +66,13 @@ pub fn default_safe_settings() -> SafeSettings {
         connections_pane_width: 244,
         inspector_pane_width: 286,
         task_drawer_height: 156,
+        host_panel_open: true,
+        file_browser_open: true,
+        follow_terminal_cwd: false,
+        focus_mode: false,
+        details_pane_open: false,
+        host_panel_width: 280,
+        file_browser_height: 260,
         terminal_logging: false,
         backup_schedule: "daily".to_owned(),
         update_channel: "stable".to_owned(),
@@ -92,6 +98,8 @@ fn validate_safe_settings(settings: &SafeSettings) -> Result<(), AppError> {
         && (180..=420).contains(&settings.connections_pane_width)
         && (220..=760).contains(&settings.inspector_pane_width)
         && (96..=360).contains(&settings.task_drawer_height)
+        && (200..=420).contains(&settings.host_panel_width)
+        && (160..=480).contains(&settings.file_browser_height)
         && ["off", "daily", "weekly"].contains(&settings.backup_schedule.as_str())
         && ["stable", "beta"].contains(&settings.update_channel.as_str())
         && !settings.ui_font_family.trim().is_empty()
@@ -115,6 +123,7 @@ fn valid_keyboard_shortcuts(shortcuts: &KeyboardShortcuts) -> bool {
         shortcuts.previous_session.as_str(),
         shortcuts.terminal_search.as_str(),
         shortcuts.toggle_files.as_str(),
+        shortcuts.toggle_focus_mode.as_str(),
         shortcuts.toggle_task_drawer.as_str(),
         shortcuts.command_palette.as_str(),
         shortcuts.toggle_assistant.as_str(),
@@ -159,8 +168,20 @@ fn valid_keyboard_shortcut(binding: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
     let named_key = matches!(
         key,
-        "comma" | "period" | "slash" | "backslash" | "space" | "tab" | "left" | "right"
-            | "up" | "down" | "home" | "end" | "pageup" | "pagedown"
+        "comma"
+            | "period"
+            | "slash"
+            | "backslash"
+            | "space"
+            | "tab"
+            | "left"
+            | "right"
+            | "up"
+            | "down"
+            | "home"
+            | "end"
+            | "pageup"
+            | "pagedown"
     );
     let function_key = key
         .strip_prefix('f')
@@ -292,6 +313,7 @@ impl TunnelRuleService {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors the persisted TunnelRule fields
 fn validate_tunnel_rule(
     profile_id: &str,
     name: &str,
@@ -562,8 +584,16 @@ pub fn parse_monitor_probe(output: &str, collected_at_ms: u64) -> SystemMonitorS
         .get("LOAD1")
         .and_then(|value| value.parse::<f64>().ok())
         .filter(|value| value.is_finite() && *value >= 0.0);
-    let cpu_percent = parse_monitor_float(&values, "CPU_PERCENT")
-        .filter(|value| *value <= 100.0);
+    let load_five = values
+        .get("LOAD5")
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0);
+    let load_fifteen = values
+        .get("LOAD15")
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0);
+    let mounts = parse_disk_mounts(output);
+    let cpu_percent = parse_monitor_float(&values, "CPU_PERCENT").filter(|value| *value <= 100.0);
     let memory_total_kib = parse_u64(&values, "MEM_TOTAL");
     let memory_available_kib = parse_u64(&values, "MEM_AVAILABLE");
     let swap_total_kib = parse_u64(&values, "SWAP_TOTAL");
@@ -578,6 +608,7 @@ pub fn parse_monitor_probe(output: &str, collected_at_ms: u64) -> SystemMonitorS
         || memory_total_kib.is_some()
         || swap_total_kib.is_some()
         || root_total_kib.is_some()
+        || !mounts.is_empty()
         || network_receive_bytes_per_second.is_some()
         || network_transmit_bytes_per_second.is_some()
     {
@@ -592,6 +623,8 @@ pub fn parse_monitor_probe(output: &str, collected_at_ms: u64) -> SystemMonitorS
         os_name,
         uptime_seconds,
         load_one,
+        load_five,
+        load_fifteen,
         cpu_percent,
         memory_total_kib,
         memory_available_kib,
@@ -599,9 +632,48 @@ pub fn parse_monitor_probe(output: &str, collected_at_ms: u64) -> SystemMonitorS
         swap_used_kib,
         root_total_kib,
         root_available_kib,
+        mounts,
         network_receive_bytes_per_second,
         network_transmit_bytes_per_second,
     }
+}
+
+/// Parses bounded `MOUNT=<path>|<total_kib>|<available_kib>` probe lines into a
+/// mount list capped at 12 entries. Malformed, empty, zero-size or
+/// separator-containing entries are skipped instead of guessed.
+pub fn parse_disk_mounts(output: &str) -> Vec<DiskMount> {
+    let mut mounts = Vec::new();
+    for line in output.lines() {
+        if mounts.len() >= 12 {
+            break;
+        }
+        let Some(rest) = line.trim().strip_prefix("MOUNT=") else {
+            continue;
+        };
+        let mut parts = rest.split('|');
+        let (Some(path), Some(total_kib), Some(available_kib)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        if parts.next().is_some() || path.is_empty() || path.len() > 256 {
+            continue;
+        }
+        let (Ok(total_kib), Ok(available_kib)) =
+            (total_kib.parse::<u64>(), available_kib.parse::<u64>())
+        else {
+            continue;
+        };
+        if total_kib == 0 || available_kib > total_kib {
+            continue;
+        }
+        mounts.push(DiskMount {
+            path: path.to_owned(),
+            total_kib,
+            available_kib,
+        });
+    }
+    mounts
 }
 
 fn nonempty(value: Option<&str>) -> Option<String> {
@@ -612,10 +684,7 @@ fn parse_u64(values: &std::collections::HashMap<&str, &str>, key: &str) -> Optio
     values.get(key).and_then(|value| value.parse().ok())
 }
 
-fn parse_monitor_float(
-    values: &std::collections::HashMap<&str, &str>,
-    key: &str,
-) -> Option<f64> {
+fn parse_monitor_float(values: &std::collections::HashMap<&str, &str>, key: &str) -> Option<f64> {
     values
         .get(key)
         .and_then(|value| value.parse::<f64>().ok())
@@ -747,11 +816,7 @@ impl ProfileService {
             .get(id)?
             .ok_or_else(|| not_found_error("PROFILE_NOT_FOUND", "errors.profileNotFound"))?;
         let existing_profiles = self.repository.list()?;
-        validate_jump_profile_ids(
-            &input.proxy_jump_profile_ids,
-            Some(id),
-            &existing_profiles,
-        )?;
+        validate_jump_profile_ids(&input.proxy_jump_profile_ids, Some(id), &existing_profiles)?;
         if profile_is_used_as_jump(&existing_profiles, id)
             && (!input.proxy_jump_profile_ids.is_empty()
                 || normalize_optional(input.proxy_jump.clone()).is_some())
@@ -759,10 +824,10 @@ impl ProfileService {
             return Err(proxy_jump_nested_profile_error());
         }
         let identity_file = normalize_optional(input.identity_file);
-        let credential_context_unchanged =
-            existing.authentication_method == input.authentication_method
-                && (input.authentication_method != AuthenticationMethod::PrivateKey
-                    || existing.identity_file == identity_file);
+        let credential_context_unchanged = existing.authentication_method
+            == input.authentication_method
+            && (input.authentication_method != AuthenticationMethod::PrivateKey
+                || existing.identity_file == identity_file);
         let updated = ConnectionProfile {
             id: existing.id,
             name: input.name.trim().to_owned(),
@@ -1329,16 +1394,25 @@ impl HostTrustService {
         input: ImportKnownHostsInput,
     ) -> Result<ImportKnownHostsResult, AppError> {
         if input.candidates.is_empty() {
-            return Err(trust_import_error("TRUST_IMPORT_EMPTY", "errors.trustImportEmpty"));
+            return Err(trust_import_error(
+                "TRUST_IMPORT_EMPTY",
+                "errors.trustImportEmpty",
+            ));
         }
         if input.candidates.len() > 5_000 {
-            return Err(trust_import_error("TRUST_IMPORT_TOO_MANY", "errors.trustImportTooMany"));
+            return Err(trust_import_error(
+                "TRUST_IMPORT_TOO_MANY",
+                "errors.trustImportTooMany",
+            ));
         }
         if input.observed_at.trim().is_empty()
             || input.observed_at.len() > 64
             || input.observed_at.chars().any(char::is_control)
         {
-            return Err(trust_import_error("TRUST_IMPORT_INVALID", "errors.trustImportInvalid"));
+            return Err(trust_import_error(
+                "TRUST_IMPORT_INVALID",
+                "errors.trustImportInvalid",
+            ));
         }
 
         let mut seen = HashSet::with_capacity(input.candidates.len());
@@ -1357,7 +1431,10 @@ impl HostTrustService {
                     .as_deref()
                     .is_some_and(|fingerprint| !valid_sha256_fingerprint(fingerprint))
             {
-                return Err(trust_import_error("TRUST_IMPORT_INVALID", "errors.trustImportInvalid"));
+                return Err(trust_import_error(
+                    "TRUST_IMPORT_INVALID",
+                    "errors.trustImportInvalid",
+                ));
             }
             let key = (
                 candidate.host.to_ascii_lowercase(),
@@ -1365,7 +1442,10 @@ impl HostTrustService {
                 candidate.algorithm.clone(),
             );
             if !seen.insert(key) {
-                return Err(trust_import_error("TRUST_IMPORT_INVALID", "errors.trustImportInvalid"));
+                return Err(trust_import_error(
+                    "TRUST_IMPORT_INVALID",
+                    "errors.trustImportInvalid",
+                ));
             }
 
             expectations.push(HostTrustImportExpectation {
@@ -1375,16 +1455,17 @@ impl HostTrustService {
                 current_fingerprint_sha256: candidate.current_fingerprint_sha256.clone(),
             });
 
-            let existing = self.repository.latest(
-                &candidate.host,
-                candidate.port,
-                &candidate.algorithm,
-            )?;
+            let existing =
+                self.repository
+                    .latest(&candidate.host, candidate.port, &candidate.algorithm)?;
             let existing_fingerprint = existing
                 .as_ref()
                 .map(|record| record.fingerprint_sha256.as_str());
             if existing_fingerprint != candidate.current_fingerprint_sha256.as_deref() {
-                return Err(trust_import_error("TRUST_IMPORT_STALE", "errors.trustImportStale"));
+                return Err(trust_import_error(
+                    "TRUST_IMPORT_STALE",
+                    "errors.trustImportStale",
+                ));
             }
             if existing_fingerprint == Some(candidate.fingerprint_sha256.as_str()) {
                 unchanged_count += 1;
@@ -1403,15 +1484,22 @@ impl HostTrustService {
                     .as_ref()
                     .map(|record| record.fingerprint_sha256.clone()),
                 source: filex_contracts::HostTrustSource::ImportedKnownHosts,
-                first_seen_at: existing
-                    .as_ref()
-                    .map_or_else(|| input.observed_at.clone(), |record| record.first_seen_at.clone()),
+                first_seen_at: existing.as_ref().map_or_else(
+                    || input.observed_at.clone(),
+                    |record| record.first_seen_at.clone(),
+                ),
                 last_seen_at: input.observed_at.clone(),
             });
         }
 
-        if !self.repository.import_many_if_current(&expectations, &records)? {
-            return Err(trust_import_error("TRUST_IMPORT_STALE", "errors.trustImportStale"));
+        if !self
+            .repository
+            .import_many_if_current(&expectations, &records)?
+        {
+            return Err(trust_import_error(
+                "TRUST_IMPORT_STALE",
+                "errors.trustImportStale",
+            ));
         }
         Ok(ImportKnownHostsResult {
             imported_count: records.len() as u32,
@@ -1637,12 +1725,34 @@ mod tests {
     #[test]
     fn parses_bounded_monitor_probe_output() {
         let snapshot = super::parse_monitor_probe(
-            "HOST=node-01\nOS=Linux 6.6 x86_64\nUPTIME=1234.50\nLOAD1=0.42\nMEM_TOTAL=8192\nMEM_AVAILABLE=4096\nROOT_TOTAL=102400\nROOT_AVAILABLE=51200\n",
+            "HOST=node-01\nOS=Linux 6.6 x86_64\nUPTIME=1234.50\nLOAD1=0.42\nLOAD5=0.35\nLOAD15=0.30\nMEM_TOTAL=8192\nMEM_AVAILABLE=4096\nROOT_TOTAL=102400\nROOT_AVAILABLE=51200\n",
             42,
         );
         assert_eq!(snapshot.hostname.as_deref(), Some("node-01"));
         assert_eq!(snapshot.uptime_seconds, Some(1234));
         assert_eq!(snapshot.memory_available_kib, Some(4096));
+        assert_eq!(snapshot.load_five, Some(0.35));
+        assert_eq!(snapshot.load_fifteen, Some(0.30));
         assert_eq!(snapshot.collected_at_ms, 42);
+        assert!(snapshot.mounts.is_empty());
+    }
+
+    #[test]
+    fn parses_bounded_disk_mount_lines() {
+        let mounts = super::parse_disk_mounts(
+            "MOUNT=/|1000|400\nMOUNT=/run|bad|2\nMOUNT=|3|1\nMOUNT=/tmp|0|0\nMOUNT=/var|50|60\nMOUNT=/home|2000|1000|extra\nMOUNT=/a|10|5\nMOUNT=/b|10|5\nMOUNT=/c|10|5\nMOUNT=/d|10|5\nMOUNT=/e|10|5\nMOUNT=/f|10|5\nMOUNT=/g|10|5\nMOUNT=/h|10|5\nMOUNT=/i|10|5\nMOUNT=/j|10|5\nMOUNT=/k|10|5\nMOUNT=/l|10|5\nMOUNT=/m|10|5\n",
+        );
+        assert_eq!(mounts.len(), 12);
+        assert_eq!(mounts[0].path, "/");
+        assert_eq!(mounts[0].total_kib, 1000);
+        assert_eq!(mounts[0].available_kib, 400);
+        // Invalid, empty-path, zero-total, available>total and extra-segment lines are skipped.
+        assert!(!mounts.iter().any(|mount| mount.path == "/run"));
+        assert!(!mounts.iter().any(|mount| mount.path.is_empty()));
+        assert!(!mounts.iter().any(|mount| mount.total_kib == 0));
+        assert!(!mounts.iter().any(|mount| mount.path == "/var"));
+        assert!(!mounts.iter().any(|mount| mount.path == "/home"));
+        // The 12-entry cap keeps the first valid entries and drops the rest.
+        assert!(!mounts.iter().any(|mount| mount.path == "/m"));
     }
 }

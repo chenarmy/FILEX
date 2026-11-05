@@ -69,7 +69,7 @@ async function submit(): Promise<void> {
         <div>
           <ArrowUpFromLine v-if="direction === 'upload'" :size="15" />
           <ArrowDownToLine v-else :size="15" />
-            <strong id="transfer-title">{{ direction === 'upload' ? t('transfer.uploadTitle') : t('transfer.downloadTitle') }}</strong>
+          <strong id="transfer-title">{{ direction === 'upload' ? t('transfer.uploadTitle') : t('transfer.downloadTitle') }}</strong>
         </div>
         <button type="button" class="icon-button" aria-label="Close" @click="close"><X :size="14" /></button>
       </header>

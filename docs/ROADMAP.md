@@ -132,9 +132,9 @@ Implemented slice:
 - SSH remote TCP forwarding with bounded forwarded-channel dispatch and local destination bridging.
 - Tunnel shutdown now exposes a stopping state, closes active forwarded channels and waits for listener cleanup. Each listener caps concurrent forwarded connections at 64. Remote cancellation is bounded; a denied or unconfirmed cancellation leaves a failed status with guidance to disconnect the SSH session. Session disconnect keeps tunnels in stopping until their workers clean up and confirms remote forwards only after SSH disconnect succeeds. Desktop exit asynchronously disconnects SSH sessions, cancels all tunnels and waits for bounded cleanup before exiting. The UI refreshes live tunnel states while active and continues checking an unconfirmed remote cancellation until disconnect resolves it.
 - Server rejection of remote forwarding is classified separately from SSH transport failure, returned as a non-retryable structured error, and localized with the relevant server policy settings.
-- Added an unrun loopback SSH fixture covering host-key probe/mismatch rejection, password authentication, PTY input/output, remote-forward channel delivery/cancellation and server shutdown.
+- Added a loopback SSH fixture covering host-key probe/mismatch rejection, password authentication, PTY input/output, remote-forward channel delivery/cancellation and server shutdown. It runs and passes on Windows since the `request_remote_forward` port-handling fix (a successful `tcpip-forward` reply for a specific port has an empty body, which russh maps to `Ok(0)`).
 
-Still open in this phase: execute the SSH fixture and verify tunnel lifecycle and live-host monitoring capability and metric accuracy across Linux, macOS and Windows after the development environment is configured.
+Still open in this phase: verify tunnel lifecycle and live-host monitoring capability and metric accuracy across Linux, macOS and Windows after the development environment is configured.
 
 Deliverables:
 
@@ -187,6 +187,33 @@ Exit criteria:
 - Threat-model review and dependency audit.
 - Performance budgets measured on production builds.
 - Accessibility and localization acceptance complete.
+
+## Phase 5.5 — workspace experience alignment
+
+Status: **implemented slice** (added 2026-11-05; verification evidence in `docs/VERIFICATION.md`)
+
+Aligns FILEX with the public feature set of open SSH workbenches (FileTerm as market reference; own implementation) and restyles the shell to the approved FileTerm-style layout. Additive only: no existing capability is removed.
+
+Scope (implemented):
+
+- Shell restyle: top session tab bar, left host panel, terminal, command input bar, bottom dual-pane file browser; connections navigation, session details inspector, assistant panel and task drawer remain as collapsible surfaces. New visual tokens for both themes.
+- Floating command input bar with bounded in-memory history (never persisted or logged).
+- OSC 7 terminal working-directory tracking with a follow-terminal option in the file browser.
+- Remote permission mode editing (chmod) with explicit octal review; numeric uid/gid ownership columns.
+- Monitor extension: load averages 1/5/15 and a bounded multi-mount disk list; network rate history chart in the host panel.
+- Virtualized scrolling for large directory listings.
+- Monaco-based editor panel (lazy-loaded) for bounded remote/local text files with syntax highlighting and find/replace.
+- Command snippet folders and focus mode.
+
+Implemented alongside: `update_remote_entry_mode` / `preview_local_text` / `save_local_text` Tauri commands, `RemoteFileEntry.uid/gid`, `SystemMonitorSnapshot.mounts` + `loadFive/loadFifteen`, snippet `folder` field, and the corresponding typed facades, stores and zh-CN/en-US messages. Also fixed latent defects surfaced by verification: the assistant redactor rule order (`[REDACTED_TOKEN]` now survives keyword assignments), a virtual-list start-index clamp, and the session tab strip Teleport (`defer`) reload error.
+
+Exit criteria (remaining):
+
+- Existing Playwright browser E2E scenarios pass unchanged (profile persistence, pane resizing, authentication defaults, ProxyJump preflight, desktop boundary).
+- Dark/light, zh/en, keyboard and minimum-window acceptance for the new shell.
+- Structured error codes preserved across the new Rust/TS contract additions; secrets remain outside settings, logs and history.
+
+FTP/FTPS remains deferred to a separate design slice (see PRODUCT_DESIGN "Later" and Deferred product tracks below).
 
 ## Phase 6 — AI assistant
 

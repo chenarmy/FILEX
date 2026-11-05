@@ -541,7 +541,8 @@ function safeTunnelTargetHost(host: string | null): string | null {
           <p v-if="contextFileError" class="assistant-error" role="alert">{{ contextFileErrorText }}</p>
         </div>
         <textarea v-model="prompt" :placeholder="t('assistant.promptPlaceholder')" maxlength="20000" :disabled="consentSaving" @keydown.ctrl.enter.prevent="send" />
-        <div class="assistant-compose-footer"><small>{{ t('assistant.neverExecutes') }}</small>
+        <div class="assistant-compose-footer">
+          <small>{{ t('assistant.neverExecutes') }}</small>
           <button v-if="assistant.busy" type="button" class="button" @click="assistant.cancel"><Square :size="12" />{{ t('assistant.cancel') }}</button>
           <button v-else type="button" class="button primary" :disabled="assistant.historySaving || consentSaving || !assistant.provider.configured || !assistant.provider.externalDataConsent || !prompt.trim()" @click="send"><Send :size="12" />{{ t('assistant.send') }}</button>
         </div>

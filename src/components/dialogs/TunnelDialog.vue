@@ -8,6 +8,7 @@ import { useSettingsStore } from '@/stores/settings';
 import { useTunnelsStore } from '@/stores/tunnels';
 import { useUiStore } from '@/stores/ui';
 import { isLoopbackAddress } from '@/utils/network';
+import type { TunnelKind } from '@/types/contracts';
 
 const ui = useUiStore();
 const sessions = useSessionsStore();
@@ -17,9 +18,19 @@ const settings = useSettingsStore();
 const exposureConfirmed = ref(false);
 const selectedRuleId = ref('');
 const profileRules = computed(() => tunnels.rules.filter((rule) => rule.profileId === connections.activeProfile?.id));
-const form = reactive({
+interface TunnelForm {
+  name: string;
+  kind: TunnelKind;
+  bindHost: string;
+  bindPort: number;
+  targetHost: string;
+  targetPort: number;
+  autoStart: boolean;
+}
+
+const form = reactive<TunnelForm>({
   name: '',
-  kind: 'local' as 'local' | 'dynamic' | 'remote',
+  kind: 'local',
   bindHost: '127.0.0.1',
   bindPort: 8080,
   targetHost: '127.0.0.1',
@@ -130,8 +141,10 @@ async function removeSelectedRule(): Promise<void> {
           <label class="field full"><span>{{ t('tunnel.kind') }}</span><select v-model="form.kind"><option value="local">{{ t('tunnel.local') }}</option><option value="dynamic">{{ t('tunnel.dynamic') }}</option><option value="remote">{{ t('tunnel.remote') }}</option></select></label>
           <label class="field"><span>{{ t(form.kind === 'remote' ? 'tunnel.remoteBindHost' : 'tunnel.bindHost') }}</span><input v-model="form.bindHost" spellcheck="false"></label>
           <label class="field"><span>{{ t(form.kind === 'remote' ? 'tunnel.remoteBindPort' : 'tunnel.bindPort') }}</span><input v-model.number="form.bindPort" type="number" :min="form.kind === 'remote' ? 1 : 0" max="65535"></label>
-          <template v-if="form.kind !== 'dynamic'"><label class="field"><span>{{ t(form.kind === 'remote' ? 'tunnel.localTargetHost' : 'tunnel.targetHost') }}</span><input v-model="form.targetHost" spellcheck="false"></label>
-          <label class="field"><span>{{ t(form.kind === 'remote' ? 'tunnel.localTargetPort' : 'tunnel.targetPort') }}</span><input v-model.number="form.targetPort" type="number" min="1" max="65535"></label></template>
+          <template v-if="form.kind !== 'dynamic'">
+            <label class="field"><span>{{ t(form.kind === 'remote' ? 'tunnel.localTargetHost' : 'tunnel.targetHost') }}</span><input v-model="form.targetHost" spellcheck="false"></label>
+            <label class="field"><span>{{ t(form.kind === 'remote' ? 'tunnel.localTargetPort' : 'tunnel.targetPort') }}</span><input v-model.number="form.targetPort" type="number" min="1" max="65535"></label>
+          </template>
           <p v-else class="field full hint">{{ t('tunnel.dynamicHelp') }}</p>
         </div>
         <label v-if="exposesNetwork" class="trust-confirm overwrite-confirm"><input v-model="exposureConfirmed" type="checkbox"><ShieldAlert :size="13" /><span>{{ t(form.kind === 'remote' ? 'tunnel.confirmRemoteExposure' : 'tunnel.confirmExposure') }}</span></label>

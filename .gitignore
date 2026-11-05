@@ -11,3 +11,4 @@ target/
 Thumbs.db
 .idea/
 .vscode/
+.zcode/

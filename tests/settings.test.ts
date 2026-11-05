@@ -24,6 +24,26 @@ describe('safe settings repository', () => {
     });
   });
 
+  it('clamps the workspace layout settings added with the fileterm-style shell', () => {
+    localStorage.setItem('filex.safe-settings.v1', JSON.stringify({
+      hostPanelWidth: 9_999,
+      fileBrowserHeight: 1,
+      focusMode: true,
+      followTerminalCwd: 'yes',
+      detailsPaneOpen: 1,
+    }));
+
+    expect(readSafeSettings()).toMatchObject({
+      hostPanelWidth: 420,
+      fileBrowserHeight: 160,
+      focusMode: true,
+      followTerminalCwd: false,
+      detailsPaneOpen: false,
+      hostPanelOpen: true,
+      fileBrowserOpen: true,
+    });
+  });
+
   it('persists only the safe settings structure', () => {
     writeSafeSettings({ ...defaultSafeSettings, theme: 'light', uiFontSize: 15 });
     expect(readSafeSettings()).toMatchObject({ theme: 'light', uiFontSize: 15 });

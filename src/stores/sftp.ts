@@ -10,6 +10,7 @@ import {
   previewRemoteText,
   renameRemoteEntry,
   saveRemoteText,
+  updateRemoteEntryMode,
 } from '@/api/domain/sftpApi';
 import { cancelCopyOperation } from '@/api/domain/fileOperationsApi';
 import type { AppError, RemoteFileEntry, RemoteTextPreview } from '@/types/contracts';
@@ -31,6 +32,7 @@ export const useSftpStore = defineStore('sftp', () => {
   const renaming = ref(false);
   const moving = ref(false);
   const copying = ref(false);
+  const changingMode = ref(false);
   const savingPreview = ref(false);
   const recoveryCopyPath = ref<string | null>(null);
   let requestGeneration = 0;
@@ -216,6 +218,29 @@ export const useSftpStore = defineStore('sftp', () => {
     return result.ok;
   }
 
+  async function changeMode(entry: RemoteFileEntry, mode: number): Promise<boolean> {
+    if (!sessionId.value || changingMode.value || entry.isSymlink) return false;
+    const targetSessionId = sessionId.value;
+    const currentPath = path.value;
+    const listingGeneration = requestGeneration;
+    const isCurrentListing = () => listingGeneration === requestGeneration
+      && targetSessionId === sessionId.value
+      && currentPath === path.value;
+    changingMode.value = true;
+    error.value = null;
+    try {
+      const result = await updateRemoteEntryMode(targetSessionId, entry.path, mode);
+      if (!result.ok) {
+        if (isCurrentListing()) error.value = result.error;
+        return false;
+      }
+      if (isCurrentListing()) await load(targetSessionId, currentPath);
+      return true;
+    } finally {
+      changingMode.value = false;
+    }
+  }
+
   async function savePreview(content: string): Promise<boolean> {
     const currentPreview = preview.value;
     if (!sessionId.value || !currentPreview || currentPreview.truncated || savingPreview.value) return false;
@@ -302,6 +327,7 @@ export const useSftpStore = defineStore('sftp', () => {
     renaming.value = false;
     moving.value = false;
     copying.value = false;
+    changingMode.value = false;
     selectedPath.value = null;
   }
 
@@ -312,9 +338,9 @@ export const useSftpStore = defineStore('sftp', () => {
   return {
     entries, path, sessionId, selectedPath, loading, error,
     preview, previewPath, previewLoading, previewError, externalOpening, deleting, creatingDirectory, renaming, moving, copying,
-    savingPreview, recoveryCopyPath,
+    changingMode, savingPreview, recoveryCopyPath,
     load, open, parent, clear, select, previewFile, closePreview,
-    remove, createDirectory, rename, move, copy, cancelCopy, savePreview,
+    remove, createDirectory, rename, move, copy, cancelCopy, changeMode, savePreview,
     openPreviewExternally,
   };
 });

@@ -56,7 +56,7 @@ const terminalPalette = computed(() => {
         selectionBackground: '#93c5fd80',
       }
     : {
-        background: '#080c14',
+        background: '#0d0d0d',
         foreground: '#d7e0ef',
         cursor: '#7aa2f7',
         selectionBackground: '#334155aa',
@@ -82,6 +82,7 @@ let searchRefreshTimer: number | null = null;
 let pasteHandler: ((event: ClipboardEvent) => void) | null = null;
 let disposeSelectionListener: (() => void) | null = null;
 let disposeSearchResults: (() => void) | null = null;
+let disposeOscCwd: { dispose(): void } | null = null;
 let systemThemeMedia: MediaQueryList | null = null;
 let outputOffset = 0;
 let outputDecoder = new TextDecoder(settings.value.terminalEncoding);
@@ -273,6 +274,21 @@ onMounted(async () => {
     currentMatch.value = result.resultIndex >= 0 ? result.resultIndex + 1 : null;
   });
   disposeSearchResults = () => searchResultsListener.dispose();
+  // OSC 7 (`file://host/path`) shell integration: track the working directory so
+  // the file browser can follow the terminal. The payload stays in the pane.
+  disposeOscCwd = terminal.parser.registerOscHandler(7, (data) => {
+    const activeSessionId = props.sessionId;
+    if (!activeSessionId) return false;
+    const match = /^file:\/\/[^/]*(\/.*)$/.exec(data);
+    const path = match?.[1];
+    if (!path) return false;
+    try {
+      sessions.setSessionCwd(activeSessionId, decodeURIComponent(path));
+    } catch {
+      // Malformed percent-encoding: ignore the report entirely.
+    }
+    return true;
+  });
 
   await nextTick();
   if (terminalHost.value) terminal.open(terminalHost.value);
@@ -381,6 +397,7 @@ onBeforeUnmount(() => {
   if (pasteHandler) terminal?.element?.removeEventListener('paste', pasteHandler, true);
   disposeSelectionListener?.();
   disposeSearchResults?.();
+  disposeOscCwd?.dispose();
   searchAddon?.dispose();
   terminal?.dispose();
 });

@@ -14,33 +14,39 @@ Use native operating-system window chrome for the first implementation. Inside i
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ Context bar 40: FILEX | workspace | search / quick connect | + session | ⚙ │
-├──────────────────────────────────────────────────────────────────────────────┤
-│ Action bar 40: session actions | split | reconnect | files | monitor | tunnel│
-├───────────────┬─────────────────────────────────────────┬────────────────────┤
-│ Navigation    │ Session tab strip                       │ Context inspector  │
-│ 240 px        ├─────────────────────────────────────────┤ 360 px, optional   │
-│               │                                         │ Files / Monitor /  │
-│ Connections   │ Terminal workspace                      │ Session / Notes    │
-│ Favorites     │ Tabs and optional splits                │                    │
-│ Recent        │                                         │                    │
-│ Tunnels       │                                         │                    │
-│ Snippets      │                                         │                    │
-├───────────────┴─────────────────────────────────────────┴────────────────────┤
+│ Top bar 44: FILEX | session tabs ● + | split/search/log | reconnect ⚙ ⤢    │
+├───────────────┬───────────────┬──────────────────────────────┬───────────────┤
+│ Navigation    │ Host panel    │ Terminal workspace           │ Details or    │
+│ (collapsible) │ (collapsible) │ tabs and optional splits     │ assistant     │
+│ 240 px        │ 280 px        │                              │ (collapsible) │
+│               │               ├──────────────────────────────┤ 360 px        │
+│ Connections   │ connection    │ Command input bar 36         │               │
+│ Favorites     │ info, uptime, ├──────────────────────────────┤ Session /     │
+│ Recent        │ load 1/5/15,  │ File browser (collapsible)   │ assistant     │
+│ Tunnels       │ CPU/memory/   │ Files | Commands             │ context       │
+│ Snippets      │ swap gauges,  │ local | remote panes, path   │               │
+│               │ process tabs, │ breadcrumb, follow-terminal, │               │
+│               │ network rate, │ transfer footer              │               │
+│               │ disk mounts   │                              │               │
+├───────────────┴───────────────┴──────────────────────────────┴───────────────┤
 │ Task drawer 220, optional: Transfers | Tunnels | Events                     │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ Status 24: trust | user@host | latency | encoding | terminal size | tasks   │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
+Focus mode collapses navigation, host panel, file browser and the details/assistant column so the terminal fills the window; it is one action and respects reduced-motion settings.
+
 ### Baseline dimensions
 
 | Region | Default | Clamp/behavior |
 | --- | ---: | --- |
-| Context bar | 40 px | Fixed |
-| Action bar | 40 px | Fixed; context-sensitive |
-| Navigation | 240 px | 180 px to 40% window width |
-| Inspector | 360 px | 280 px to 50% window width; collapsible |
+| Top bar | 44 px | Fixed; brand, session tabs, global actions |
+| Navigation | 240 px | 180 px to 40% window width; collapsible |
+| Host panel | 280 px | 200 px to 420 px; collapsible; appears with a connected session |
+| Command input bar | 36 px | Fixed; hidden without a connected session |
+| File browser | 260 px | 160 px to 65% window height; collapsible |
+| Details/assistant | 360 px | 280 px to 50% window width; collapsible; assistant replaces details when open |
 | Task drawer | 220 px | 96 px to 55% window height; collapsible |
 | Status bar | 24 px | Fixed |
 | Window | 1280 x 800 | Minimum 960 x 640 |
@@ -64,9 +70,11 @@ Credentials are managed inside Settings/Security and profile editors, not expose
 ### Session destinations
 
 - **Terminal:** primary center surface.
-- **Files:** right inspector, optionally promoted to a full-width workspace.
-- **Monitor:** right inspector with a full dashboard option.
-- **Session:** connection details, negotiated algorithms, channels, jump path and event timeline.
+- **Command bar:** floating command input bound to the active session, with in-memory history.
+- **Files:** bottom dual-pane local/remote browser with follow-terminal option and transfer footer; the right inspector retains the legacy files view.
+- **Monitor:** left host panel (connection info, gauges, process tabs, network rate chart, disk mounts); the right inspector retains the legacy monitor view.
+- **Editor:** Monaco-based editor panel for bounded remote/local text files.
+- **Session:** connection details, negotiated algorithms, channels, jump path and event timeline in the collapsible details column.
 - **Notes:** per-profile local notes.
 - **Assistant context:** explicit chips for the attached session, event range, metrics, selected file or bounded terminal selection.
 
@@ -133,17 +141,20 @@ The Settings/Security trust ledger shows current and historical fingerprints wit
 - Split layouts: single, vertical, horizontal, and grid only after the base terminal is stable.
 - A disconnected pane retains scrollback and shows an inline reconnect strip rather than replacing the terminal.
 - Search and command history are overlays that do not steal the entire workspace.
+- The command input bar sits directly under the terminal surface. Enter sends the line to the active PTY, Shift+Enter inserts a newline, and the bounded history (in-memory only, capped, clearable) is navigated with ArrowUp/ArrowDown. It is disabled and visibly labelled when no terminal is connected.
 - Paste containing multiple lines or shell metacharacters can show a configurable safety preview.
 - Password prompts and alternate screen applications must remain compatible with standard terminal behavior.
 - Terminal logging is off by default. After the user enables logging capability in Settings → Terminal, the active session toolbar exposes a log action; starting requires a host-specific confirmation that raw output may contain sensitive data. An active log shows a compact written-size indicator, and limit, overflow or write failure changes to an explicit warning state.
 
 The toolbar prioritizes reconnect/disconnect, new split, Files, Monitor and Tunnel. Session logging sits with the secondary session utilities and exposes its state inline; other rare actions belong in More.
 
-### 4.6 Files inspector
+### 4.6 Files browser
 
-Header: channel state, path breadcrumb, back/forward/up, refresh, new folder and upload.
+The primary surface is the bottom dual-pane browser inside the center column: a local pane and a remote pane side by side, with a Files | Commands sub-tab strip, path breadcrumb, refresh, upload/download, new folder, follow-terminal chip and a transfer footer that shows the running task count and opens the task drawer.
 
-List columns: name, size, modified, permissions and owner; responsive collapse begins with owner and permissions. Symlinks are visually distinct and display targets in details.
+List columns: name, size, type, modified, permissions and owner (numeric uid/gid when the server provides it); responsive collapse begins with owner and permissions. Symlinks are visually distinct and display targets in details. Rows expose a permission-mode action that opens an explicit octal review dialog before any chmod mutation.
+
+Header: channel state, path breadcrumb, up, refresh, new folder and upload.
 
 The inspector supports:
 
@@ -156,14 +167,14 @@ The inspector supports:
 
 Never infer a successful upload from bytes sent alone; show verifying or committed state when the protocol/operation needs it.
 
-### 4.7 Monitor inspector
+### 4.7 Host panel and monitor
 
-Use compact sections rather than a card dashboard:
+The primary monitor surface is the left host panel: connection info (name, user@host, port with copy), uptime and load 1/5/15, CPU with a thin progress bar, memory/swap gauges with used/total values, a segmented process sub-view (memory | CPU | commands), a bounded network rate history chart, and a multi-mount disk list card. Use compact sections rather than a card dashboard:
 
 - System and uptime.
 - CPU/load sparkline.
 - Memory/swap bars.
-- Disk table.
+- Disk mount table.
 - Network rate and interface selector.
 - Collector status and last sample time.
 - A Metrics/Processes sub-view. The process list is manually refreshed and capped at 100 rows; it shows a sanitized process name, PID, CPU information, resident memory and state without command arguments, environment variables or working directories.
@@ -220,46 +231,51 @@ Required states:
 ### Dark theme
 
 ```css
---background: 220 13% 9%;
---foreground: 220 18% 89%;
---card: 220 13% 12%;
---card-foreground: 220 18% 89%;
---popover: 220 13% 14%;
---popover-foreground: 220 18% 89%;
---primary: 217 91% 60%;
---primary-foreground: 220 20% 98%;
---secondary: 220 12% 16%;
---secondary-foreground: 220 18% 89%;
---muted: 220 12% 15%;
---muted-foreground: 220 8% 62%;
---accent: 220 12% 19%;
---accent-foreground: 220 18% 94%;
---destructive: 0 63% 55%;
---destructive-foreground: 220 20% 98%;
---border: 220 10% 23%;
---input: 220 10% 25%;
---ring: 217 91% 60%;
---radius: 0.3rem;
+--background: 240 4% 9%;
+--foreground: 0 0% 91%;
+--card: 0 0% 12%;
+--card-foreground: 0 0% 91%;
+--popover: 240 3% 14%;
+--popover-foreground: 0 0% 91%;
+--primary: 220 84% 56%;
+--primary-foreground: 0 0% 100%;
+--secondary: 240 4% 16%;
+--secondary-foreground: 0 0% 91%;
+--muted: 240 4% 15%;
+--muted-foreground: 240 4% 58%;
+--accent: 240 4% 20%;
+--accent-foreground: 0 0% 96%;
+--destructive: 0 72% 55%;
+--destructive-foreground: 0 0% 98%;
+--success: 135 59% 49%;
+--border: 240 4% 22%;
+--input: 240 4% 25%;
+--ring: 220 84% 56%;
+--radius: 0.5rem;
+--terminal-bg: 0 0% 5%;
 ```
 
 ### Light theme
 
 ```css
---background: 220 18% 97%;
---foreground: 220 18% 16%;
+--background: 240 11% 96%;
+--foreground: 240 6% 12%;
 --card: 0 0% 100%;
---card-foreground: 220 18% 16%;
+--card-foreground: 240 6% 12%;
 --popover: 0 0% 100%;
---primary: 217 83% 53%;
+--primary: 220 83% 52%;
 --primary-foreground: 0 0% 100%;
---secondary: 220 16% 94%;
---muted: 220 16% 95%;
---muted-foreground: 220 8% 47%;
---accent: 220 16% 91%;
---destructive: 0 72% 51%;
---border: 220 14% 87%;
---input: 220 14% 84%;
---ring: 217 83% 53%;
+--secondary: 240 16% 93%;
+--secondary-foreground: 240 6% 16%;
+--muted: 240 16% 94%;
+--muted-foreground: 240 4% 42%;
+--accent: 240 16% 90%;
+--accent-foreground: 240 6% 14%;
+--destructive: 0 72% 48%;
+--success: 141 60% 38%;
+--border: 240 12% 87%;
+--input: 240 12% 83%;
+--ring: 220 83% 52%;
 ```
 
 Status roles:
@@ -301,6 +317,7 @@ Initial shortcuts, editable in Settings:
 | Next/previous tab | Ctrl/Cmd + Tab / Ctrl/Cmd + Shift + Tab |
 | Terminal search | Ctrl/Cmd + F |
 | Toggle Files | Ctrl/Cmd + Shift + F |
+| Toggle focus mode | Ctrl/Cmd + Shift + M |
 | Toggle task drawer | Ctrl/Cmd + J |
 | Command palette | Ctrl/Cmd + Shift + P |
 | Toggle AI assistant | Ctrl/Cmd + Shift + A |

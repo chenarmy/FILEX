@@ -498,6 +498,7 @@ function isSafeTransferName(name: string): boolean {
     && name.length <= 255
     && name !== '.'
     && name !== '..'
+    // eslint-disable-next-line no-control-regex -- control characters must be detected here
     && !/[\\/\u0000-\u001f\u007f]/u.test(name);
 }
 
@@ -663,16 +664,16 @@ async function refreshActivePane(): Promise<void> {
 function selectPaneEntry(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote'): void {
   activePane.value = pane;
   if (pane === 'local') {
-    localFiles.select(entry as LocalFileEntry);
+    localFiles.select(entry);
   } else {
-    sftp.select(entry as RemoteFileEntry);
+    sftp.select(entry);
   }
 }
 
 function openPaneEntry(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote'): void {
   selectPaneEntry(entry, pane);
-  if (pane === 'local') void localFiles.open(entry as LocalFileEntry);
-  else void sftp.open(entry as RemoteFileEntry);
+  if (pane === 'local') void localFiles.open(entry);
+  else void sftp.open(entry);
 }
 
 function metricUsage(total: number | null | undefined, available: number | null | undefined): string {
@@ -894,7 +895,7 @@ async function submitMove(): Promise<void> {
   const destinationDirectory = moveDestinationDirectory.value.trim();
   if (!source || !destinationDirectory) return;
   if (moveTargetPane.value === 'local') {
-    if (await localFiles.move(source as LocalFileEntry, destinationDirectory)) {
+    if (await localFiles.move(source, destinationDirectory)) {
       closeMoveDialog();
       ui.notify(t('inspector.localMoved'));
     }
@@ -905,7 +906,7 @@ async function submitMove(): Promise<void> {
     closeMoveDialog();
     return;
   }
-  if (await sftp.move(source as RemoteFileEntry, destinationDirectory)) {
+  if (await sftp.move(source, destinationDirectory)) {
     closeMoveDialog();
     ui.notify(t('inspector.remoteMoved'));
   }
@@ -957,7 +958,7 @@ async function submitCopy(): Promise<void> {
   try {
     if (copyTargetPane.value === 'local') {
       const copied = await localFiles.copy(
-        source as LocalFileEntry,
+        source,
         destinationDirectory,
         targetName,
         operationId,
@@ -976,7 +977,7 @@ async function submitCopy(): Promise<void> {
       return;
     }
     const copied = await sftp.copy(
-      source as RemoteFileEntry,
+      source,
       destinationDirectory,
       targetName,
       operationId,
@@ -1045,9 +1046,9 @@ defineExpose({ focusInspector });
             <div class="path-breadcrumb mono"><button type="button" class="icon-button" :disabled="pane.id === 'remote' ? !sftp.sessionId : !localFiles.listing?.parentPath" :aria-label="t('inspector.parentDirectory')" @click.stop="pane.id === 'local' ? localFiles.parent() : sftp.parent()"><ChevronUp :size="11" /></button><ChevronRight :size="11" /><span :title="pane.path">{{ pane.path }}</span></div>
           </header>
           <div
+            :ref="pane.id === 'remote' ? bindRemoteDropElement : undefined"
             class="file-list"
             :class="{ 'file-list-drop-target': (pane.id === 'remote' && nativeDropActive) || (pane.id === 'local' && localDropActive) }"
-            :ref="pane.id === 'remote' ? bindRemoteDropElement : undefined"
             @dragover="allowRemoteFileDrop($event, pane.id)"
             @dragleave="leaveRemoteFileDrop($event, pane.id)"
             @drop="dropRemoteFileOnLocal($event, pane.id)"
@@ -1142,7 +1143,7 @@ defineExpose({ focusInspector });
         <div class="dialog-content">
           <label class="field">
             {{ t('inspector.directoryName') }}
-            <input v-model="newDirectoryName" autofocus maxlength="255" autocomplete="off" :placeholder="t('inspector.directoryName')" />
+            <input v-model="newDirectoryName" autofocus maxlength="255" autocomplete="off" :placeholder="t('inspector.directoryName')">
           </label>
           <p v-if="directoryError" class="form-error">{{ t(directoryError.messageKey as Parameters<typeof t>[0]) }}</p>
         </div>
@@ -1161,7 +1162,7 @@ defineExpose({ focusInspector });
         <div class="dialog-content">
           <label class="field">
             {{ t('inspector.newName') }}
-            <input v-model="renameName" autofocus maxlength="255" autocomplete="off" :placeholder="t('inspector.newName')" />
+            <input v-model="renameName" autofocus maxlength="255" autocomplete="off" :placeholder="t('inspector.newName')">
           </label>
           <p v-if="renameError" class="form-error">{{ t(renameError.messageKey as Parameters<typeof t>[0]) }}</p>
         </div>
@@ -1183,7 +1184,7 @@ defineExpose({ focusInspector });
           </dl>
           <label class="field">
             {{ t('inspector.moveDirectory') }}
-            <input v-model="moveDestinationDirectory" autofocus maxlength="4096" autocomplete="off" spellcheck="false" :placeholder="t('inspector.moveDirectoryPlaceholder')" />
+            <input v-model="moveDestinationDirectory" autofocus maxlength="4096" autocomplete="off" spellcheck="false" :placeholder="t('inspector.moveDirectoryPlaceholder')">
           </label>
           <p class="dialog-note mono">{{ t('inspector.movePreview', { path: moveDestinationPath }) }}</p>
           <p class="dialog-note">{{ t('inspector.moveHelp') }}</p>
@@ -1207,11 +1208,11 @@ defineExpose({ focusInspector });
           </dl>
           <label class="field">
             {{ t('inspector.copyDirectory') }}
-            <input v-model="copyDestinationDirectory" autofocus maxlength="4096" autocomplete="off" spellcheck="false" :placeholder="t('inspector.copyDirectoryPlaceholder')" />
+            <input v-model="copyDestinationDirectory" autofocus maxlength="4096" autocomplete="off" spellcheck="false" :placeholder="t('inspector.copyDirectoryPlaceholder')">
           </label>
           <label class="field">
             {{ t('inspector.copyName') }}
-            <input v-model="copyTargetName" maxlength="255" autocomplete="off" spellcheck="false" :placeholder="t('inspector.copyName')" />
+            <input v-model="copyTargetName" maxlength="255" autocomplete="off" spellcheck="false" :placeholder="t('inspector.copyName')">
           </label>
           <p class="dialog-note mono">{{ t('inspector.copyPreview', { path: copyDestinationPath }) }}</p>
           <p class="dialog-note">{{ t('inspector.copyHelp') }}</p>
