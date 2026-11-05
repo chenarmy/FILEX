@@ -1055,7 +1055,7 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
       <button type="button" class="icon-button" :aria-label="t('app.dismissNotice')" @click="followHelpOpen = false"><X :size="11" /></button>
     </div>
 
-    <div v-if="view === 'files'" class="file-browser file-browser-dual">
+    <div v-if="view === 'files'" class="file-browser" :class="{ 'file-browser-dual': dualPaneEnabled }">
       <section
         v-for="pane in browserPanes"
         :key="pane.id"

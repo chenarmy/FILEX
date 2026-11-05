@@ -3247,14 +3247,16 @@
 .file-browser-panel-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   min-width: 0;
   padding: 4px 8px;
+  overflow: hidden;
   border-bottom: 1px solid hsl(var(--border));
 }
 
 .file-browser-subtabs {
   display: inline-flex;
+  flex: 0 0 auto;
   gap: 2px;
   padding: 2px;
   border-radius: 999px;
@@ -3267,6 +3269,7 @@
   border-radius: 999px;
   color: hsl(var(--muted-foreground));
   font-size: 11px;
+  white-space: nowrap;
   background: transparent;
 }
 
@@ -3306,6 +3309,7 @@
 
 .file-browser-path {
   overflow: hidden;
+  min-width: 0;
   max-width: 34%;
   color: hsl(var(--muted-foreground));
   font-size: 10.5px;
@@ -3331,7 +3335,7 @@
 
 .file-table-header {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 64px 56px 96px 52px 64px;
+  grid-template-columns: minmax(0, 1.9fr) minmax(0, 0.7fr) minmax(0, 0.55fr) minmax(0, 1.05fr) minmax(0, 0.6fr) minmax(0, 0.75fr);
   gap: 8px;
   padding: 3px 10px;
   color: hsl(var(--muted-foreground));
@@ -3349,7 +3353,7 @@
 
 .file-table-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 64px 56px 96px 52px 64px;
+  grid-template-columns: minmax(0, 1.9fr) minmax(0, 0.7fr) minmax(0, 0.55fr) minmax(0, 1.05fr) minmax(0, 0.6fr) minmax(0, 0.75fr);
   gap: 8px;
   align-items: center;
   width: 100%;
