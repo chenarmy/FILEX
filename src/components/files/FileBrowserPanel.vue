@@ -1143,7 +1143,7 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
       </section>
     </div>
 
-    <div v-else-if="view === 'commands'" class="file-commands">
+    <div v-else-if="view === 'commands'" class="file-commands" :class="{ 'has-send': selectedSnippet }">
       <div class="file-commands-list">
         <label class="file-commands-search">
           {{ t('snippet.searchPlaceholder') }}

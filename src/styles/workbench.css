@@ -3414,9 +3414,15 @@
 
 .file-commands {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 38%);
+  grid-template-columns: minmax(0, 1fr);
   flex: 1 1 auto;
   min-height: 0;
+}
+
+/* The send pane only occupies a track when a snippet is actually selected,
+   so the empty state uses the full panel width. */
+.file-commands.has-send {
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 38%);
 }
 
 .file-commands-list {
