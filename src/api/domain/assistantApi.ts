@@ -155,6 +155,17 @@ export async function saveAssistantProvider(input: {
   }
 }
 
+export async function updateAssistantModel(model: string): Promise<OperationResult<AssistantProviderStatus>> {
+  if (!isTauriRuntime()) {
+    return failure({ code: 'DESKTOP_RUNTIME_REQUIRED', messageKey: 'errors.desktopRuntimeRequired', retryable: false, remoteState: 'not_applicable' });
+  }
+  try {
+    return await invoke<OperationResult<AssistantProviderStatus>>('update_assistant_model', { model });
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'ASSISTANT_CONFIG_SAVE_FAILED'));
+  }
+}
+
 export async function setAssistantProviderConsent(consent: boolean): Promise<OperationResult<AssistantProviderStatus>> {
   if (!isTauriRuntime()) {
     return failure({ code: 'DESKTOP_RUNTIME_REQUIRED', messageKey: 'errors.desktopRuntimeRequired', retryable: false, remoteState: 'not_applicable' });

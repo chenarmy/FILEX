@@ -23,16 +23,38 @@ pub struct SettingsService {
     repository: Arc<dyn SettingsRepository>,
 }
 
+const LEGACY_UI_FONT_FAMILY: &str = "Inter, system-ui, sans-serif";
+pub const DEFAULT_UI_FONT_FAMILY: &str = "\"HarmonyOS Sans SC\", \"HarmonyOS Sans\", \"PingFang SC\", \"Microsoft YaHei UI\", \"Noto Sans CJK SC\", sans-serif";
+
 impl SettingsService {
     pub fn new(repository: Arc<dyn SettingsRepository>) -> Self {
         Self { repository }
     }
 
     pub fn load(&self) -> Result<SafeSettings, AppError> {
-        Ok(self
-            .repository
-            .load()?
-            .unwrap_or_else(default_safe_settings))
+        let Some(mut settings) = self.repository.load()? else {
+            return Ok(default_safe_settings());
+        };
+        let mut migrated = false;
+        if settings.ui_font_family == LEGACY_UI_FONT_FAMILY {
+            settings.ui_font_family = DEFAULT_UI_FONT_FAMILY.to_owned();
+            migrated = true;
+        }
+        match settings.terminal_theme.as_str() {
+            "dark" => {
+                settings.terminal_theme = "filex-dark".to_owned();
+                migrated = true;
+            }
+            "light" => {
+                settings.terminal_theme = "filex-light".to_owned();
+                migrated = true;
+            }
+            _ => {}
+        }
+        if migrated {
+            self.repository.save(&settings)?;
+        }
+        Ok(settings)
     }
 
     pub fn save(&self, settings: SafeSettings) -> Result<SafeSettings, AppError> {
@@ -46,7 +68,7 @@ pub fn default_safe_settings() -> SafeSettings {
     SafeSettings {
         theme: "system".to_owned(),
         locale: "zh-CN".to_owned(),
-        ui_font_family: "Inter, system-ui, sans-serif".to_owned(),
+        ui_font_family: DEFAULT_UI_FONT_FAMILY.to_owned(),
         ui_font_size: 14,
         terminal_font_family: "JetBrains Mono, Consolas, monospace".to_owned(),
         terminal_font_size: 13,
@@ -65,6 +87,7 @@ pub fn default_safe_settings() -> SafeSettings {
         task_drawer_open: true,
         connections_pane_width: 244,
         inspector_pane_width: 286,
+        assistant_pane_width: 360,
         task_drawer_height: 156,
         host_panel_open: true,
         file_browser_open: true,
@@ -85,7 +108,25 @@ fn validate_safe_settings(settings: &SafeSettings) -> Result<(), AppError> {
         && ["zh-CN", "en-US"].contains(&settings.locale.as_str())
         && (11..=20).contains(&settings.ui_font_size)
         && (11..=24).contains(&settings.terminal_font_size)
-        && ["match", "dark", "light"].contains(&settings.terminal_theme.as_str())
+        && [
+            "match",
+            "filex-dark",
+            "one-dark",
+            "dracula",
+            "nord",
+            "tokyo-night",
+            "gruvbox-dark",
+            "solarized-dark",
+            "monokai",
+            "github-dark",
+            "filex-light",
+            "solarized-light",
+            "github-light",
+            "catppuccin-latte",
+            "dark",
+            "light",
+        ]
+        .contains(&settings.terminal_theme.as_str())
         && ["utf-8", "gbk", "big5", "shift_jis", "windows-1252"]
             .contains(&settings.terminal_encoding.as_str())
         && [5_000, 10_000, 25_000].contains(&settings.terminal_scrollback)
@@ -97,6 +138,7 @@ fn validate_safe_settings(settings: &SafeSettings) -> Result<(), AppError> {
         && ["transfers", "tunnels", "events"].contains(&settings.task_tab.as_str())
         && (180..=420).contains(&settings.connections_pane_width)
         && (220..=760).contains(&settings.inspector_pane_width)
+        && (300..=520).contains(&settings.assistant_pane_width)
         && (96..=360).contains(&settings.task_drawer_height)
         && (200..=420).contains(&settings.host_panel_width)
         && (160..=480).contains(&settings.file_browser_height)
@@ -1626,13 +1668,33 @@ fn invalid_transition_error() -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use filex_contracts::{
-        AuthenticationMethod, CreateConnectionProfileInput, EnvironmentKind, SessionState,
+        AppError, AuthenticationMethod, CreateConnectionProfileInput, EnvironmentKind,
+        SafeSettings, SessionState,
     };
 
-    use super::{InMemoryProfileRepository, ProfileService, SessionMachine, validate_profile};
+    use super::{
+        DEFAULT_UI_FONT_FAMILY, InMemoryProfileRepository, ProfileService, SessionMachine,
+        SettingsRepository, SettingsService, default_safe_settings, validate_profile,
+    };
+
+    #[derive(Default)]
+    struct TestSettingsRepository {
+        settings: Mutex<Option<SafeSettings>>,
+    }
+
+    impl SettingsRepository for TestSettingsRepository {
+        fn load(&self) -> Result<Option<SafeSettings>, AppError> {
+            Ok(self.settings.lock().expect("settings mutex").clone())
+        }
+
+        fn save(&self, settings: &SafeSettings) -> Result<(), AppError> {
+            *self.settings.lock().expect("settings mutex") = Some(settings.clone());
+            Ok(())
+        }
+    }
 
     fn valid_input() -> CreateConnectionProfileInput {
         CreateConnectionProfileInput {
@@ -1656,6 +1718,57 @@ mod tests {
         input.username.clear();
         let error = validate_profile(&input).expect_err("username must be rejected");
         assert_eq!(error.field.as_deref(), Some("username"));
+    }
+
+    #[test]
+    fn default_settings_use_harmony_ui_font_at_fourteen_pixels() {
+        let settings = default_safe_settings();
+        assert_eq!(settings.ui_font_family, DEFAULT_UI_FONT_FAMILY);
+        assert!(settings.ui_font_family.contains("HarmonyOS Sans SC"));
+        assert_eq!(settings.ui_font_size, 14);
+        assert_eq!(settings.assistant_pane_width, 360);
+    }
+
+    #[test]
+    fn settings_load_migrates_legacy_visual_defaults() {
+        let repository = Arc::new(TestSettingsRepository::default());
+        let mut legacy = default_safe_settings();
+        legacy.ui_font_family = "Inter, system-ui, sans-serif".to_owned();
+        legacy.terminal_theme = "dark".to_owned();
+        repository.save(&legacy).expect("legacy settings save");
+
+        let service = SettingsService::new(repository.clone());
+        let migrated = service.load().expect("settings load");
+        assert_eq!(migrated.ui_font_family, DEFAULT_UI_FONT_FAMILY);
+        assert_eq!(migrated.terminal_theme, "filex-dark");
+        assert_eq!(
+            repository
+                .load()
+                .expect("stored settings load")
+                .expect("stored settings")
+                .ui_font_family,
+            DEFAULT_UI_FONT_FAMILY
+        );
+        assert_eq!(
+            repository
+                .load()
+                .expect("stored settings load")
+                .expect("stored settings")
+                .terminal_theme,
+            "filex-dark"
+        );
+
+        let mut custom = default_safe_settings();
+        custom.ui_font_family = "Custom Sans, sans-serif".to_owned();
+        custom.terminal_theme = "dracula".to_owned();
+        service.save(custom).expect("custom settings save");
+        let loaded = service.load().expect("custom settings load");
+        assert_eq!(loaded.ui_font_family, "Custom Sans, sans-serif");
+        assert_eq!(loaded.terminal_theme, "dracula");
+
+        let mut unsupported = default_safe_settings();
+        unsupported.terminal_theme = "unknown-theme".to_owned();
+        assert!(service.save(unsupported).is_err());
     }
 
     #[test]

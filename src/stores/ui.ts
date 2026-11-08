@@ -2,8 +2,19 @@ import { ref } from 'vue';
 import { defineStore } from 'pinia';
 import type { TransferDirection } from '@/types/contracts';
 
+export type SettingsSection =
+  | 'appearance'
+  | 'assistant'
+  | 'terminal'
+  | 'connections'
+  | 'security'
+  | 'storage'
+  | 'updates'
+  | 'shortcuts';
+
 export const useUiStore = defineStore('ui', () => {
   const settingsOpen = ref(false);
+  const settingsSection = ref<SettingsSection>('appearance');
   const quickConnectOpen = ref(false);
   const addProfileOpen = ref(false);
   const editingProfileId = ref<string | null>(null);
@@ -38,7 +49,8 @@ export const useUiStore = defineStore('ui', () => {
     }, 3200);
   }
 
-  function openSettings(): void {
+  function openSettings(section: SettingsSection = 'appearance'): void {
+    settingsSection.value = section;
     settingsOpen.value = true;
   }
 
@@ -144,6 +156,7 @@ export const useUiStore = defineStore('ui', () => {
 
   return {
     settingsOpen,
+    settingsSection,
     quickConnectOpen,
     addProfileOpen,
     editingProfileId,

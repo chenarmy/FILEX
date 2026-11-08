@@ -1,0 +1,208 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CNB_REPOSITORY: chenarmy/FILEX
+  FILEX_UPDATER_STABLE_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
+  FILEX_UPDATER_STABLE_MIRROR_ENDPOINT: https://cnb.cool/chenarmy/FILEX/-/releases/latest/download/latest.json
+
+jobs:
+  build:
+    name: Build signed ${{ matrix.platform }} release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: --bundles nsis --bundles msi
+          - platform: macos-14
+            args: --bundles app --bundles dmg
+          - platform: ubuntu-22.04
+            args: --bundles appimage --bundles deb
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.33.4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions-rust-lang/setup-rust-toolchain@1fbea72663f6d4c03efaab13560c8a24cfd2a7cc # v1.9.0
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Verify release version and notes
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          tag_version="${RELEASE_TAG#v}"
+          package_version="$(node -p "require('./package.json').version")"
+          test "$tag_version" = "$package_version" || {
+            echo "Tag version $tag_version does not match package version $package_version" >&2
+            exit 1
+          }
+          pnpm version:check
+          cargo check --workspace --locked
+
+      - name: Read release notes
+        id: release_notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release-notes.mjs "$RELEASE_TAG"
+
+      - name: Validate signed updater configuration
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          FILEX_UPDATER_PUBLIC_KEY: ${{ vars.FILEX_UPDATER_PUBLIC_KEY }}
+        run: >-
+          node scripts/validate-updater-config.mjs
+          --github-repository "${{ github.repository }}"
+          --cnb-repository "${{ env.CNB_REPOSITORY }}"
+
+      - name: Prove updater private and public keys match
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          FILEX_UPDATER_PUBLIC_KEY: ${{ vars.FILEX_UPDATER_PUBLIC_KEY }}
+        run: node scripts/verify-updater-key-pair.mjs
+
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          FILEX_UPDATER_PUBLIC_KEY: ${{ vars.FILEX_UPDATER_PUBLIC_KEY }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: FILEX ${{ github.ref_name }}
+          releaseBody: ${{ steps.release_notes.outputs.body }}
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
+          updaterJsonPreferNsis: true
+          args: --config src-tauri/tauri.release.conf.json ${{ matrix.args }}
+
+  publish:
+    name: Verify and publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Download draft assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir release-assets --clobber
+
+      - name: Verify updater assets and signatures
+        env:
+          FILEX_UPDATER_PUBLIC_KEY: ${{ vars.FILEX_UPDATER_PUBLIC_KEY }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node scripts/verify-updater-release.mjs \
+            --assets-dir release-assets \
+            --version "${RELEASE_TAG#v}" \
+            --tag "$RELEASE_TAG" \
+            --repository "$GITHUB_REPOSITORY"
+
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
+  mirror-cnb:
+    name: Mirror release to CNB
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Download verified GitHub assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir release-assets --clobber
+
+      - name: Read release notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release-notes.mjs "$RELEASE_TAG" > cnb-release-notes.md
+
+      - name: Ensure CNB release tag exists
+        env:
+          CNB_TOKEN: ${{ secrets.CNB }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test -n "$CNB_TOKEN" || { echo "The CNB Actions secret is required." >&2; exit 1; }
+          git fetch --force origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          git push "https://cnb:${CNB_TOKEN}@cnb.cool/${CNB_REPOSITORY}.git" "refs/tags/${RELEASE_TAG}"
+
+      - name: Publish signed assets to CNB
+        env:
+          CNB_TOKEN: ${{ secrets.CNB }}
+          CNB_RELEASE_TAG: ${{ github.ref_name }}
+          CNB_RELEASE_NAME: FILEX ${{ github.ref_name }}
+          CNB_RELEASE_BODY_FILE: cnb-release-notes.md
+          CNB_ASSET_DIRECTORY: release-assets
+        run: node scripts/publish-cnb-release.mjs
+
+      - name: Verify CNB updater feed
+        env:
+          FILEX_UPDATER_PUBLIC_KEY: ${{ vars.FILEX_UPDATER_PUBLIC_KEY }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p cnb-feed
+          curl --fail --silent --show-error --location \
+            --retry 6 --retry-delay 5 --retry-all-errors \
+            "$FILEX_UPDATER_STABLE_MIRROR_ENDPOINT" \
+            --output cnb-feed/latest.json
+          node scripts/verify-updater-release.mjs \
+            --assets-dir release-assets \
+            --latest-file cnb-feed/latest.json \
+            --version "${RELEASE_TAG#v}" \
+            --tag "$RELEASE_TAG" \
+            --base-url "https://cnb.cool/${CNB_REPOSITORY}/-/releases/download/${RELEASE_TAG}"

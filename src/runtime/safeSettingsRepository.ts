@@ -1,12 +1,15 @@
 import type { SafeSettings } from '@/types/contracts';
+import { normalizeTerminalTheme } from '@/domain/terminalThemes';
 import { DEFAULT_KEYBOARD_SHORTCUTS, normalizeKeyboardShortcuts } from '@/utils/keyboardShortcuts';
 
 const storageKey = 'filex.safe-settings.v1';
+const legacyUiFontFamily = 'Inter, system-ui, sans-serif';
+export const defaultUiFontFamily = '"HarmonyOS Sans SC", "HarmonyOS Sans", "PingFang SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif';
 
 export const defaultSafeSettings: SafeSettings = {
   theme: 'system',
   locale: 'zh-CN',
-  uiFontFamily: 'Inter, system-ui, sans-serif',
+  uiFontFamily: defaultUiFontFamily,
   uiFontSize: 14,
   terminalFontFamily: 'JetBrains Mono, Consolas, monospace',
   terminalFontSize: 13,
@@ -25,6 +28,7 @@ export const defaultSafeSettings: SafeSettings = {
   taskDrawerOpen: true,
   connectionsPaneWidth: 244,
   inspectorPaneWidth: 286,
+  assistantPaneWidth: 360,
   taskDrawerHeight: 156,
   hostPanelOpen: true,
   fileBrowserOpen: true,
@@ -61,19 +65,18 @@ function normalizeSettings(input: Partial<SafeSettings>): SafeSettings {
   const locales = ['zh-CN', 'en-US'] as const;
   const inspectorTabs = ['files', 'monitor', 'session'] as const;
   const taskTabs = ['transfers', 'tunnels', 'events'] as const;
-  const terminalThemes = ['match', 'dark', 'light'] as const;
   const terminalEncodings = ['utf-8', 'gbk', 'big5', 'shift_jis', 'windows-1252'] as const;
 
   return {
     theme: themes.includes(input.theme as typeof themes[number]) ? input.theme as SafeSettings['theme'] : 'system',
     locale: locales.includes(input.locale as typeof locales[number]) ? input.locale as SafeSettings['locale'] : 'zh-CN',
-    uiFontFamily: input.uiFontFamily?.slice(0, 160) || defaultSafeSettings.uiFontFamily,
+    uiFontFamily: input.uiFontFamily === legacyUiFontFamily
+      ? defaultUiFontFamily
+      : input.uiFontFamily?.slice(0, 160) || defaultSafeSettings.uiFontFamily,
     uiFontSize: clampNumber(input.uiFontSize, 11, 20, defaultSafeSettings.uiFontSize),
     terminalFontFamily: input.terminalFontFamily?.slice(0, 160) || defaultSafeSettings.terminalFontFamily,
     terminalFontSize: clampNumber(input.terminalFontSize, 11, 24, defaultSafeSettings.terminalFontSize),
-    terminalTheme: terminalThemes.includes(input.terminalTheme as typeof terminalThemes[number])
-      ? input.terminalTheme as SafeSettings['terminalTheme']
-      : defaultSafeSettings.terminalTheme,
+    terminalTheme: normalizeTerminalTheme(input.terminalTheme),
     terminalEncoding: terminalEncodings.includes(input.terminalEncoding as typeof terminalEncodings[number])
       ? input.terminalEncoding as SafeSettings['terminalEncoding']
       : defaultSafeSettings.terminalEncoding,
@@ -102,6 +105,7 @@ function normalizeSettings(input: Partial<SafeSettings>): SafeSettings {
     taskDrawerOpen: input.taskDrawerOpen !== false,
     connectionsPaneWidth: clampNumber(input.connectionsPaneWidth, 180, 420, defaultSafeSettings.connectionsPaneWidth),
     inspectorPaneWidth: clampNumber(input.inspectorPaneWidth, 220, 760, defaultSafeSettings.inspectorPaneWidth),
+    assistantPaneWidth: clampNumber(input.assistantPaneWidth, 300, 520, defaultSafeSettings.assistantPaneWidth),
     taskDrawerHeight: clampNumber(input.taskDrawerHeight, 96, 360, defaultSafeSettings.taskDrawerHeight),
     hostPanelOpen: input.hostPanelOpen !== false,
     fileBrowserOpen: input.fileBrowserOpen !== false,

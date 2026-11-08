@@ -1,11 +1,27 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { defaultSafeSettings, readSafeSettings, writeSafeSettings } from '@/runtime/safeSettingsRepository';
+import { defaultSafeSettings, defaultUiFontFamily, readSafeSettings, writeSafeSettings } from '@/runtime/safeSettingsRepository';
 
 describe('safe settings repository', () => {
   beforeEach(() => localStorage.clear());
 
   it('returns safe defaults when storage is empty', () => {
     expect(readSafeSettings()).toEqual(defaultSafeSettings);
+    expect(defaultSafeSettings.uiFontSize).toBe(14);
+    expect(defaultSafeSettings.uiFontFamily).toBe(defaultUiFontFamily);
+    expect(defaultSafeSettings.uiFontFamily).toContain('HarmonyOS Sans SC');
+    expect(defaultSafeSettings.assistantPaneWidth).toBe(360);
+  });
+
+  it('migrates the legacy default font without overriding custom families', () => {
+    localStorage.setItem('filex.safe-settings.v1', JSON.stringify({
+      uiFontFamily: 'Inter, system-ui, sans-serif',
+    }));
+    expect(readSafeSettings().uiFontFamily).toBe(defaultUiFontFamily);
+
+    localStorage.setItem('filex.safe-settings.v1', JSON.stringify({
+      uiFontFamily: 'Example Sans, sans-serif',
+    }));
+    expect(readSafeSettings().uiFontFamily).toBe('Example Sans, sans-serif');
   });
 
   it('clamps visual settings and ignores unsupported values', () => {
@@ -14,6 +30,7 @@ describe('safe settings repository', () => {
       locale: 'unknown',
       uiFontSize: 99,
       terminalFontSize: 2,
+      terminalTheme: 'unknown',
     }));
 
     expect(readSafeSettings()).toMatchObject({
@@ -21,13 +38,27 @@ describe('safe settings repository', () => {
       locale: 'zh-CN',
       uiFontSize: 20,
       terminalFontSize: 11,
+      terminalTheme: 'match',
     });
+  });
+
+  it('migrates legacy terminal themes and preserves catalog selections', () => {
+    localStorage.setItem('filex.safe-settings.v1', JSON.stringify({
+      terminalTheme: 'dark',
+    }));
+    expect(readSafeSettings().terminalTheme).toBe('filex-dark');
+
+    localStorage.setItem('filex.safe-settings.v1', JSON.stringify({
+      terminalTheme: 'catppuccin-latte',
+    }));
+    expect(readSafeSettings().terminalTheme).toBe('catppuccin-latte');
   });
 
   it('clamps the workspace layout settings added with the fileterm-style shell', () => {
     localStorage.setItem('filex.safe-settings.v1', JSON.stringify({
       hostPanelWidth: 9_999,
       fileBrowserHeight: 1,
+      assistantPaneWidth: 9,
       focusMode: true,
       followTerminalCwd: 'yes',
       detailsPaneOpen: 1,
@@ -36,6 +67,7 @@ describe('safe settings repository', () => {
     expect(readSafeSettings()).toMatchObject({
       hostPanelWidth: 420,
       fileBrowserHeight: 160,
+      assistantPaneWidth: 300,
       focusMode: true,
       followTerminalCwd: false,
       detailsPaneOpen: false,
@@ -45,7 +77,16 @@ describe('safe settings repository', () => {
   });
 
   it('persists only the safe settings structure', () => {
-    writeSafeSettings({ ...defaultSafeSettings, theme: 'light', uiFontSize: 15 });
-    expect(readSafeSettings()).toMatchObject({ theme: 'light', uiFontSize: 15 });
+    writeSafeSettings({
+      ...defaultSafeSettings,
+      theme: 'light',
+      uiFontSize: 15,
+      terminalTheme: 'nord',
+    });
+    expect(readSafeSettings()).toMatchObject({
+      theme: 'light',
+      uiFontSize: 15,
+      terminalTheme: 'nord',
+    });
   });
 });

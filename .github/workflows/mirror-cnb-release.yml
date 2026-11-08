@@ -1,0 +1,86 @@
+name: Mirror released version to CNB
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Verified GitHub release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CNB_REPOSITORY: chenarmy/FILEX
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Validate release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CNB_TOKEN: ${{ secrets.CNB }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if ! printf '%s' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid stable release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          test -n "$CNB_TOKEN" || { echo "The CNB Actions secret is required." >&2; exit 1; }
+          is_draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          test "$is_draft" = "false" || { echo "Release is still a draft." >&2; exit 1; }
+
+      - name: Download verified GitHub assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir release-assets --clobber
+
+      - name: Read release notes
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: node scripts/release-notes.mjs "$RELEASE_TAG" > cnb-release-notes.md
+
+      - name: Ensure CNB release tag exists
+        env:
+          CNB_TOKEN: ${{ secrets.CNB }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          git fetch --force origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          git push "https://cnb:${CNB_TOKEN}@cnb.cool/${CNB_REPOSITORY}.git" "refs/tags/${RELEASE_TAG}"
+
+      - name: Publish signed assets to CNB
+        env:
+          CNB_TOKEN: ${{ secrets.CNB }}
+          CNB_RELEASE_TAG: ${{ inputs.tag }}
+          CNB_RELEASE_NAME: FILEX ${{ inputs.tag }}
+          CNB_RELEASE_BODY_FILE: cnb-release-notes.md
+          CNB_ASSET_DIRECTORY: release-assets
+        run: node scripts/publish-cnb-release.mjs
+
+      - name: Verify CNB updater feed
+        env:
+          FILEX_UPDATER_PUBLIC_KEY: ${{ vars.FILEX_UPDATER_PUBLIC_KEY }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          mkdir -p cnb-feed
+          curl --fail --silent --show-error --location \
+            --retry 6 --retry-delay 5 --retry-all-errors \
+            "https://cnb.cool/${CNB_REPOSITORY}/-/releases/latest/download/latest.json" \
+            --output cnb-feed/latest.json
+          node scripts/verify-updater-release.mjs \
+            --assets-dir release-assets \
+            --latest-file cnb-feed/latest.json \
+            --version "${RELEASE_TAG#v}" \
+            --tag "$RELEASE_TAG" \
+            --base-url "https://cnb.cool/${CNB_REPOSITORY}/-/releases/download/${RELEASE_TAG}"

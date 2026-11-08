@@ -1,7 +1,17 @@
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { failure, isTauriRuntime, normalizeUnknownError, success } from '@/api/common';
 import type { MaintenanceArtifact, OperationResult, UpdateStatus } from '@/types/contracts';
+
+export type UpdateInstallEvent =
+  | {
+    event: 'progress';
+    data: {
+      downloadedBytes: number;
+      contentLength: number | null;
+    };
+  }
+  | { event: 'installing' };
 
 function desktopOnly<T>(): OperationResult<T> {
   return failure({
@@ -87,11 +97,25 @@ export async function checkForUpdates(): Promise<OperationResult<UpdateStatus>> 
   }
 }
 
-export async function installUpdate(expectedVersion: string): Promise<OperationResult<void>> {
+export async function installUpdate(
+  expectedVersion: string,
+  onEvent?: (event: UpdateInstallEvent) => void,
+): Promise<OperationResult<void>> {
   if (!isTauriRuntime()) return desktopOnly();
   try {
-    return await invoke<OperationResult<void>>('install_update', { expectedVersion });
+    const events = new Channel<UpdateInstallEvent>();
+    if (onEvent) events.onmessage = onEvent;
+    return await invoke<OperationResult<void>>('install_update', { expectedVersion, onEvent: events });
   } catch (error: unknown) {
     return failure(normalizeUnknownError(error, 'UPDATE_INSTALL_FAILED'));
+  }
+}
+
+export async function cancelUpdateDownload(): Promise<OperationResult<void>> {
+  if (!isTauriRuntime()) return desktopOnly();
+  try {
+    return await invoke<OperationResult<void>>('cancel_update_download');
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'UPDATE_CANCEL_FAILED'));
   }
 }

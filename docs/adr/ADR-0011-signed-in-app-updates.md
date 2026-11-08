@@ -15,9 +15,11 @@ The updates settings currently reports configuration status but cannot check or 
 - Check and install through Rust Tauri commands. Installation rechecks the selected channel and requires the release version to match the version the user reviewed. Require explicit confirmation in the settings UI.
 - Require the artifact signature's signed version. Release jobs must use a Tauri CLI that writes the signed version comment and must fail preflight when required signing/feed configuration is absent.
 - Keep the beta feed optional until the project configures a beta release process. Stable and beta channels must never silently use each other's feed.
+- Use an ordered stable endpoint list with GitHub as the release authority and CNB as the delivery mirror. Connection, HTTP and manifest-parse failures can advance to the mirror; a parsed manifest still has to pass signature and signed-version verification, with no unsigned fallback.
+- ADR-0024 defines the release gate, artifact verification, publication and mirror recovery workflow.
 
 ## Consequences
 
 - Update discovery and installation remain disabled in builds without the public key and selected feed.
 - Installing an update requires a signed release from a trusted HTTPS feed and a fresh server check after confirmation.
-- The release workflow requires a maintainer to configure the public key, feed URLs, and signing secrets before creating a release draft.
+- The release workflow requires a maintainer to configure a FILEX-specific signing key, its optional password, the matching public key and CNB credentials before publication.

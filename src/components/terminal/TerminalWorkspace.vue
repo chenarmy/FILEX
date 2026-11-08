@@ -308,7 +308,7 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
             @click="selectSessionTab(session.id)"
           >
             <span class="state-dot" :class="session.state" />
-            <span class="terminal-tab-name">{{ sessionName(session.profileId) }}</span>
+            <span class="terminal-tab-name" :title="sessionName(session.profileId)">{{ sessionName(session.profileId) }}</span>
             <FileText
               v-if="terminalLogs.statusFor(session.id)?.state === 'active'"
               class="terminal-tab-log"

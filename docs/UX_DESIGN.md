@@ -10,11 +10,11 @@ Avoid marketing-style cards, decorative gradients, large empty margins, floating
 
 ## 2. Application shell
 
-Use native operating-system window chrome for the first implementation. Inside it, use this baseline:
+Use app-owned borderless window chrome on Windows. The 44 px context bar is the drag region and contains accessible minimize, maximize/restore and close controls at the logical end. Tauri hides the window until the first page load completes to avoid a black startup frame. Other platforms retain this structure pending platform-specific acceptance:
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ Top bar 44: FILEX | session tabs ● + | split/search/log | reconnect ⚙ ⤢    │
+│ Top bar 44: drag region | FILEX/search/actions | minimize □ close          │
 ├───────────────┬───────────────┬──────────────────────────────┬───────────────┤
 │ Navigation    │ Host panel    │ Terminal workspace           │ Details or    │
 │ (collapsible) │ (collapsible) │ tabs and optional splits     │ assistant     │
@@ -141,6 +141,7 @@ The Settings/Security trust ledger shows current and historical fingerprints wit
 - Split layouts: single, vertical, horizontal, and grid only after the base terminal is stable.
 - A disconnected pane retains scrollback and shows an inline reconnect strip rather than replacing the terminal.
 - Search and command history are overlays that do not steal the entire workspace.
+- Settings → Terminal exposes a curated terminal palette browser with a live sample of prompt, text, cursor, selection and ANSI colors. Selecting a palette updates only the settings draft and preview; Cancel or closing the dialog discards it. “Apply and save” is the only action that commits the palette to open terminals and local persistence.
 - The command input bar sits directly under the terminal surface. Enter sends the line to the active PTY, Shift+Enter inserts a newline, and the bounded history (in-memory only, capped, clearable) is navigated with ArrowUp/ArrowDown. It is disabled and visibly labelled when no terminal is connected.
 - Paste containing multiple lines or shell metacharacters can show a configurable safety preview.
 - Password prompts and alternate screen applications must remain compatible with standard terminal behavior.
@@ -202,13 +203,15 @@ The drawer does not open for every successful action. It opens for new long-runn
 
 ### 4.10 AI assistant
 
-The assistant uses a collapsible right-side panel that can coexist with the terminal and may temporarily replace the normal inspector at minimum width. It has three explicit modes:
+The assistant uses a collapsible right-side panel that can coexist with the terminal and may temporarily replace the normal inspector at minimum width. Its header combines a conversation menu with compact new, clear, settings and close actions. A second compact bar exposes opt-in context and the active provider/model; the model pill opens a bounded selector with suggested IDs and a manual entry. It has three explicit modes:
 
 - **Explain:** read-only interpretation of selected errors, events, metrics or text.
 - **Draft:** produces commands, snippets or change plans but cannot execute them.
 - **Act:** exposes only registered typed tools whose underlying capability and policy permit execution.
 
-The composer shows attached context as removable chips. The user may select one local text/configuration file through the native picker; selection is capped at 12 KiB and rechecked by the Rust boundary for an allowed extension, regular-file type, UTF-8 and control characters. The panel displays its base filename, type and size, explains that redaction is best-effort, and includes its category and approximate size in the provider disclosure. The file text is sent only with an explicit request, without the filename or path, and is not stored in chat history. Provider setup explains that the endpoint operator controls retention and training practices, which FILEX cannot verify. External-provider consent defaults off, is stored with provider configuration, can be revoked, and resets when the endpoint is changed. The assistant boundary rejects sends without consent, and each request displays a compact disclosure of what will leave the device. The panel never silently attaches the full terminal buffer, all profiles, credential metadata or unrelated files.
+The composer shows attached context as removable chips inside a collapsible context drawer. The user may select up to two local text/configuration files through the native picker; each selection is capped at 12 KiB and rechecked by the Rust boundary for an allowed extension, regular-file type, UTF-8 and control characters. The panel displays base filenames, types and sizes, explains that redaction is best-effort, and includes categories and approximate size in the provider disclosure. File text is sent only with an explicit request, without filenames or paths, and is not stored in chat history. Provider setup lives in Settings → AI and explains that the endpoint operator controls retention and training practices, which FILEX cannot verify. External-provider consent defaults off, is stored with provider configuration, can be revoked without re-entering the key, and resets when the endpoint or model changes. The assistant boundary rejects sends without consent, and each request displays a compact disclosure of what will leave the device. The panel never silently attaches the full terminal buffer, all profiles, credential metadata or unrelated files.
+
+Assistant messages are separated by role and rendered from a safe, local Markdown subset. The renderer escapes all model text, supports headings, paragraphs, lists, emphasis, inline code and fenced code, and exposes copy-only actions. It does not inject HTML or expose a Run/Execute action. Empty-state suggestions populate the composer; they do not initiate a provider request. Streaming, stop, consent-required, unconfigured, provider-error, malformed-proposal and reduced-motion states remain visible and keyboard reachable.
 
 Every proposed action renders a structured preview with target host, environment, command/tool name, parameters, risk and expected mutation. Read-only tools may use a compact confirmation policy; mutating and destructive tools require explicit confirmation. Model text cannot dismiss or modify that confirmation.
 
@@ -288,11 +291,14 @@ Status roles:
 
 ## 6. Typography and terminal appearance
 
-- UI default: Inter with platform and CJK fallbacks; base 12 px.
+- UI default: bundled HarmonyOS Sans SC Regular/Bold with platform CJK fallbacks; default 14 px, adjustable 11–20 px.
+- The font license is distributed with the application and the bundled fonts are preloaded before the shell.
 - UI sizes: primarily 10, 11 and 12 px; user scale 11-20 px.
 - Terminal default: a bundled or system monospace stack chosen for glyph coverage and performance.
 - UI and terminal font settings are separate.
-- Terminal palette is separate from the application theme, but the default palettes maintain compatible contrast.
+- Terminal palette is separate from the application theme. The default adaptive palette follows the resolved application appearance, while explicit dark and light palettes can be chosen independently.
+- The palette browser lists theme name, light/dark classification and a compact ANSI swatch. Its sample preview shows representative normal and bright terminal colors; selection state does not rely on color alone.
+- Settings owns palette selection. Terminal panes consume the committed safe setting through a typed palette resolver and never contain per-theme color decisions.
 - Paths, hosts, ports, fingerprints, algorithms and command text use monospace.
 
 ## 7. Common component behavior

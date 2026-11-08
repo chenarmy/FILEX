@@ -1,6 +1,6 @@
 # FILEX AI assistant design
 
-Status: OpenAI-compatible explain/draft slice, bounded local conversations, local text-file comparison context and typed command/change-plan previews implemented; hardening remains
+Status: OpenAI-compatible explain/draft slice, provider presets and model switching, bounded local conversations, local text-file comparison context and typed command/change-plan previews implemented; live-provider and cross-platform hardening remains
 Delivery phase: Phase 6, with contracts and security boundaries prepared earlier
 
 ## Purpose
@@ -87,6 +87,20 @@ The first panel slice includes endpoint/model configuration, system-keyring API-
 Completed Draft responses can also be parsed locally into the versioned `command.draft` v1 display contract. FILEX recognizes only `sh`, `bash`, `zsh`, `shell`, `powershell`, `pwsh` and `cmd` code fences, allows at most five blocks and 10,000 UTF-8 command bytes, and rejects hidden control and bidirectional-format characters. FILEX sets the proposal kind, version and `draft` risk itself; it does not accept those fields from model text. The card displays each command, shell, risk and target, and states that FILEX did not execute it. It has no send-to-terminal or execution action. A target snapshot (session ID, generation, host, port and state) is captured only when the user explicitly attaches the active session, remains in memory, and becomes stale after the active target or its connection state changes. Target metadata is not added to provider context or transcript storage. Restored draft messages may be parsed again for display, but have no target binding.
 
 Multi-step Draft replies may use a separate `change-plan.draft` v1 display contract. The model must place one JSON object in a `filex-change-plan-v1` fence with only `title`, `summary` and `steps`; each step contains a title, one to three supported shell commands, an expected effect and a rollback note. FILEX validates the exact field set and types, allows one to five steps and at most 15 commands, caps the full JSON at 24,000 UTF-8 bytes and command text at 10,000 UTF-8 bytes, and limits the title and each step title to 160 bytes, the summary to 2,000 bytes, and each effect/rollback note to 1,000 bytes. Hidden control and bidirectional-format characters are rejected. A response that mixes plan JSON and standalone shell fences is rejected as ambiguous. FILEX assigns the contract version, kind and fixed `draft` risk. The card shows the summary, ordered steps, commands, expected effects, rollback notes and optional attached target; it has no approval, terminal-send or execution action. Target snapshots follow the same in-memory and stale-invalidation rules as command drafts and are absent from provider context and stored transcripts. Restored plans can be re-parsed for display without a target binding. Malformed or over-limit plans are not shown as structured proposals.
+
+### Provider presets and conversation workbench
+
+The assistant configuration lives in the shared Settings surface under a dedicated AI section. Provider presets only prefill a display label, an OpenAI-compatible base URL and suggested model IDs; they do not create authority, bypass endpoint validation or add provider-specific transport. Users can enter any compatible model ID. Local loopback endpoints such as Ollama may omit an API key; every non-loopback endpoint still requires a provider token stored by reference in the OS credential store. Changing an endpoint or model preserves the credential only when the endpoint is unchanged, resets external-data consent, and requires the user to grant consent again.
+
+The assistant panel uses the same workbench grammar as GITBX without importing Git-specific capabilities:
+
+- A compact conversation menu shows the current local conversation, bounded message count and explicit new, rename, clear and delete actions.
+- A provider/model pill opens a bounded model selector. Selecting a suggested model updates only the model through a typed facade, keeps the existing credential, clears consent, and never asks the Vue layer to read the secret. A manual model ID remains available.
+- Completed responses render headings, paragraphs, lists, emphasis, inline code and fenced code as escaped Vue text, not injected HTML. Code and draft commands can be copied but never run, sent to a PTY or converted into approval.
+- Empty-state prompts only populate the composer and select Explain or Draft; they do not send automatically.
+- Context selection remains opt-in. The always-visible disclosure strip names outgoing categories and approximate size; the detailed context drawer contains session, event, monitor, transfer, tunnel, terminal-selection and local-file attachments.
+
+These changes inherit the GITBX panel density, conversation affordances and provider/settings organization. They replace repository context with FILEX session and remote-operations context, replace autonomous agent execution with inert explain/draft output, and retain FILEX host-trust, consent, redaction, secret-storage and bounded-history rules.
 
 Executable tools follow only after the underlying SSH, file, transfer, monitoring or tunnel use case has passed its own security and recovery acceptance. Multi-file selection and comparison still require desktop/runtime verification after the development environment is configured.
 

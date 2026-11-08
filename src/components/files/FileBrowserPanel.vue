@@ -43,6 +43,10 @@ import VirtualList from '@/components/ui/VirtualList.vue';
 import PermissionDialog from '@/components/dialogs/PermissionDialog.vue';
 import EditorPanel from '@/components/editor/EditorPanel.vue';
 import { ownerLabel } from '@/domain/permissions';
+import {
+  completedTransferAffectsLocalListing,
+  completedTransferAffectsRemoteListing,
+} from '@/domain/transferRefresh';
 import type {
   AppError,
   CommandSnippet,
@@ -92,6 +96,11 @@ const sessionHost = computed(() => {
 });
 
 const runningTransfers = computed(() => transfers.tasks.filter((task) => task.state === 'running' || task.state === 'queued').length);
+const transferRefreshBaseline = Date.now();
+const refreshedCompletedTransfers = new Set<string>();
+const pendingLocalTransferRefreshPaths = new Set<string>();
+let transferRefreshTimer: number | null = null;
+let pendingRemoteTransferRefresh = false;
 
 const followTerminal = computed({
   get: () => settings.value.followTerminalCwd,
@@ -225,6 +234,47 @@ watch(
   },
 );
 
+watch(
+  () => transfers.tasks.map((task) => ({
+    id: task.id,
+    state: task.state,
+    updatedAtMs: task.updatedAtMs,
+    sessionId: task.sessionId,
+    profileId: task.profileId,
+    direction: task.direction,
+    localPath: task.localPath,
+    remotePath: task.remotePath,
+  })),
+  (tasks) => {
+    for (const task of tasks) {
+      if (task.state !== 'completed' || task.updatedAtMs < transferRefreshBaseline) continue;
+      const key = `${task.id}:${task.updatedAtMs}`;
+      if (refreshedCompletedTransfers.has(key)) continue;
+      refreshedCompletedTransfers.add(key);
+      if (refreshedCompletedTransfers.size > 500) {
+        const oldest = refreshedCompletedTransfers.values().next().value;
+        if (oldest) refreshedCompletedTransfers.delete(oldest);
+      }
+      const activeSession = sessions.activeSession;
+      if (activeSession?.state === 'connected'
+        && task.profileId === activeSession.profileId
+        && (task.sessionId === null || task.sessionId === activeSession.id)
+        && completedTransferAffectsRemoteListing(task, sftp.path)) {
+        pendingRemoteTransferRefresh = true;
+      }
+      const localPath = localFiles.listing?.path;
+      if (dualPaneEnabled.value && localPath && completedTransferAffectsLocalListing(task, localPath)) {
+        pendingLocalTransferRefreshPaths.add(localPath);
+      }
+      if (pendingRemoteTransferRefresh || pendingLocalTransferRefreshPaths.size > 0) {
+        if (transferRefreshTimer !== null) window.clearTimeout(transferRefreshTimer);
+        transferRefreshTimer = window.setTimeout(() => void flushCompletedTransferRefresh(), 150);
+      }
+    }
+  },
+  { flush: 'post' },
+);
+
 onMounted(async () => {
   void snippets.load();
   void transfers.load();
@@ -252,6 +302,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   panelUnmounted = true;
+  if (transferRefreshTimer !== null) window.clearTimeout(transferRefreshTimer);
   if (copyOperationId.value) void requestCopyCancellation();
   if (unlistenNativeDrop) {
     void unlistenNativeDrop();
@@ -327,6 +378,26 @@ async function refreshActivePane(): Promise<void> {
 function remoteJoin(directory: string, name: string): string {
   const parent = directory.replace(/\/+$/, '');
   return parent ? `${parent}/${name}` : `/${name}`;
+}
+
+async function flushCompletedTransferRefresh(): Promise<void> {
+  transferRefreshTimer = null;
+  const refreshRemote = pendingRemoteTransferRefresh;
+  const localPaths = [...pendingLocalTransferRefreshPaths];
+  pendingRemoteTransferRefresh = false;
+  pendingLocalTransferRefreshPaths.clear();
+
+  if (refreshRemote) {
+    const activeSession = sessions.activeSession;
+    if (activeSession?.state === 'connected' && sftp.sessionId === activeSession.id) {
+      await sftp.load(activeSession.id, sftp.path);
+    }
+  }
+  if (!dualPaneEnabled.value) return;
+  const currentLocalPath = localFiles.listing?.path;
+  if (currentLocalPath && localPaths.includes(currentLocalPath)) {
+    await localFiles.load(currentLocalPath);
+  }
 }
 
 function localJoin(directory: string, name: string): string {

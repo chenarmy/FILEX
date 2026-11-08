@@ -1,4 +1,4 @@
-import { reactive, ref, watch } from 'vue';
+import { nextTick, reactive, ref, watch } from 'vue';
 import { defineStore } from 'pinia';
 import { loadSafeSettings, saveSafeSettings } from '@/api/domain/settingsApi';
 import { defaultSafeSettings, readSafeSettings, writeSafeSettings } from '@/runtime/safeSettingsRepository';
@@ -10,6 +10,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const loaded = ref(false);
   const error = ref<string | null>(null);
   let persistenceTimer: number | null = null;
+  let suppressAutoPersist = false;
 
   function apply(): void {
     const root = document.documentElement;
@@ -21,6 +22,7 @@ export const useSettingsStore = defineStore('settings', () => {
     root.style.setProperty('--connections-pane-width', `${value.connectionsPaneWidth}px`);
     const inspectorWidth = value.dualPaneSftp ? Math.max(540, value.inspectorPaneWidth) : value.inspectorPaneWidth;
     root.style.setProperty('--inspector-pane-width', `${inspectorWidth}px`);
+    root.style.setProperty('--assistant-pane-width', `${value.assistantPaneWidth}px`);
     root.style.setProperty('--host-panel-width', `${value.hostPanelWidth}px`);
     root.style.setProperty('--task-drawer-height', `${value.taskDrawerHeight}px`);
     setLocale(value.locale);
@@ -29,8 +31,8 @@ export const useSettingsStore = defineStore('settings', () => {
   async function initialize(): Promise<void> {
     const result = await loadSafeSettings();
     if (result.ok) {
-      Object.assign(value, result.data);
-      writeSafeSettings(value);
+      writeSafeSettings(result.data);
+      Object.assign(value, readSafeSettings());
       error.value = null;
     } else {
       error.value = result.error.messageKey;
@@ -40,16 +42,22 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   async function save(next: SafeSettings): Promise<boolean> {
-    Object.assign(value, next);
-    writeSafeSettings(value);
-    apply();
-    const result = await saveSafeSettings({ ...value });
+    const result = await saveSafeSettings({ ...next, shortcuts: { ...next.shortcuts } });
     if (!result.ok) {
       error.value = result.error.messageKey;
       return false;
     }
+    if (persistenceTimer !== null) {
+      window.clearTimeout(persistenceTimer);
+      persistenceTimer = null;
+    }
+    suppressAutoPersist = true;
     Object.assign(value, result.data);
+    writeSafeSettings(value);
+    apply();
     error.value = null;
+    await nextTick();
+    suppressAutoPersist = false;
     return true;
   }
 
@@ -66,7 +74,7 @@ export const useSettingsStore = defineStore('settings', () => {
   watch(value, () => {
     writeSafeSettings(value);
     apply();
-    if (!loaded.value) return;
+    if (!loaded.value || suppressAutoPersist) return;
     if (persistenceTimer !== null) window.clearTimeout(persistenceTimer);
     persistenceTimer = window.setTimeout(() => void persistCurrent(), 350);
   }, { deep: true });

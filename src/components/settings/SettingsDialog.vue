@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue';
 import {
+  Bot,
   Database,
   FolderOpen,
   Keyboard,
@@ -13,6 +14,7 @@ import {
 } from 'lucide-vue-next';
 import { getCredentialStoreStatus, getRuntimePaths } from '@/api/domain/runtimeApi';
 import {
+  cancelUpdateDownload as cancelUpdateDownloadApi,
   checkForUpdates as checkForUpdatesApi,
   createBackup,
   createDiagnostics,
@@ -27,10 +29,12 @@ import {
   previewKnownHostsImport,
   selectKnownHostsFile,
 } from '@/api/domain/trustApi';
+import TerminalThemePicker from '@/components/settings/TerminalThemePicker.vue';
+import AssistantSettingsPanel from '@/components/settings/AssistantSettingsPanel.vue';
 import { t } from '@/i18n';
 import { useSettingsStore } from '@/stores/settings';
 import { useTerminalLogsStore } from '@/stores/terminalLogs';
-import { useUiStore } from '@/stores/ui';
+import { useUiStore, type SettingsSection } from '@/stores/ui';
 import {
   formatKeyboardShortcut,
   getKeyboardShortcutValidationError,
@@ -48,13 +52,12 @@ import type {
   UpdateStatus,
 } from '@/types/contracts';
 
-type SettingsSection = 'appearance' | 'terminal' | 'connections' | 'security' | 'storage' | 'updates' | 'shortcuts';
-
 const settings = useSettingsStore();
 const ui = useUiStore();
 const terminalLogs = useTerminalLogsStore();
-const activeSection = ref<SettingsSection>('appearance');
+const activeSection = ref<SettingsSection>(ui.settingsSection);
 const draft = reactive<SafeSettings>({ ...settings.value, shortcuts: { ...settings.value.shortcuts } });
+const saving = ref(false);
 const recordingShortcut = ref<KeyboardShortcutAction | null>(null);
 const shortcutRecordingError = ref<Parameters<typeof t>[0] | null>(null);
 const credentialStatus = ref<CredentialStoreStatus | 'not_probed' | 'probing'>('not_probed');
@@ -71,7 +74,12 @@ const backupRestorePath = ref('');
 const updateStatus = ref<UpdateStatus | null>(null);
 const runtimePaths = ref<RuntimePaths | null>(null);
 const updateBusy = ref(false);
+const updateCancelBusy = ref(false);
+const updatePhase = ref<'idle' | 'downloading' | 'installing'>('idle');
+const updateDownloadedBytes = ref(0);
+const updateContentLength = ref<number | null>(null);
 const updateNotice = ref('');
+const assistantSettingsRef = ref<{ save: () => Promise<boolean>; reset: () => void } | null>(null);
 
 const credentialStatusLabel = computed(() => {
   const labels = {
@@ -95,6 +103,18 @@ const updateChannelPending = computed(() => Boolean(
 ));
 const runtimeDataDirectory = computed(() => runtimePaths.value?.dataDirectory
   ?? t('settings.runtimePathUnavailable'));
+const updateProgressPercent = computed(() => {
+  const total = updateContentLength.value;
+  if (!total || total <= 0) return null;
+  return Math.min(100, Math.round((updateDownloadedBytes.value / total) * 100));
+});
+const updateProgressLabel = computed(() => {
+  const percent = updateProgressPercent.value;
+  return percent === null
+    ? t('settings.updateDownloading')
+    : t('settings.updateDownloadProgress', { percent });
+});
+const updateInstallActive = computed(() => updatePhase.value !== 'idle');
 
 const trustImportChangedCount = computed(() => knownHostsPreview.value?.candidates
   .filter((candidate) => isTrustImportChanged(candidate)).length ?? 0);
@@ -124,6 +144,7 @@ const visibleTrustRecords = computed(() => {
 
 const sections: { id: SettingsSection; label: Parameters<typeof t>[0]; icon: typeof Palette }[] = [
   { id: 'appearance', label: 'settings.appearance', icon: Palette },
+  { id: 'assistant', label: 'settings.assistant', icon: Bot },
   { id: 'terminal', label: 'settings.terminal', icon: TerminalSquare },
   { id: 'connections', label: 'settings.connections', icon: Server },
   { id: 'security', label: 'settings.security', icon: ShieldCheck },
@@ -152,21 +173,32 @@ const shortcutActions: { action: KeyboardShortcutAction; label: Parameters<typeo
 ];
 
 async function save(): Promise<void> {
-  if (recordingShortcut.value) return;
-  const saved = await settings.save({ ...draft, shortcuts: { ...draft.shortcuts } });
-  if (!saved) {
-    ui.notify(t('errors.settingsSaveFailed'));
-    return;
-  }
-  let loggingStopError: string | null = null;
-  if (!draft.terminalLogging) {
-    const stopped = await terminalLogs.stopAll();
-    if (!stopped && terminalLogs.error) {
-      loggingStopError = t(terminalLogs.error.messageKey as Parameters<typeof t>[0]);
+  if (recordingShortcut.value || saving.value || updateInstallActive.value) return;
+  saving.value = true;
+  try {
+    const assistantSaved = await assistantSettingsRef.value?.save();
+    if (assistantSaved === false) return;
+    const saved = await settings.save({ ...draft, shortcuts: { ...draft.shortcuts } });
+    if (!saved) {
+      ui.notify(t('errors.settingsSaveFailed'));
+      return;
     }
+    let loggingStopError: string | null = null;
+    if (!draft.terminalLogging) {
+      const stopped = await terminalLogs.stopAll();
+      if (!stopped && terminalLogs.error) {
+        loggingStopError = t(terminalLogs.error.messageKey as Parameters<typeof t>[0]);
+      }
+    }
+    ui.closeSettings();
+    ui.notify(loggingStopError ?? t('settings.saved'));
+  } finally {
+    saving.value = false;
   }
-  ui.closeSettings();
-  ui.notify(loggingStopError ?? t('settings.saved'));
+}
+
+function close(): void {
+  if (!saving.value && !updateInstallActive.value) ui.closeSettings();
 }
 
 function reset(): void {
@@ -180,6 +212,9 @@ function reset(): void {
         uiFontSize: defaults.uiFontSize,
         reduceMotion: defaults.reduceMotion,
       });
+      break;
+    case 'assistant':
+      assistantSettingsRef.value?.reset();
       break;
     case 'terminal':
       Object.assign(draft, {
@@ -204,6 +239,7 @@ function reset(): void {
         taskDrawerOpen: defaults.taskDrawerOpen,
         connectionsPaneWidth: defaults.connectionsPaneWidth,
         inspectorPaneWidth: defaults.inspectorPaneWidth,
+        assistantPaneWidth: defaults.assistantPaneWidth,
         taskDrawerHeight: defaults.taskDrawerHeight,
       });
       break;
@@ -363,9 +399,19 @@ async function installAvailableUpdate(): Promise<void> {
   if (!accepted) return;
 
   updateBusy.value = true;
+  updatePhase.value = 'downloading';
+  updateDownloadedBytes.value = 0;
+  updateContentLength.value = null;
   updateNotice.value = '';
   try {
-    const result = await installUpdateApi(version);
+    const result = await installUpdateApi(version, (event) => {
+      if (event.event === 'progress') {
+        updateDownloadedBytes.value = event.data.downloadedBytes;
+        updateContentLength.value = event.data.contentLength;
+      } else {
+        updatePhase.value = 'installing';
+      }
+    });
     if (!result.ok) {
       updateNotice.value = t(result.error.messageKey as Parameters<typeof t>[0]);
       if (result.error.code === 'UPDATE_STALE' || result.error.code === 'UPDATE_NO_AVAILABLE') {
@@ -379,6 +425,20 @@ async function installAvailableUpdate(): Promise<void> {
     ui.notify(t('settings.updateInstalling'));
   } finally {
     updateBusy.value = false;
+    updatePhase.value = 'idle';
+  }
+}
+
+async function cancelUpdateDownload(): Promise<void> {
+  if (updateCancelBusy.value || updatePhase.value !== 'downloading') return;
+  updateCancelBusy.value = true;
+  try {
+    const result = await cancelUpdateDownloadApi();
+    updateNotice.value = t(result.ok
+      ? 'settings.updateCancelRequested'
+      : result.error.messageKey as Parameters<typeof t>[0]);
+  } finally {
+    updateCancelBusy.value = false;
   }
 }
 
@@ -512,11 +572,11 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="dialog-layer" @mousedown.self="ui.closeSettings" @keydown.esc="ui.closeSettings">
+  <div class="dialog-layer" @mousedown.self="close" @keydown.esc="close">
     <section class="dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <header class="dialog-header">
         <strong id="settings-title">{{ t('settings.title') }}</strong>
-        <button type="button" class="icon-button" aria-label="Close" @click="ui.closeSettings"><X :size="14" /></button>
+        <button type="button" class="icon-button" aria-label="Close" :disabled="saving || updateInstallActive" @click="close"><X :size="14" /></button>
       </header>
       <div class="settings-body">
         <nav class="settings-nav" aria-label="Settings sections">
@@ -534,6 +594,8 @@ onMounted(async () => {
         </nav>
 
         <div class="settings-content">
+          <AssistantSettingsPanel v-show="activeSection === 'assistant'" ref="assistantSettingsRef" />
+
           <section v-if="activeSection === 'appearance'">
             <h2>{{ t('settings.appearance') }}</h2>
             <p>{{ t('settings.themeHelp') }}</p>
@@ -553,6 +615,7 @@ onMounted(async () => {
               <div><strong>{{ t('settings.uiSize') }}</strong><small>11–20 px</small></div>
               <label class="range-control"><input v-model.number="draft.uiFontSize" type="range" min="11" max="20"><span>{{ draft.uiFontSize }} px</span></label>
             </div>
+            <p class="settings-license-note">{{ t('settings.harmonyFontNotice') }}</p>
             <div class="setting-row">
               <div><strong>{{ t('settings.reduceMotion') }}</strong></div>
               <label class="switch"><input v-model="draft.reduceMotion" type="checkbox"><span /></label>
@@ -561,9 +624,10 @@ onMounted(async () => {
 
           <section v-else-if="activeSection === 'terminal'">
             <h2>{{ t('settings.terminal') }}</h2>
+            <p>{{ t('settings.terminalThemeHelp') }}</p>
+            <TerminalThemePicker v-model="draft.terminalTheme" :app-theme="draft.theme" />
             <div class="setting-row"><div><strong>{{ t('settings.terminalFont') }}</strong></div><input v-model="draft.terminalFontFamily"></div>
             <div class="setting-row"><div><strong>{{ t('settings.terminalSize') }}</strong></div><label class="range-control"><input v-model.number="draft.terminalFontSize" type="range" min="11" max="24"><span>{{ draft.terminalFontSize }} px</span></label></div>
-            <div class="setting-row"><div><strong>{{ t('settings.terminalTheme') }}</strong></div><select v-model="draft.terminalTheme"><option value="match">{{ t('settings.terminalThemeMatch') }}</option><option value="dark">{{ t('settings.dark') }}</option><option value="light">{{ t('settings.light') }}</option></select></div>
             <div class="setting-row"><div><strong>{{ t('settings.terminalEncoding') }}</strong><small>{{ t('settings.terminalEncodingHelp') }}</small></div><select v-model="draft.terminalEncoding"><option value="utf-8">UTF-8</option><option value="gbk">GBK</option><option value="big5">Big5</option><option value="shift_jis">Shift_JIS</option><option value="windows-1252">Windows-1252</option></select></div>
             <div class="setting-row"><div><strong>{{ t('settings.scrollback') }}</strong><small>{{ t('settings.scrollbackHelp') }}</small></div><select v-model.number="draft.terminalScrollback"><option :value="5000">{{ t('settings.scrollbackLines', { count: '5,000' }) }}</option><option :value="10000">{{ t('settings.scrollbackLines', { count: '10,000' }) }}</option><option :value="25000">{{ t('settings.scrollbackLines', { count: '25,000' }) }}</option></select></div>
             <div class="setting-row"><div><strong>{{ t('settings.multilinePasteProtection') }}</strong></div><label class="switch"><input v-model="draft.pasteProtection" type="checkbox"><span /></label></div>
@@ -664,12 +728,12 @@ onMounted(async () => {
             <div class="setting-row"><div><strong>{{ t('settings.updateChannel') }}</strong></div><select v-model="draft.updateChannel"><option value="stable">{{ t('settings.stable') }}</option><option value="beta">Beta</option></select></div>
             <div class="setting-row"><div><strong>{{ t('settings.version') }}</strong></div><span class="mono">FILEX {{ updateStatus?.currentVersion ?? '—' }}</span></div>
             <div class="setting-row"><div><strong>{{ t('settings.updaterStatus') }}</strong><small>{{ updateStatus?.configured ? t('settings.updaterConfigured') : t('settings.updaterNeedsSigning') }}</small><small v-if="updateChannelPending">{{ t('settings.updateChannelSaveHint') }}</small><small v-if="updateNotice" aria-live="polite">{{ updateNotice }}</small></div><span class="mono">{{ updateStatus?.channel ?? draft.updateChannel }}</span></div>
-            <div class="setting-row"><div><strong>{{ t('settings.checkUpdates') }}</strong><small v-if="updateStatus?.availableVersion">{{ t('settings.updateAvailable', { version: updateStatus.availableVersion }) }}</small></div><div class="setting-control-group"><button type="button" class="button" :disabled="updateBusy || !updateStatus?.configured || updateChannelPending" @click="checkForUpdatesNow">{{ updateBusy ? t('settings.checkingUpdates') : t('settings.checkUpdates') }}</button><button v-if="updateStatus?.availableVersion" type="button" class="button primary" :disabled="updateBusy || updateChannelPending" @click="installAvailableUpdate">{{ t('settings.installUpdate') }}</button></div></div>
+            <div class="setting-row"><div><strong>{{ t('settings.checkUpdates') }}</strong><small v-if="updateStatus?.availableVersion">{{ t('settings.updateAvailable', { version: updateStatus.availableVersion }) }}</small><small v-if="updatePhase === 'downloading'" aria-live="polite">{{ updateProgressLabel }}</small><small v-else-if="updatePhase === 'installing'" aria-live="polite">{{ t('settings.updateInstalling') }}</small></div><div class="setting-control-group"><button type="button" class="button" :disabled="updateBusy || !updateStatus?.configured || updateChannelPending" @click="checkForUpdatesNow">{{ updateBusy ? (updatePhase === 'downloading' ? t('settings.updateDownloading') : updatePhase === 'installing' ? t('settings.updateInstallingShort') : t('settings.checkingUpdates')) : t('settings.checkUpdates') }}</button><button v-if="updatePhase === 'downloading'" type="button" class="button danger" :disabled="updateCancelBusy" @click="cancelUpdateDownload">{{ updateCancelBusy ? t('settings.updateCancelling') : t('settings.cancelUpdateDownload') }}</button><button v-else-if="updateStatus?.availableVersion" type="button" class="button primary" :disabled="updateBusy || updateChannelPending" @click="installAvailableUpdate">{{ t('settings.installUpdate') }}</button></div></div>
             <div v-if="updateStatus?.releaseNotes" class="setting-row update-notes-row"><div><strong>{{ t('settings.updateNotes') }}</strong><pre>{{ updateStatus.releaseNotes }}</pre></div></div>
             <div class="setting-row"><div><strong>{{ t('settings.diagnostics') }}</strong><small>{{ t('settings.diagnosticsHelp') }}</small></div><button type="button" class="button" :disabled="maintenanceBusy" @click="runMaintenance('diagnostics')">{{ t('settings.createDiagnostics') }}</button></div>
           </section>
 
-          <section v-else>
+          <section v-else-if="activeSection === 'shortcuts'">
             <h2>{{ t('settings.shortcuts') }}</h2>
             <p>{{ t('settings.shortcutsHelp') }}</p>
             <div class="shortcut-list">
@@ -697,10 +761,10 @@ onMounted(async () => {
         </div>
       </div>
       <footer class="dialog-footer settings-footer">
-        <button type="button" class="button" @click="reset">{{ t('settings.reset') }}</button>
+        <button type="button" class="button" :disabled="saving || updateInstallActive" @click="reset">{{ t('settings.reset') }}</button>
         <span class="spacer" />
-        <button type="button" class="button" @click="ui.closeSettings">{{ t('settings.cancel') }}</button>
-        <button type="button" class="button primary" :disabled="recordingShortcut !== null" @click="save">{{ t('settings.save') }}</button>
+        <button type="button" class="button" :disabled="saving || updateInstallActive" @click="close">{{ t('settings.cancel') }}</button>
+        <button type="button" class="button primary" :disabled="recordingShortcut !== null || saving || updateInstallActive" @click="save">{{ saving ? t('settings.saving') : t('settings.save') }}</button>
       </footer>
     </section>
   </div>

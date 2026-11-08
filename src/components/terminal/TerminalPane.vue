@@ -5,6 +5,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { ArrowDown, ArrowUp, Bot, Circle, Search, X } from 'lucide-vue-next';
 import '@xterm/xterm/css/xterm.css';
+import { resolveTerminalPalette } from '@/domain/terminalThemes';
 import { useSessionsStore } from '@/stores/sessions';
 import { useSettingsStore } from '@/stores/settings';
 import { useUiStore } from '@/stores/ui';
@@ -44,23 +45,11 @@ const systemColorScheme = ref<'dark' | 'light'>(
   window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark',
 );
 const terminalPalette = computed(() => {
-  const preference = settings.value.terminalTheme;
-  const appearance = preference === 'match'
-    ? (settings.value.theme === 'system' ? systemColorScheme.value : settings.value.theme)
-    : preference;
-  return appearance === 'light'
-    ? {
-        background: '#f8fafc',
-        foreground: '#1e293b',
-        cursor: '#2563eb',
-        selectionBackground: '#93c5fd80',
-      }
-    : {
-        background: '#0d0d0d',
-        foreground: '#d7e0ef',
-        cursor: '#7aa2f7',
-        selectionBackground: '#334155aa',
-      };
+  return resolveTerminalPalette(
+    settings.value.terminalTheme,
+    settings.value.theme,
+    systemColorScheme.value,
+  );
 });
 const terminalEncodingLabel = computed(() => {
   const labels: Record<TerminalEncoding, string> = {
@@ -254,7 +243,9 @@ onMounted(async () => {
   systemColorScheme.value = systemThemeMedia.matches ? 'light' : 'dark';
   systemThemeMedia.addEventListener('change', handleSystemThemeChange);
   terminal = new XTerm({
+    allowProposedApi: true,
     cursorBlink: true,
+    screenReaderMode: true,
     convertEol: false,
     fontFamily: settings.value.terminalFontFamily,
     fontSize: settings.value.terminalFontSize,

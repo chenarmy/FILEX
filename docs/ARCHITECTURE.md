@@ -284,7 +284,7 @@ Do not create a single `serverStore` that owns profiles, sockets, terminal bytes
 
 - Tauri capabilities grant only required dialogs, filesystem scopes and process/network functions.
 - Use a strict CSP; no arbitrary remote scripts or remote HTML inside privileged app surfaces.
-- Online update metadata is isolated from SSH traffic and signed.
+- Online update metadata is isolated from SSH traffic and signed. Release builds use product-specific GitHub and CNB feeds in a fixed order; the updater accepts only HTTPS metadata whose artifact signature, signed version and configured public key verify.
 - External links open through a controlled adapter.
 - Remote file preview treats content as untrusted; HTML never executes in the privileged WebView.
 - Command snippets are text, not trusted code. Parameter substitution is displayed before execution.

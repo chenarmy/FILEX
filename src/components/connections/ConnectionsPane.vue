@@ -40,7 +40,8 @@ function recentDate(value: string | null): string {
   return Number.isFinite(parsed) ? new Date(parsed).toLocaleString() : value;
 }
 
-async function openRecent(profile: ConnectionProfile): Promise<void> {
+async function openProfile(profile: ConnectionProfile): Promise<void> {
+  if (sessions.busy) return;
   connections.select(profile.id);
   const existing = [...sessions.summaries].reverse().find((session) => session.profileId === profile.id && session.state !== 'closed');
   if (existing) {
@@ -141,11 +142,13 @@ defineExpose({ focusFilter });
               :class="{ selected: profile.id === connections.activeProfileId }"
               :aria-pressed="profile.id === connections.activeProfileId"
               @click="connections.select(profile.id)"
+              @dblclick.prevent="openProfile(profile)"
+              @keydown.enter.prevent="openProfile(profile)"
             >
               <span class="state-dot" :class="profile.state" :title="stateLabel(profile)" />
               <span class="connection-copy">
-                <strong>{{ profile.name }}</strong>
-                <small class="mono">{{ profile.username }}@{{ profile.host }}</small>
+                <strong :title="profile.name">{{ profile.name }}</strong>
+                <small class="mono" :title="`${profile.username}@${profile.host}`">{{ profile.username }}@{{ profile.host }}</small>
               </span>
             </button>
             <button
@@ -165,9 +168,9 @@ defineExpose({ focusFilter });
     </div>
     <div v-else-if="activeMode === 'recent'" class="recent-list">
       <p v-if="connections.recentProfiles.length === 0" class="pane-state">{{ t('nav.recentEmpty') }}</p>
-      <button v-for="profile in connections.recentProfiles" :key="profile.id" type="button" class="recent-row" :disabled="sessions.busy" @click="openRecent(profile)">
+      <button v-for="profile in connections.recentProfiles" :key="profile.id" type="button" class="recent-row" :disabled="sessions.busy" @click="openProfile(profile)">
         <span class="state-dot" :class="profile.state" />
-        <span class="recent-copy"><strong>{{ profile.name }}</strong><small class="mono">{{ profile.username }}@{{ profile.host }}</small><small>{{ t('nav.recentUsed', { time: recentDate(profile.lastUsedAt) }) }}</small></span>
+        <span class="recent-copy"><strong :title="profile.name">{{ profile.name }}</strong><small class="mono" :title="`${profile.username}@${profile.host}`">{{ profile.username }}@{{ profile.host }}</small><small>{{ t('nav.recentUsed', { time: recentDate(profile.lastUsedAt) }) }}</small></span>
         <Server :size="11" class="row-muted" />
       </button>
     </div>

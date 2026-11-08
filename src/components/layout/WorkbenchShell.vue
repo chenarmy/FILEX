@@ -5,18 +5,30 @@ import {
   Bot,
   CircleAlert,
   Command,
+  Copy,
   FolderOpen,
   Info,
   KeyRound,
   Maximize2,
+  Minus,
   Plus,
   Search,
   Settings,
   ShieldCheck,
+  Square,
   Terminal,
   X,
   Zap,
 } from 'lucide-vue-next';
+import {
+  closeCurrentWindow,
+  desktopWindowControlsAvailable,
+  isCurrentWindowMaximized,
+  minimizeCurrentWindow,
+  onCurrentWindowResized,
+  startDraggingCurrentWindow,
+  toggleCurrentWindowMaximize,
+} from '@/api/domain/windowApi';
 import ConnectionsPane from '@/components/connections/ConnectionsPane.vue';
 import TerminalWorkspace from '@/components/terminal/TerminalWorkspace.vue';
 import CommandInputBar from '@/components/terminal/CommandInputBar.vue';
@@ -43,6 +55,10 @@ const connections = useConnectionsStore();
 const settings = useSettingsStore();
 const ui = useUiStore();
 const sessions = useSessionsStore();
+const desktopWindowControls = desktopWindowControlsAvailable();
+const windowMaximized = ref(false);
+let windowControlsDisposed = false;
+let removeWindowResizeListener: (() => void) | null = null;
 const sessionErrorVisible = computed(() => sessions.error !== null
   && sessions.passwordProfileId === null
   && sessions.privateKeyPassphraseProfileId === null
@@ -188,21 +204,26 @@ async function startSessionForActiveProfile(): Promise<void> {
   await startSession();
 }
 
-function beginPaneResize(side: 'connections' | 'inspector' | 'host', event: PointerEvent): void {
+function beginPaneResize(side: 'connections' | 'inspector' | 'assistant' | 'host', event: PointerEvent): void {
   event.preventDefault();
   const startX = event.clientX;
   const initial = side === 'connections'
     ? settings.value.connectionsPaneWidth
     : side === 'host'
       ? settings.value.hostPanelWidth
-      : settings.value.inspectorPaneWidth;
+      : side === 'assistant'
+        ? settings.value.assistantPaneWidth
+        : settings.value.inspectorPaneWidth;
   const move = (next: PointerEvent) => {
-    const delta = side === 'inspector' ? startX - next.clientX : next.clientX - startX;
+    const delta = side === 'inspector' || side === 'assistant' ? startX - next.clientX : next.clientX - startX;
     let min = 180;
     let max = 420;
     if (side === 'host') {
       min = 200;
       max = 420;
+    } else if (side === 'assistant') {
+      min = 300;
+      max = 520;
     } else if (side === 'inspector') {
       min = settings.value.dualPaneSftp ? 540 : 220;
       max = settings.value.dualPaneSftp ? 760 : 480;
@@ -210,6 +231,7 @@ function beginPaneResize(side: 'connections' | 'inspector' | 'host', event: Poin
     const width = Math.min(max, Math.max(min, initial + delta));
     if (side === 'connections') settings.value.connectionsPaneWidth = width;
     else if (side === 'host') settings.value.hostPanelWidth = width;
+    else if (side === 'assistant') settings.value.assistantPaneWidth = width;
     else settings.value.inspectorPaneWidth = width;
   };
   const stop = () => {
@@ -236,7 +258,7 @@ function beginFileBrowserResize(event: PointerEvent): void {
   window.addEventListener('pointerup', stop, { once: true });
 }
 
-function resizePaneByKeyboard(side: 'connections' | 'inspector' | 'host', event: KeyboardEvent): void {
+function resizePaneByKeyboard(side: 'connections' | 'inspector' | 'assistant' | 'host', event: KeyboardEvent): void {
   if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
   event.preventDefault();
   const direction = event.key === 'ArrowRight' ? 1 : -1;
@@ -244,6 +266,8 @@ function resizePaneByKeyboard(side: 'connections' | 'inspector' | 'host', event:
     settings.value.connectionsPaneWidth = Math.min(420, Math.max(180, settings.value.connectionsPaneWidth + direction * 12));
   } else if (side === 'host') {
     settings.value.hostPanelWidth = Math.min(420, Math.max(200, settings.value.hostPanelWidth + direction * 12));
+  } else if (side === 'assistant') {
+    settings.value.assistantPaneWidth = Math.min(520, Math.max(300, settings.value.assistantPaneWidth - direction * 12));
   } else {
     const min = settings.value.dualPaneSftp ? 540 : 220;
     const max = settings.value.dualPaneSftp ? 760 : 480;
@@ -305,13 +329,67 @@ function handleShortcut(event: KeyboardEvent): void {
   runShortcutAction(action);
 }
 
-onMounted(() => window.addEventListener('keydown', handleShortcut, true));
-onBeforeUnmount(() => window.removeEventListener('keydown', handleShortcut, true));
+async function minimizeDesktopWindow(): Promise<void> {
+  if (!await minimizeCurrentWindow()) ui.notify(t('app.windowActionFailed'));
+}
+
+async function toggleDesktopWindowMaximize(): Promise<void> {
+  const maximized = await toggleCurrentWindowMaximize();
+  if (maximized === null) {
+    ui.notify(t('app.windowActionFailed'));
+    return;
+  }
+  windowMaximized.value = maximized;
+}
+
+async function closeDesktopWindow(): Promise<void> {
+  if (!await closeCurrentWindow()) ui.notify(t('app.windowActionFailed'));
+}
+
+function handleTitlebarDoubleClick(event: MouseEvent): void {
+  const target = event.target instanceof Element ? event.target : null;
+  if (target?.closest('button, input, select, textarea, a, label')) return;
+  void toggleDesktopWindowMaximize();
+}
+
+function handleTitlebarPointerDown(event: PointerEvent): void {
+  if (event.button !== 0) return;
+  const target = event.target instanceof Element ? event.target : null;
+  if (target?.closest('button, input, select, textarea, a, label')) return;
+  event.preventDefault();
+  void startDraggingCurrentWindow();
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', handleShortcut, true);
+  if (!desktopWindowControls) return;
+  void isCurrentWindowMaximized().then((maximized) => {
+    if (!windowControlsDisposed) windowMaximized.value = maximized;
+  });
+  void onCurrentWindowResized(() => {
+    void isCurrentWindowMaximized().then((maximized) => {
+      if (!windowControlsDisposed) windowMaximized.value = maximized;
+    });
+  }).then((removeListener) => {
+    if (windowControlsDisposed) removeListener();
+    else removeWindowResizeListener = removeListener;
+  });
+});
+
+onBeforeUnmount(() => {
+  windowControlsDisposed = true;
+  removeWindowResizeListener?.();
+  window.removeEventListener('keydown', handleShortcut, true);
+});
 </script>
 
 <template>
   <main class="workbench-shell" :class="{ 'task-open': settings.value.taskDrawerOpen, 'focus-mode': focusMode }">
-    <header class="context-bar">
+    <header
+      class="context-bar"
+      @pointerdown="handleTitlebarPointerDown"
+      @dblclick="handleTitlebarDoubleClick"
+    >
       <div class="brand" aria-label="FILEX">
         <span class="brand-mark"><Terminal :size="15" /></span>
         <span>FILEX</span>
@@ -407,9 +485,39 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleShortcut, true
         <button type="button" class="icon-button" :aria-label="t('commands.title')" :title="`${t('commands.title')} · ${formatKeyboardShortcut(settings.value.shortcuts.commandPalette)}`" @click="ui.openCommandPalette">
           <Command :size="15" />
         </button>
-        <button type="button" class="icon-button" :aria-label="t('app.settings')" :title="t('app.settings')" @click="ui.openSettings">
+        <button type="button" class="icon-button" :aria-label="t('app.settings')" :title="t('app.settings')" @click="ui.openSettings()">
           <Settings :size="15" />
         </button>
+        <div v-if="desktopWindowControls" class="window-controls">
+          <button
+            type="button"
+            class="window-control"
+            :aria-label="t('app.minimizeWindow')"
+            :title="t('app.minimizeWindow')"
+            @click.stop="minimizeDesktopWindow"
+          >
+            <Minus :size="15" />
+          </button>
+          <button
+            type="button"
+            class="window-control"
+            :aria-label="t(windowMaximized ? 'app.restoreWindow' : 'app.maximizeWindow')"
+            :title="t(windowMaximized ? 'app.restoreWindow' : 'app.maximizeWindow')"
+            @click.stop="toggleDesktopWindowMaximize"
+          >
+            <Copy v-if="windowMaximized" :size="13" />
+            <Square v-else :size="12" />
+          </button>
+          <button
+            type="button"
+            class="window-control window-control-close"
+            :aria-label="t('app.closeWindow')"
+            :title="t('app.closeWindow')"
+            @click.stop="closeDesktopWindow"
+          >
+            <X :size="15" />
+          </button>
+        </div>
       </div>
     </header>
 
@@ -469,7 +577,18 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleShortcut, true
         </template>
       </div>
       <template v-if="!focusMode">
-        <AssistantPanel v-if="ui.assistantOpen" />
+        <template v-if="ui.assistantOpen">
+          <button
+            class="pane-resizer"
+            type="button"
+            role="separator"
+            aria-orientation="vertical"
+            :aria-label="t('assistant.resizePane')"
+            @pointerdown="beginPaneResize('assistant', $event)"
+            @keydown="resizePaneByKeyboard('assistant', $event)"
+          />
+          <AssistantPanel />
+        </template>
         <InspectorPane v-else-if="detailsPaneVisible" ref="inspectorPane" />
       </template>
     </section>

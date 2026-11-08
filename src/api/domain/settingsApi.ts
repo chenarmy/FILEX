@@ -13,10 +13,14 @@ export async function loadSafeSettings(): Promise<OperationResult<SafeSettings>>
 }
 
 export async function saveSafeSettings(input: SafeSettings): Promise<OperationResult<SafeSettings>> {
-  writeSafeSettings(input);
-  if (!isTauriRuntime()) return success(readSafeSettings());
+  if (!isTauriRuntime()) {
+    writeSafeSettings(input);
+    return success(readSafeSettings());
+  }
   try {
-    return await invoke<OperationResult<SafeSettings>>('save_safe_settings', { input });
+    const result = await invoke<OperationResult<SafeSettings>>('save_safe_settings', { input });
+    if (result.ok) writeSafeSettings(result.data);
+    return result;
   } catch (error: unknown) {
     return failure(normalizeUnknownError(error, 'SETTINGS_SAVE_FAILED'));
   }

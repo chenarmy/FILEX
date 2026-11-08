@@ -12,6 +12,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:live-ssh": "playwright test e2e/live-ssh.spec.ts",
+    "version:check": "node scripts/sync-version.mjs --check",
+    "version:set": "node scripts/sync-version.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -40,6 +43,11 @@
     "vite": "^7.1.12",
     "vitest": "^3.2.4",
     "vue-tsc": "^3.1.1"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   },
   "packageManager": "pnpm@10.33.4"
 }

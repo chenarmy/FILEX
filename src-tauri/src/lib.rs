@@ -39,7 +39,7 @@ use filex_storage::SqliteProfileRepository;
 use futures_util::StreamExt;
 use serde::Serialize;
 use session_runtime::{CopyOperationControl, SessionRuntime};
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, Manager, State, ipc::Channel, webview::PageLoadEvent};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_updater::UpdaterExt;
 use tempfile::NamedTempFile;
@@ -85,14 +85,87 @@ const APP_SHUTDOWN_NOT_STARTED: u8 = 0;
 const APP_SHUTDOWN_RUNNING: u8 = 1;
 const APP_SHUTDOWN_COMPLETE: u8 = 2;
 const COPY_OPERATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
 const UPDATER_PUBLIC_KEY: Option<&str> = option_env!("FILEX_UPDATER_PUBLIC_KEY");
 const UPDATER_STABLE_ENDPOINT: Option<&str> = option_env!("FILEX_UPDATER_STABLE_ENDPOINT");
+const UPDATER_STABLE_MIRROR_ENDPOINT: Option<&str> =
+    option_env!("FILEX_UPDATER_STABLE_MIRROR_ENDPOINT");
 const UPDATER_BETA_ENDPOINT: Option<&str> = option_env!("FILEX_UPDATER_BETA_ENDPOINT");
 
 #[derive(Default)]
 struct SnippetRuntime {
     mutation_lock: Mutex<()>,
+}
+
+#[derive(Default)]
+struct UpdateDownloadRuntime {
+    active: Mutex<Option<CancellationToken>>,
+}
+
+impl UpdateDownloadRuntime {
+    fn reserve(&self) -> Result<UpdateDownloadReservation<'_>, AppError> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| update_error("UPDATE_BUSY"))?;
+        if active.is_some() {
+            return Err(update_error("UPDATE_BUSY"));
+        }
+        let token = CancellationToken::new();
+        *active = Some(token.clone());
+        Ok(UpdateDownloadReservation {
+            runtime: self,
+            token,
+            active: true,
+        })
+    }
+
+    fn request_cancel(&self) -> bool {
+        let Ok(active) = self.active.lock() else {
+            return false;
+        };
+        let Some(token) = active.as_ref() else {
+            return false;
+        };
+        token.cancel();
+        true
+    }
+}
+
+struct UpdateDownloadReservation<'a> {
+    runtime: &'a UpdateDownloadRuntime,
+    token: CancellationToken,
+    active: bool,
+}
+
+impl UpdateDownloadReservation<'_> {
+    fn release(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Ok(mut active) = self.runtime.active.lock() {
+            *active = None;
+        }
+        self.active = false;
+    }
+}
+
+impl Drop for UpdateDownloadReservation<'_> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "event", content = "data", rename_all = "camelCase")]
+enum UpdateDownloadEvent {
+    #[serde(rename_all = "camelCase")]
+    Progress {
+        downloaded_bytes: u64,
+        content_length: Option<u64>,
+    },
+    Installing,
 }
 
 #[tauri::command]
@@ -296,7 +369,8 @@ fn snippet_error(code: &str) -> AppError {
 struct AssistantProvider {
     endpoint: String,
     model: String,
-    credential_ref: String,
+    #[serde(default)]
+    credential_ref: Option<String>,
     #[serde(default)]
     external_data_consent: bool,
 }
@@ -1094,7 +1168,10 @@ fn save_assistant_provider(
     }
     let endpoint = endpoint.trim().trim_end_matches('/').to_owned();
     let model = model.trim().to_owned();
-    if api_key.is_empty() || model.is_empty() || !valid_assistant_endpoint(&endpoint) {
+    if model.is_empty()
+        || !valid_assistant_endpoint(&endpoint)
+        || (api_key.is_empty() && !assistant_endpoint_allows_keyless(&endpoint))
+    {
         return OperationResult::failure(maintenance_error("ASSISTANT_CONFIG_INVALID"));
     }
     let _provider_guard = match assistant.provider_lock.lock() {
@@ -1115,11 +1192,15 @@ fn save_assistant_provider(
         .ok()
         .flatten()
         .and_then(|raw| serde_json::from_str::<AssistantProvider>(&raw).ok())
-        .map(|provider| provider.credential_ref)
+        .and_then(|provider| provider.credential_ref)
         .filter(|reference| CredentialKind::ProviderToken.matches_reference(reference));
-    let reference = match credentials.put(CredentialKind::ProviderToken, api_key.as_str()) {
-        Ok(reference) => reference,
-        Err(error) => return OperationResult::failure(map_credential_error(&error)),
+    let reference = if api_key.is_empty() {
+        None
+    } else {
+        match credentials.put(CredentialKind::ProviderToken, api_key.as_str()) {
+            Ok(reference) => Some(reference),
+            Err(error) => return OperationResult::failure(map_credential_error(&error)),
+        }
     };
     let provider = AssistantProvider {
         endpoint: endpoint.clone(),
@@ -1130,16 +1211,67 @@ fn save_assistant_provider(
     let json = match serde_json::to_string(&provider) {
         Ok(json) => json,
         Err(_) => {
-            let _ = credentials.delete(&reference);
+            if let Some(reference) = reference.as_deref() {
+                let _ = credentials.delete(reference);
+            }
             return OperationResult::failure(maintenance_error("ASSISTANT_CONFIG_INVALID"));
         }
     };
     if let Err(error) = repository.write_app_setting(ASSISTANT_PROVIDER_KEY, &json) {
-        let _ = credentials.delete(&reference);
+        if let Some(reference) = reference.as_deref() {
+            let _ = credentials.delete(reference);
+        }
         return OperationResult::failure(error);
     }
-    if let Some(old_reference) = previous_reference.filter(|old| *old != reference) {
+    if let Some(old_reference) =
+        previous_reference.filter(|old| reference.as_deref() != Some(old.as_str()))
+    {
         let _ = credentials.delete(&old_reference);
+    }
+    OperationResult::success(assistant_provider_status(&provider))
+}
+
+#[tauri::command]
+fn update_assistant_model(
+    model: String,
+    repository: State<'_, Arc<SqliteProfileRepository>>,
+    assistant: State<'_, AssistantRuntime>,
+) -> OperationResult<AssistantProviderStatus> {
+    let model = model.trim().to_owned();
+    if model.is_empty() || model.len() > 120 {
+        return OperationResult::failure(maintenance_error("ASSISTANT_CONFIG_INVALID"));
+    }
+    let _provider_guard = match assistant.provider_lock.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return OperationResult::failure(maintenance_error("ASSISTANT_CONFIG_SAVE_FAILED"));
+        }
+    };
+    let has_active_request = match assistant.requests.lock() {
+        Ok(requests) => !requests.is_empty(),
+        Err(_) => return OperationResult::failure(assistant_error("ASSISTANT_BUSY")),
+    };
+    if has_active_request {
+        return OperationResult::failure(assistant_error("ASSISTANT_BUSY"));
+    }
+    let Some(raw) = (match repository.read_app_setting(ASSISTANT_PROVIDER_KEY) {
+        Ok(raw) => raw,
+        Err(error) => return OperationResult::failure(error),
+    }) else {
+        return OperationResult::failure(assistant_error("ASSISTANT_NOT_CONFIGURED"));
+    };
+    let mut provider = match serde_json::from_str::<AssistantProvider>(&raw) {
+        Ok(provider) if valid_assistant_provider(&provider) => provider,
+        _ => return OperationResult::failure(assistant_error("ASSISTANT_CONFIG_INVALID")),
+    };
+    provider.model = model;
+    provider.external_data_consent = false;
+    let json = match serde_json::to_string(&provider) {
+        Ok(json) => json,
+        Err(_) => return OperationResult::failure(assistant_error("ASSISTANT_CONFIG_INVALID")),
+    };
+    if let Err(error) = repository.write_app_setting(ASSISTANT_PROVIDER_KEY, &json) {
+        return OperationResult::failure(error);
     }
     OperationResult::success(assistant_provider_status(&provider))
 }
@@ -1271,9 +1403,12 @@ async fn stream_assistant_response(
                 Err(error) => return fail(&error.code),
             }
         }
-        let secret = match credentials.get(&provider.credential_ref) {
-            Ok(secret) => secret,
-            Err(error) => return OperationResult::failure(map_credential_error(&error)),
+        let secret = match provider.credential_ref.as_deref() {
+            Some(reference) => match credentials.get(reference) {
+                Ok(secret) => Some(secret),
+                Err(error) => return OperationResult::failure(map_credential_error(&error)),
+            },
+            None => None,
         };
         drop(provider_guard);
         let client = match reqwest::Client::builder()
@@ -1296,7 +1431,7 @@ async fn stream_assistant_response(
         let provider_request = assistant_provider_request(
             &client,
             endpoint,
-            secret.expose(),
+            secret.as_ref().map(|secret| secret.expose()),
             &provider.model,
             &messages,
         );
@@ -1435,12 +1570,25 @@ fn valid_assistant_endpoint(endpoint: &str) -> bool {
         && url.fragment().is_none()
 }
 
+fn assistant_endpoint_allows_keyless(endpoint: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(endpoint) else {
+        return false;
+    };
+    url.scheme() == "http"
+        && url
+            .host_str()
+            .is_some_and(|host| host == "localhost" || host == "127.0.0.1" || host == "::1")
+}
+
 fn valid_assistant_provider(provider: &AssistantProvider) -> bool {
     provider.endpoint.len() <= 2_048
         && valid_assistant_endpoint(&provider.endpoint)
         && !provider.model.trim().is_empty()
         && provider.model.len() <= 120
-        && CredentialKind::ProviderToken.matches_reference(&provider.credential_ref)
+        && match provider.credential_ref.as_deref() {
+            Some(reference) => CredentialKind::ProviderToken.matches_reference(reference),
+            None => assistant_endpoint_allows_keyless(&provider.endpoint),
+        }
 }
 
 fn assistant_provider_status(provider: &AssistantProvider) -> AssistantProviderStatus {
@@ -1467,16 +1615,19 @@ fn assistant_completion_endpoint(endpoint: &str) -> Option<reqwest::Url> {
 fn assistant_provider_request(
     client: &reqwest::Client,
     endpoint: reqwest::Url,
-    api_key: &str,
+    api_key: Option<&str>,
     model: &str,
     messages: &[serde_json::Value],
 ) -> Option<reqwest::Request> {
-    let bearer_token = Zeroizing::new(format!("Bearer {api_key}"));
-    let mut authorization = reqwest::header::HeaderValue::from_str(bearer_token.as_str()).ok()?;
-    authorization.set_sensitive(true);
-    client
-        .post(endpoint)
-        .header(reqwest::header::AUTHORIZATION, authorization)
+    let mut request = client.post(endpoint);
+    if let Some(api_key) = api_key {
+        let bearer_token = Zeroizing::new(format!("Bearer {api_key}"));
+        let mut authorization =
+            reqwest::header::HeaderValue::from_str(bearer_token.as_str()).ok()?;
+        authorization.set_sensitive(true);
+        request = request.header(reqwest::header::AUTHORIZATION, authorization);
+    }
+    request
         .json(&serde_json::json!({
             "model": model,
             "stream": true,
@@ -2242,8 +2393,8 @@ async fn check_for_updates(
             Ok(updater) => updater,
             Err(error) => return OperationResult::failure(error),
         };
-        match updater.check().await {
-            Ok(Some(update)) => {
+        match tokio::time::timeout(UPDATE_CHECK_TIMEOUT, updater.check()).await {
+            Ok(Ok(Some(update))) => {
                 status.available_version = Some(update.version.clone());
                 status.release_notes = update
                     .body
@@ -2251,11 +2402,20 @@ async fn check_for_updates(
                 status.published_at = update.date.map(|date| date.to_string());
                 OperationResult::success(status)
             }
-            Ok(None) => OperationResult::success(status),
-            Err(_) => OperationResult::failure(update_error("UPDATE_CHECK_FAILED")),
+            Ok(Ok(None)) => OperationResult::success(status),
+            Ok(Err(_)) | Err(_) => OperationResult::failure(update_error("UPDATE_CHECK_FAILED")),
         }
     }
     .await)
+}
+
+#[tauri::command]
+fn cancel_update_download(downloads: State<'_, Arc<UpdateDownloadRuntime>>) -> OperationResult<()> {
+    if downloads.request_cancel() {
+        OperationResult::success(())
+    } else {
+        OperationResult::failure(update_error("UPDATE_NOT_DOWNLOADING"))
+    }
 }
 
 #[tauri::command]
@@ -2263,6 +2423,8 @@ async fn install_update(
     app: tauri::AppHandle,
     settings: State<'_, SettingsService>,
     expected_version: String,
+    downloads: State<'_, Arc<UpdateDownloadRuntime>>,
+    on_event: Channel<UpdateDownloadEvent>,
 ) -> Result<OperationResult<()>, ()> {
     Ok(async {
         if expected_version.is_empty() || expected_version.len() > 64 {
@@ -2273,13 +2435,48 @@ async fn install_update(
             Ok(updater) => updater,
             Err(error) => return OperationResult::failure(error),
         };
-        let update = match updater.check().await {
-            Ok(Some(update)) if update.version == expected_version => update,
-            Ok(Some(_)) => return OperationResult::failure(update_error("UPDATE_STALE")),
-            Ok(None) => return OperationResult::failure(update_error("UPDATE_NO_AVAILABLE")),
-            Err(_) => return OperationResult::failure(update_error("UPDATE_CHECK_FAILED")),
+        let update = match tokio::time::timeout(UPDATE_CHECK_TIMEOUT, updater.check()).await {
+            Ok(Ok(Some(update))) if update.version == expected_version => update,
+            Ok(Ok(Some(_))) => return OperationResult::failure(update_error("UPDATE_STALE")),
+            Ok(Ok(None)) => {
+                return OperationResult::failure(update_error("UPDATE_NO_AVAILABLE"));
+            }
+            Ok(Err(_)) | Err(_) => {
+                return OperationResult::failure(update_error("UPDATE_CHECK_FAILED"));
+            }
         };
-        match update.download_and_install(|_, _| {}, || {}).await {
+        let mut reservation = match downloads.reserve() {
+            Ok(reservation) => reservation,
+            Err(error) => return OperationResult::failure(error),
+        };
+        let cancellation = reservation.token.clone();
+        let progress_channel = on_event.clone();
+        let mut downloaded_bytes = 0u64;
+        let downloaded = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => None,
+            result = update.download(
+                move |chunk_length, content_length| {
+                    downloaded_bytes =
+                        downloaded_bytes.saturating_add(chunk_length as u64);
+                    let _ = progress_channel.send(UpdateDownloadEvent::Progress {
+                        downloaded_bytes,
+                        content_length,
+                    });
+                },
+                || {},
+            ) => Some(result),
+        };
+        reservation.release();
+        let downloaded = match downloaded {
+            Some(Ok(downloaded)) => downloaded,
+            Some(Err(_)) => {
+                return OperationResult::failure(update_error("UPDATE_INSTALL_FAILED"));
+            }
+            None => return OperationResult::failure(update_error("UPDATE_CANCELLED")),
+        };
+        let _ = on_event.send(UpdateDownloadEvent::Installing);
+        match update.install(downloaded) {
             Ok(()) => {
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 app.request_restart();
@@ -2306,12 +2503,8 @@ fn update_public_key() -> Option<&'static str> {
         .filter(|key| !key.is_empty())
 }
 
-fn update_endpoint(channel: &str) -> Option<reqwest::Url> {
-    let raw_endpoint = match channel {
-        "stable" => UPDATER_STABLE_ENDPOINT,
-        "beta" => UPDATER_BETA_ENDPOINT,
-        _ => None,
-    }?;
+fn parse_update_endpoint(raw_endpoint: Option<&'static str>) -> Option<reqwest::Url> {
+    let raw_endpoint = raw_endpoint?;
     let endpoint = reqwest::Url::parse(raw_endpoint.trim()).ok()?;
     if endpoint.scheme() != "https"
         || endpoint.host_str().is_none()
@@ -2325,11 +2518,23 @@ fn update_endpoint(channel: &str) -> Option<reqwest::Url> {
     Some(endpoint)
 }
 
+fn update_endpoints(channel: &str) -> Vec<reqwest::Url> {
+    let raw_endpoints = match channel {
+        "stable" => vec![UPDATER_STABLE_ENDPOINT, UPDATER_STABLE_MIRROR_ENDPOINT],
+        "beta" => vec![UPDATER_BETA_ENDPOINT],
+        _ => Vec::new(),
+    };
+    raw_endpoints
+        .into_iter()
+        .filter_map(parse_update_endpoint)
+        .collect()
+}
+
 fn update_status(app: &tauri::AppHandle, channel: &str) -> UpdateStatus {
     UpdateStatus {
         current_version: app.package_info().version.to_string(),
         channel: channel.to_owned(),
-        configured: update_public_key().is_some() && update_endpoint(channel).is_some(),
+        configured: update_public_key().is_some() && !update_endpoints(channel).is_empty(),
         available_version: None,
         release_notes: None,
         published_at: None,
@@ -2341,10 +2546,13 @@ fn build_channel_updater(
     channel: &str,
 ) -> Result<tauri_plugin_updater::Updater, AppError> {
     let public_key = update_public_key().ok_or_else(|| update_error("UPDATE_NOT_CONFIGURED"))?;
-    let endpoint = update_endpoint(channel).ok_or_else(|| update_error("UPDATE_NOT_CONFIGURED"))?;
+    let endpoints = update_endpoints(channel);
+    if endpoints.is_empty() {
+        return Err(update_error("UPDATE_NOT_CONFIGURED"));
+    }
     app.updater_builder()
         .pubkey(public_key)
-        .endpoints(vec![endpoint])
+        .endpoints(endpoints)
         .map_err(|_| update_error("UPDATE_CONFIG_INVALID"))?
         .build()
         .map_err(|_| update_error("UPDATE_CONFIG_INVALID"))
@@ -2356,6 +2564,9 @@ fn update_error(code: &str) -> AppError {
         "UPDATE_CONFIG_INVALID" => "errors.updateConfigInvalid",
         "UPDATE_NO_AVAILABLE" => "errors.updateNoAvailable",
         "UPDATE_STALE" => "errors.updateStale",
+        "UPDATE_BUSY" => "errors.updateBusy",
+        "UPDATE_CANCELLED" => "errors.updateCancelled",
+        "UPDATE_NOT_DOWNLOADING" => "errors.updateNotDownloading",
         "UPDATE_INSTALL_FAILED" => "errors.updateInstallFailed",
         _ => "errors.updateCheckFailed",
     };
@@ -5003,7 +5214,21 @@ pub fn run() {
     let setup_shutdown_state = shutdown_state.clone();
     let run_shutdown_state = shutdown_state;
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
+        .on_page_load(|webview, payload| {
+            if payload.event() == PageLoadEvent::Finished {
+                let window = webview.window();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        })
         .setup(move |app| {
             if let Some(public_key) = update_public_key() {
                 app.handle().plugin(
@@ -5040,6 +5265,7 @@ pub fn run() {
             app.manage(SystemCredentialStore);
             app.manage(SessionRuntime::default());
             app.manage(CopyOperationRuntime::default());
+            app.manage(Arc::new(UpdateDownloadRuntime::default()));
             #[cfg(not(target_os = "macos"))]
             if let Some(window) = app.get_webview_window("main") {
                 let shutdown_state = setup_shutdown_state.clone();
@@ -5074,6 +5300,7 @@ pub fn run() {
             save_assistant_history,
             clear_assistant_history,
             save_assistant_provider,
+            update_assistant_model,
             set_assistant_provider_consent,
             stream_assistant_response,
             cancel_assistant_response,
@@ -5087,6 +5314,7 @@ pub fn run() {
             create_diagnostics,
             get_update_status,
             check_for_updates,
+            cancel_update_download,
             install_update,
             profile_export::export_connection_profiles,
             load_safe_settings,
@@ -5460,6 +5688,47 @@ fn transfer_session_unavailable_error() -> AppError {
 }
 
 #[cfg(test)]
+mod updater_tests {
+    use super::{UpdateDownloadRuntime, parse_update_endpoint};
+
+    #[test]
+    fn accepts_clean_https_update_endpoints_only() {
+        assert!(
+            parse_update_endpoint(Some(
+                "https://github.com/chenarmy/FILEX/releases/latest/download/latest.json"
+            ))
+            .is_some()
+        );
+        assert!(
+            parse_update_endpoint(Some(
+                "http://github.com/chenarmy/FILEX/releases/latest/download/latest.json"
+            ))
+            .is_none()
+        );
+        assert!(
+            parse_update_endpoint(Some("https://user:secret@example.com/latest.json")).is_none()
+        );
+        assert!(
+            parse_update_endpoint(Some("https://example.com/latest.json?token=secret")).is_none()
+        );
+        assert!(parse_update_endpoint(Some("")).is_none());
+        assert!(parse_update_endpoint(None).is_none());
+    }
+
+    #[test]
+    fn allows_one_cancellable_update_download_at_a_time() {
+        let runtime = UpdateDownloadRuntime::default();
+        assert!(!runtime.request_cancel());
+        let mut reservation = runtime.reserve().expect("reserve update download");
+        assert!(runtime.reserve().is_err());
+        assert!(runtime.request_cancel());
+        assert!(reservation.token.is_cancelled());
+        reservation.release();
+        assert!(runtime.reserve().is_ok());
+    }
+}
+
+#[cfg(test)]
 mod assistant_security_tests {
     use std::{
         io::{BufRead, BufReader, Read, Write},
@@ -5467,9 +5736,58 @@ mod assistant_security_tests {
     };
 
     use super::{
-        AssistantTurn, assistant_completion_endpoint, assistant_provider_request,
-        build_assistant_messages,
+        AssistantProvider, AssistantTurn, assistant_completion_endpoint,
+        assistant_provider_request, build_assistant_messages, valid_assistant_provider,
     };
+
+    #[test]
+    fn keyless_provider_is_limited_to_loopback_http_endpoints() {
+        let loopback = AssistantProvider {
+            endpoint: "http://127.0.0.1:11434/v1".to_owned(),
+            model: "llama3.2".to_owned(),
+            credential_ref: None,
+            external_data_consent: false,
+        };
+        assert!(valid_assistant_provider(&loopback));
+
+        let remote_without_key = AssistantProvider {
+            endpoint: "https://api.example.com/v1".to_owned(),
+            model: "fixture-model".to_owned(),
+            credential_ref: None,
+            external_data_consent: false,
+        };
+        assert!(!valid_assistant_provider(&remote_without_key));
+
+        let remote_with_key = AssistantProvider {
+            credential_ref: Some("provider-token:00000000-0000-0000-0000-000000000000".to_owned()),
+            ..remote_without_key
+        };
+        assert!(valid_assistant_provider(&remote_with_key));
+    }
+
+    #[test]
+    fn keyless_provider_request_omits_the_authorization_header() {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build mock provider client");
+        let endpoint = assistant_completion_endpoint("http://127.0.0.1:11434/v1")
+            .expect("build local provider endpoint");
+        let request = assistant_provider_request(
+            &client,
+            endpoint,
+            None,
+            "llama3.2",
+            &[serde_json::json!({ "role": "user", "content": "hello" })],
+        )
+        .expect("build keyless provider request");
+        assert!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .is_none()
+        );
+    }
 
     #[test]
     fn provider_messages_redact_prompt_context_and_history() {
@@ -5583,9 +5901,14 @@ mod assistant_security_tests {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("build mock provider client");
-        let request =
-            assistant_provider_request(&client, endpoint, api_key, "fixture-model", &messages)
-                .expect("build provider request");
+        let request = assistant_provider_request(
+            &client,
+            endpoint,
+            Some(api_key),
+            "fixture-model",
+            &messages,
+        )
+        .expect("build provider request");
         assert!(
             request
                 .headers()

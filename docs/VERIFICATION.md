@@ -1,5 +1,379 @@
 # FILEX verification evidence
 
+## 2026-11-08 — release and updater delivery pipeline (implementation, publication pending)
+
+Added a tag-driven release pipeline based on the GITBX delivery discipline without inheriting its identity, URLs or signing key:
+
+- Synchronized package, Cargo workspace, Tauri and `Cargo.lock` versions with `pnpm version:check` / `pnpm version:set`.
+- Added a versioned `CHANGELOG.md` release-note source and stable-tag version enforcement.
+- Split manual installer drafts out of CI and added a release workflow that builds Windows NSIS/MSI, Linux AppImage/DEB and macOS DMG/updater artifacts as a draft.
+- Added an exact 12-asset gate and Node-only Minisign verification of every updater asset, detached signature, trusted comment and signed version before the GitHub draft can become public.
+- Added a pre-build challenge signature that proves the configured private key, public-key variable and Tauri signed-version behavior match before spending three-platform build time.
+- Added a CNB release mirror that rewrites updater URLs, publishes the same signed bytes and verifies the mirrored feed.
+- Added ordered GitHub/CNB stable update endpoints to the Rust updater builder and kept beta fail-closed until separately configured.
+- Split update download from installer execution. The update check is bounded to 30 seconds, downloads report cumulative bytes and optional total size, only one download can run, and cancellation is available until signature verification completes and installation begins.
+- Pinned workflow actions and added Windows Rust checks. Removed an unused Unix-only import that made the existing Linux Clippy gate fail.
+
+Local evidence:
+
+| Check | Result |
+| --- | --- |
+| Release script syntax | `node --check` passed for release, version, key, manifest and CNB scripts |
+| Signed-fixture self-test | A temporary Tauri key pair signed a 12-asset synthetic release manifest; the key-pair challenge and full asset/signature verifier both passed, and the private key was deleted |
+| Version gate | `pnpm version:check` passed at `0.1.0` |
+| TypeScript | `pnpm typecheck` passed |
+| Lint | `pnpm lint` passed with zero warnings |
+| Unit tests | `pnpm test` passed: 9 files, 32 tests, including three Ed25519/Minisign verifier tests |
+| Front-end build | `pnpm build` passed with the existing large-chunk warnings |
+| Browser E2E | `pnpm test:e2e` passed 12 tests and skipped the credential-gated live SSH test |
+| Rust workspace | `cargo test --workspace --locked` passed 28 tests, including updater endpoint, single-download and cancellation-state validation, using the alternate target directory |
+| Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` passed |
+| Workflow syntax | `actionlint` passed for CI, release and both CNB mirror workflows |
+
+Publication is pending because the repository currently has only `TAURI_SIGNING_PRIVATE_KEY` and `CNB` Actions Secrets, with no `FILEX_UPDATER_PUBLIC_KEY` Actions Variable and no GitHub release. The configured private key also has not been proven to be FILEX-specific. No signed release, CNB mirror, download, install or cross-platform update claim is made by this entry.
+
+## 2026-11-08 — AI provider settings and conversation workbench
+
+Implemented a GITBX-aligned assistant workbench without importing GITBX branding, repository context or autonomous execution:
+
+- Settings → AI now owns provider presets, endpoint, model and API-key entry. OpenAI, DeepSeek, Gemini, Kimi, Qwen, Zhipu, MiniMax, OpenRouter, Ollama and custom OpenAI-compatible endpoints are available; model IDs remain manually editable.
+- Provider tokens continue to use the OS credential store. Remote endpoints require a token; only `http` endpoints on `localhost`, `127.0.0.1` or `::1` can run keyless. A model-only request preserves the endpoint and credential reference, rejects active requests and resets external-data consent.
+- The assistant panel now has a 360 px default width with a 300–520 px persisted, pointer- and keyboard-resizable range. It includes a conversation menu, provider/model picker, external-data disclosure, opt-in context drawer, empty-state prompts and a composer that sends on Enter and inserts a newline on Shift+Enter.
+- Provider text is parsed into escaped Vue structures for headings, paragraphs, lists, emphasis, inline code and fenced code. No model text is injected as HTML. Code and command drafts expose copy-only actions and never expose Run, terminal-send or approval.
+- The panel remains inside the viewport at 960×640 with the maximum 20 px UI font. The workbench flex container now prevents child min-content from pushing the right pane beyond the window.
+
+Evidence frames:
+
+- `test-results/assistant-panel-dark-1440.png`
+- `test-results/assistant-settings-dark.png`
+- `test-results/assistant-panel-light-960-font20.png`
+- `test-results/assistant-settings-light-960-font20.png`
+
+Final gates:
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Front-end unit tests | `pnpm test` | 8 files, 29 tests passed |
+| Browser E2E | `pnpm test:e2e` | 12 passed; live-SSH fixture skipped without host credentials |
+| Lint | `pnpm lint` | Passed with zero warnings |
+| TypeScript | `pnpm typecheck` | Passed in strict mode |
+| Production build | `pnpm build` | Passed; existing large-chunk warnings remain |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust workspace tests | `cargo test --workspace` with `CARGO_TARGET_DIR=C:\Users\Administrator\AppData\Local\Temp\filex-cargo-target` | 26 tests passed, including loopback-keyless policy, redaction and provider transport fixtures |
+| Clippy | `cargo clippy --workspace --all-targets -- -D warnings` with the alternate target directory | Passed |
+
+The repository `I:` volume reached zero bytes during the first Rust test link. Resolved absolute paths confirmed `I:\FILEX\target` as the generated cache; `cargo clean` removed 5.5 GiB, and remaining Rust checks used the `C:` temporary target above. No source files were removed.
+
+Still open: a live request through a configured packaged Tauri WebView, retention behavior at each external provider, fixture coverage for streaming Markdown under high output, and macOS/Linux visual acceptance. Browser E2E verifies the settings surface, conversation controls, provider preset behavior, disclosure UI and responsive layout; Rust fixtures verify the keyless transport and sanitized payload boundary.
+
+## 2026-11-08 — hidden Windows startup console
+
+The reported startup terminal was the Windows console allocated for the release executable. PE inspection confirmed that `F:\FILEX\filex-desktop.exe` used `IMAGE_SUBSYSTEM_WINDOWS_CUI` (value `3`). This was a binary subsystem mismatch rather than a terminal session created by FILEX.
+
+The desktop entry point now applies the standard Tauri release-only attribute:
+
+```rust
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+```
+
+Development builds retain console output for diagnostics, while release builds link as a Windows GUI executable and do not receive an automatically allocated console.
+
+Validation:
+
+| Check | Observation |
+| --- | --- |
+| Formatting | `cargo fmt --all -- --check` passed |
+| Release build | `$env:CARGO_TARGET_DIR='C:\Users\Administrator\.cache\filex-target'; cargo build --release -p filex-desktop` passed in 1m54s |
+| Previous executable | `F:\FILEX\filex-desktop.exe`, subsystem `3` (`Windows Console`), SHA-256 `3F59F5849E176E155873BF9CDDF247A4818BEC28636DAFAF4A746DFC6DE3D27F` |
+| Fixed executable | `C:\Users\Administrator\.cache\filex-target\release\filex-desktop.exe`, subsystem `2` (`Windows GUI`), SHA-256 `27B263FF414CA125E27AC0045047EE0AC0CA709751DDD7E9A0942A5233683494` |
+| Runnable copy | `F:\FILEX\filex-desktop-gui.exe`, byte-for-byte copy of the fixed executable; SHA-256 matched |
+
+The existing `filex-desktop.exe` process was still running from the previous single-instance launch, so the fixed executable was not interactively relaunched during this check. The PE subsystem is the loader-level value that determines console allocation.
+
+## 2026-11-08 — terminal palette browser, preview and explicit save
+
+Implemented a 14-theme terminal palette catalog with one typed resolver shared by xterm, the settings preview and the Monaco light/dark choice. Each definition supplies background, foreground, cursor, selection and all 16 normal/bright ANSI colors. Existing `dark`/`light` terminal preferences migrate to `filex-dark`/`filex-light`; unknown identifiers remain fail-safe on `match`.
+
+Settings → Terminal now presents a compact search-free palette list and a live sample of prompt text, output, ANSI colors, cursor and selection. Palette clicks update only the dialog draft. Cancel or closing the dialog discards the draft, while “应用并保存 / Apply and save” performs the backend/browser save before changing the global settings store and closing. A failed save leaves the dialog open with the existing structured error path.
+
+Behavior evidence:
+
+| Check | Observation |
+| --- | --- |
+| Preview | Selecting Dracula changed only the sample preview background to `rgb(40, 42, 54)`; the prior persisted theme remained unchanged |
+| Cancel | Closing after preview left `filex.safe-settings.v1` unchanged |
+| Explicit commit | Selecting Nord followed by Apply and save persisted `terminalTheme: "nord"` |
+| Restart persistence | Reloading the browser runtime reopened Settings with the Nord option selected |
+| Minimum layout | 960×640, light application theme, 20 px UI font: list and preview remained inside the dialog; no page-level horizontal overflow |
+| Legacy migration | Front-end normalization maps `dark`/`light`; Rust Settings load rewrites them to `filex-dark`/`filex-light`; unsupported IDs are rejected on save |
+
+Evidence frames:
+
+- `test-results/terminal-theme-picker-dark.png`
+- `test-results/terminal-theme-picker-light-960.png`
+
+Final gates:
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Front-end unit tests | `pnpm test` | 6 files, 23 tests passed |
+| Browser E2E | `pnpm test:e2e` | 10 passed, 1 live-SSH test skipped without credentials |
+| Lint | `pnpm lint` | Passed with zero warnings |
+| TypeScript | `pnpm typecheck` | Passed in strict mode |
+| Production build | `pnpm build` | Passed; existing large-chunk warnings remain |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust tests | `cargo test --workspace` with `CARGO_TARGET_DIR=C:\Users\Administrator\.cache\filex-target` | 24 tests passed |
+| Clippy | `cargo clippy --workspace --all-targets -- -D warnings` with the alternate target directory | Passed |
+
+The first workspace Rust test attempt used the repository target on `I:` and stopped at the desktop crate with `rustc-LLVM ERROR: IO failure on output stream: no space on device`. The rerun used the existing cache target above without deleting repository artifacts.
+
+Still open: native Tauri visual verification of an already-open xterm instance after committing a palette, packaged-WebView restart persistence and macOS/Linux palette rendering. Browser E2E verifies the settings preview, confirmation semantics and safe-settings persistence, not desktop xterm rendering.
+
+## 2026-11-08 — borderless window chrome and black-startup fix
+
+The legacy `F:\FILEX\filex-desktop.exe` was launched with WebView2 debugging and inspected after load. The Vue shell eventually rendered correctly, so the reported full-black window was the initial WebView surface rather than a crashed renderer. It also retained the duplicate native Windows title bar requested for removal.
+
+Implemented:
+
+- The Tauri main window now starts hidden and is shown only after `PageLoadEvent::Finished`, preventing an empty black window from becoming visible.
+- The native window background is `#15171b`, and `index.html` supplies critical pre-CSS dimensions, overflow and background declarations.
+- Native decorations are disabled.
+- The existing context bar is the drag region. Non-interactive title-bar pointer input starts native dragging; double-click toggles maximize.
+- App-owned minimize, maximize/restore and close buttons use the typed `windowApi` facade. Only matching Tauri window permissions were added.
+- The global search shrinks at narrow widths so all three controls remain inside a 960 px window.
+
+Window-control verification:
+
+| Check | Observation |
+| --- | --- |
+| Maximize | `1280×800 → 2560×1040`; button label changed to restore |
+| Restore | `2560×1040 → 1280×800`; button label changed back to maximize |
+| Double-click title bar | Brand-area double click changed maximize state |
+| Minimize | Windows `IsIconic` returned `true`; process remained alive |
+| Close | Process and WebView2 debugging listener exited normally |
+| Minimum layout | 960×640 emulation kept header at 960 px with all three controls inside the viewport |
+| Release startup | First targetable window appeared in about 385 ms with the rendered shell present; no black-only page state was observed |
+
+Single-instance and visual refinement:
+
+- Window controls were changed from individual outlined squares to borderless 32×30 px icon buttons behind a single subtle divider; close retains a destructive hover state.
+- `tauri-plugin-single-instance` 2.4.5 is registered before other plugins.
+- With the release executable minimized, launching a second copy produced no second persistent process (`BeforeCount=1`, `SecondStillRunning=false`, `AfterCount=1`).
+- The second launch restored the existing window (`IsIconic` changed from `true` to `false`) and focused it.
+- Saved connection rows now support single-click selection, double-click connection and Enter-to-connect while guarding against duplicate connection attempts. Browser E2E verifies both activation paths reach the desktop connection boundary.
+- The add-profile form's host and authentication columns are top-aligned. The previous stretched grid rows inserted a large label/input gap in the host field whenever the authentication hint expanded the row. At 960×640 and 20 px, both controls now start at `y=211` with a `29 px` height.
+- Completed transfer tasks now trigger a bounded, coalesced listing refresh: uploads refresh the affected remote directory, downloads refresh the affected local directory, and unrelated sessions/directories are ignored. Path behavior is covered by four unit tests, including Windows drive paths and directory subtree targets.
+
+Automated gates after the change: front-end lint/typecheck, 15 unit tests, 6 standard browser E2E tests, the live SSH E2E test, Rust workspace compile, 24 Rust tests and Clippy all passed.
+
+Windows release artifact:
+
+- `C:\Users\Administrator\.cache\filex-target\release\bundle\nsis\FILEX_0.1.0_x64-setup.exe`
+- Size: 17,877,586 bytes (17.05 MiB)
+- SHA-256: `4059f47393037a32127186c590b22df2c8f0e333b9c22d048a5bc6ff5c409aa2`
+- Authenticode: `NotSigned`
+- Release executable SHA-256: `3f59f5849e176e155873bf9cddf247a4818bec28636dafaf4a746dfc6de3d27f`
+
+The fixed executable was copied to `F:\FILEX\filex-desktop.exe`; the previous file is retained as `F:\FILEX\filex-desktop.pre-custom-titlebar.exe.bak`.
+
+## 2026-11-08 — per-region text-overflow audit
+
+Audited every visible workbench region at 1440×900, 1280×800 and 960×640, with zh-CN/en-US, dark/light themes, default 14 px and maximum 20 px UI fonts. The audit checked direct text-node clipping against hidden/scroll ancestors, element scroll dimensions, region bounds, page overflow and screenshots. Connection rows were populated with deliberately long names, hosts, usernames, groups and tags; the live SSH session supplied real terminal, process, network, disk-mount and file-list content.
+
+Confirmed and fixed:
+
+- At 960×640 and 20 px, the file-browser empty state was pushed below its clipped panel. The file-browser slot now has a font-aware minimum height and the table header no longer wraps into multiple rows.
+- The file browser outer panel reported 754 px of content inside a 262 px panel with no internal scrolling. The pane now uses a bounded grid, the table body scrolls internally, and rows use 27 px instead of each row inheriting the full viewport height.
+- The host monitor's disk table expanded to about 793 px inside a 264 px content width. The table now uses a fixed layout, wraps usage values when necessary, and keeps long mount paths as titled ellipses.
+- Host OS/hostname values could paint outside the monitor column. They now truncate within the column and expose their full value through the title.
+- At 20 px, host load values were clipped; they now wrap within the value column.
+- At 20 px, the final file-table header was 1 px wider than its cell. The shared table column ratios were adjusted, and all six headers fit without ellipsis.
+- Intentionally truncated connection names/endpoints, recent rows and terminal-tab names now expose their complete value through hover titles.
+
+Final DOM results:
+
+| State | Unexpected text clipping | Page overflow | Result |
+| --- | ---: | ---: | --- |
+| 1440×900, dark, zh-CN, 14 px | 0 | No | Pass |
+| 960×640, dark, zh-CN, 20 px | 0 | No | Pass |
+| Live SSH, 1280×800, 14 px | 0 | No | Pass |
+| Live SSH, 1280×800, 20 px | 0 | No | Pass |
+
+The live file-browser panel now reports `scrollWidth/clientWidth = 745/745` and `scrollHeight/clientHeight = 262/262`; its 22-row table body owns the vertical scroll. The host monitor reports `scrollWidth/clientWidth = 264/264`. Remaining ellipses are deliberate long-value truncation with titles, not paint-outside-clip failures.
+
+Evidence:
+
+- `test-results/audit-text-1440-dark-zh-14-final.png`
+- `test-results/audit-text-960-dark-zh-20-final-2.png`
+- `test-results/audit-text-live-connected-1280-final-3.png`
+- `test-results/audit-text-live-connected-1280-20px-final-2.png`
+
+Regression after fixes: front-end lint/typecheck, 15 unit tests, 6 standard E2E tests and the live SSH Playwright test all passed. The live run retained terminal search, accessibility-tree output, SFTP, monitoring, 14 px default and HarmonyOS font assertions with zero runtime errors or failed requests.
+
+Windows package rebuilt after the text-overflow fixes:
+
+- `C:\Users\Administrator\.cache\filex-target\release\bundle\nsis\FILEX_0.1.0_x64-setup.exe`
+- Size: 17,871,625 bytes (17.04 MiB)
+- SHA-256: `8eca4933d1653f612b8bee9e90c74c555b91a7bab3bd932d280baf678d1f515b`
+- Authenticode: `NotSigned`
+
+## 2026-11-07 — live SSH end-to-end, HarmonyOS typography and final gates
+
+This pass used machine-scoped `SSH_TEST_HOST` and `SSH_TEST_PASSWORD` without printing, logging or persisting their values. No `SSH_TEST_USER` was configured, so the live runner used its documented `root` fallback. The Tauri development app was started with a loopback-only WebView2 debugging port; Playwright attached to the actual WebView through CDP rather than treating a browser preview as desktop evidence.
+
+The end-to-end flow passed:
+
+- Unknown host key shown, explicitly confirmed, and recorded in the trust ledger.
+- One-time password authentication succeeded.
+- Remote prompt, command echo and command output rendered in the packaged-style Tauri WebView.
+- Command-bar submit cleared only after the PTY write and its generated marker was found by terminal search (`1 / 2`, with another run observing `2 / 2`).
+- The generated output marker was present in xterm's screen-reader accessibility tree.
+- The SFTP remote pane loaded 22 entries.
+- Read-only monitoring reached the live state and displayed host metrics.
+- The app remained at `1280×800` with no document overflow.
+- Runtime diagnostics recorded zero page errors, console errors and failed requests.
+
+The test was repeated with the Tauri process started without any `SSH_TEST_*` environment variables; only the independent Playwright process read the machine-scoped credentials. The flow still passed. The temporary loopback-only WebView2 debugging port was then closed, and FILEX was restarted in normal development mode with no SSH test credentials or debugging listener.
+
+Two defects found by the live test were fixed:
+
+- xterm search raised `You must set the allowProposedApi option to true to use proposed API`; `TerminalPane` now enables the proposed API required by the search addon.
+- Terminal content was not exposed to assistive technology; `TerminalPane` now enables xterm screen-reader mode and the live SSH test asserts that output text reaches `.xterm-accessibility-tree`.
+- The previous live runner could mistake any older connected session for the new connection; the checked-in live spec now requires the new password dialog to close and the active command input to become editable.
+
+Typography and layout changes:
+
+- The UI default remains 14 px.
+- HarmonyOS Sans SC Regular and Bold are bundled locally, preloaded before the shell, and used as the first family; platform CJK fallbacks remain.
+- Bundled font files load successfully through `document.fonts`, so this is no longer only a CSS family preference.
+- Legacy stored `Inter, system-ui, sans-serif` defaults migrate to HarmonyOS Sans SC without overriding custom font selections.
+- The top-bar primary button is non-shrinking and cannot wrap. At `960×640` with the maximum 20 px UI font, it remains inside the 44 px context bar.
+
+Final gate results:
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Frozen install | `pnpm install --frozen-lockfile --offline` | Passed; lockfile current |
+| Front-end unit tests | `pnpm test` | 15/15 passed |
+| Front-end lint | `pnpm lint` | Passed with zero warnings |
+| TypeScript | `pnpm typecheck` | Passed in strict mode |
+| Standard browser E2E | `pnpm test:e2e` | 6/6 passed; live SSH spec skipped without credentials |
+| Live SSH E2E | `pnpm test:live-ssh` | 1/1 passed |
+| Production front-end build | `pnpm build` | Passed; existing large-chunk warnings remain |
+| Rust format/check | `cargo fmt --all -- --check`, `cargo check --workspace` | Passed |
+| Rust tests | `cargo test --workspace` | 24/24 passed |
+| Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
+| Windows NSIS build | `pnpm tauri build --bundles nsis` | Passed |
+
+The package now explicitly approves the `esbuild` postinstall script through `pnpm.onlyBuiltDependencies`, removing the prior ignored-build-script warning.
+
+Evidence frames:
+
+- `test-results/live-ssh-connected-1280x800.png`
+- `test-results/live-ssh-terminal-search-1280x800.png`
+- `test-results/live-ssh-connected-files-monitor-1280x800.png`
+- `test-results/live-tauri-settings-font-1280x800.png`
+
+Release artifact:
+
+- `C:\Users\Administrator\.cache\filex-target\release\bundle\nsis\FILEX_0.1.0_x64-setup.exe`
+- Size: 17,875,600 bytes (17.05 MiB)
+- SHA-256: `2bbda24f9da03faa5ab619d5d4ee01d591b5c9f95c4ee4bc2b942e96246d714a`
+- Authenticode: `NotSigned`
+
+Still outside this pass: private-key and Agent live authentication, ProxyJump live routes, live tunnel lifecycle, destructive SFTP operations, macOS/Linux, installer interaction, native screen-reader announcement behavior and signed updates.
+
+## 2026-11-07 — local Tauri development instance and full local gate run
+
+Scope: the current working tree on Windows x64 (HEAD `d350a3d` plus the command-bar fix described below). This pass covered the configured local automated gates, a running Tauri development instance, browser rendering checks and a Windows NSIS release build. It did not cover live-host SSH/SFTP, real Agent/key authentication, macOS/Linux, installer interaction, signing or automatic update.
+
+The first `pnpm tauri dev --no-watch` attempt stopped during Rust compilation with `os error 112` because `I:` had approximately 10 MB free. The target tree already occupied about 5.53 GiB. The successful run used `CARGO_TARGET_DIR=C:\Users\Administrator\.cache\filex-target` without deleting the existing repository artifacts. Vite became ready in 521 ms, the cached development build completed in 1m15s, and the Tauri process created a `FILEX` main window. After load, the native host process reported about 32.5 MB working set; WebView child processes are separate and were not summed.
+
+Windows Computer Use still returned no accessibility tree and window screenshot capture failed with `window capture timed out`. The desktop instance is confirmed at process/window level, but its rendered UI and terminal content remain unverified at screen level.
+
+| Check | Command | Observed result |
+| --- | --- | --- |
+| Frozen dependency install | `pnpm install --frozen-lockfile --offline` | Passed in 712 ms; lockfile current. pnpm warned that `esbuild@0.28.2` build scripts are ignored |
+| Front-end lint | `pnpm lint` | Passed with zero warnings |
+| TypeScript | `pnpm typecheck` | Passed in strict mode |
+| Unit tests | `pnpm test` | 4 files, 14/14 passed |
+| Production front-end build | `pnpm build` | Passed. Existing size warnings remain: main bundle 913.44 kB and lazy Monaco bundle 2,761.01 kB |
+| Browser E2E | `pnpm test:e2e` | 5/5 passed with page-error, console-error and failed-request guards |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust compile | `cargo check --workspace` | Passed |
+| Rust tests | `cargo test --workspace` | 22/22 passed, including the local SSH host-key, password, PTY, forwarding, cancellation and disconnect fixture |
+| Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
+| Windows release build | `CARGO_NET_OFFLINE=true pnpm tauri build --bundles nsis` | Passed; unsigned NSIS installer generated |
+
+Playwright direct checks against the running development Vite server:
+
+| Frame | Observation |
+| --- | --- |
+| 1440×900, dark, zh-CN | `lang=zh-CN`, `dir=ltr`, root font 14 px, no document overflow outside 1440×900, zero page/console errors and zero failed requests |
+| 960×640, dark, zh-CN | No page-level overflow outside 960×640, zero page/console errors and zero failed requests |
+| 1440×900, light, en-US | Light token class applied, `lang=en-US`, root font 14 px, zero runtime errors or failed requests |
+| 960×640, dark, zh-CN, 20 px UI font | No page-level overflow, but the top-bar `新建会话` button wraps and exceeds the 44 px header |
+
+Layout defect measured at the minimum window and maximum supported font size:
+
+- Header bounds: `y=0`, height `44px`.
+- `新建会话` bounds: `y=-3.83px`, width `106.23px`, height `50.66px`, bottom `46.83px`.
+- Computed white-space is `normal`; the 16.67 px label wraps to two lines and visibly crosses the top and bottom of the context bar.
+
+This was a responsive-layout defect, not a test-tool artifact. It was fixed and covered by a browser assertion later on the same date; see the latest section above.
+
+Generated review frames (ignored test output, not release assets):
+
+- `test-results/dev-browser-1440x900.png`
+- `test-results/dev-browser-960x640.png`
+- `test-results/dev-browser-light-en-1440x900.png`
+- `test-results/dev-browser-large-font-960x640.png`
+
+Release artifact generated in the alternate target directory:
+
+- `C:\Users\Administrator\.cache\filex-target\release\bundle\nsis\FILEX_0.1.0_x64-setup.exe`
+- Size: 7,594,582 bytes
+- SHA-256: `1e92e59a470dc130df6969e44a11ac70bb85d59ae8aee9965c5dad1caa54de44`
+- Authenticode: `NotSigned`
+
+## 2026-11-07 — Windows packaged PTY acceptance remains open; command-bar false success fixed
+
+Resumed acceptance of the installed Windows x64 package. The user observed that the floating command input accepted a command, cleared the draft and incremented the in-memory history count, but terminal search found neither the test marker nor the initial prompt. The FILEX process and main window existed; this was not an application-start failure.
+
+Windows Computer Use could not provide independent UI evidence: the FILEX window returned an empty accessibility tree, and screenshot capture failed with `FrameArrived timed out`. Accessibility text, terminal search results and screen-level PTY output therefore remain unverified. In particular, command-bar clearing and history changes are UI state evidence only and do not prove that SSH accepted the write or that xterm received and rendered output.
+
+Static review found a matching false-success path in `CommandInputBar.vue`: it appended LF (`\n`), recorded history and cleared the draft without awaiting the typed terminal write. The terminal key path and confirmed snippet action use CR (`\r`). The command bar now waits for the PTY write, records history and clears the unchanged draft only after success, preserves the draft on structured failure, prevents duplicate submissions and sends CR.
+
+| Check | Command or observation | Result |
+| --- | --- | --- |
+| TypeScript | `pnpm typecheck` | Passed in strict mode |
+| Unit tests | `pnpm test` | 4 files, 14 tests passed |
+| Lint | `pnpm lint` | Passed. An initial parallel run raced Playwright while `test-results` was being recreated and exited with `ENOENT`; the required serial rerun completed with zero warnings |
+| Production build | `pnpm build` | Passed; Vite retained the existing large-chunk warnings for the main and lazy Monaco bundles |
+| Browser E2E | `pnpm test:e2e` | 5/5 passed with the existing page-error, console-error and failed-request guards |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust compile | `cargo check --workspace` | Passed |
+| Rust tests | `cargo test --workspace` | 22 tests passed, including the local SSH fixture's host-key rejection, password authentication, PTY round-trip, remote forwarding, cancellation and disconnect lifecycle |
+| Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
+| Windows package | `CARGO_NET_OFFLINE=true pnpm tauri build --bundles nsis` | Passed after the command-bar fix; unsigned installer generated |
+| Windows screenshot | Computer Use `get_window_state` | Failed with `FrameArrived timed out` |
+| Windows accessibility | Computer Use `get_window_state(include_text: true)` | No accessibility tree was returned |
+
+The Rust loopback fixture verifies the SSH engine's PTY channel, not the packaged WebView event bridge, xterm rendering or search. The following checks remain open and must not be marked passed from history counts or backend fixtures:
+
+- Confirm the initial remote prompt, command echo and command output in the packaged Windows terminal.
+- Confirm command-bar failure behavior against a deliberately interrupted PTY write, including preserved draft and visible structured error.
+- Confirm terminal search matches, next/previous navigation, no-match state and post-output search refresh.
+- Confirm terminal content through an accessibility reader or a working screen-capture channel.
+
+Artifact identities:
+
+- Initial installed executable used for the failed acceptance attempt: `C:\Users\Administrator\AppData\Local\FILEX\filex-desktop.exe`, 28,321,280 bytes, SHA-256 `049b4021582e8702bbfca70e30569d9eb7b00a82b4d3986fc4335233d024cccd`.
+- Rebuilt installer containing the command-bar fix, superseding the initial package: `target/release/bundle/nsis/FILEX_0.1.0_x64-setup.exe`, 7,585,797 bytes, SHA-256 `ba6108578884efe9951b577903204e4eb1e6a136c2a0dd606123031ffef6515e`, Authenticode `NotSigned`.
+- Rebuilt packaged executable inside the installer build: `target/release/filex-desktop.exe`, 28,321,280 bytes, SHA-256 `a8e8a17641aac7f7d40e7a22eeae362277f07fbe2d48622b27c809e68f07b171`.
+
+The rebuilt installer has not been installed or launched in this session. Installer interaction and the fixed command bar therefore remain pending until the candidate package is installed and screen-level verification is available.
+
 ## 2026-11-05 — UI font-size setting made effective, default raised to 14
 
 The Settings → Appearance "界面字号" slider previously had no visible effect: `settings.apply()` sets the root element font-size (rem base), but 167 declarations in `workbench.css` plus 16 in component scoped styles hardcoded `font-size: Npx`, so compact labels ignored the setting. All of them are now converted to rem (base 12, preserving the original pixel scale exactly at the old 12px default), so the slider scales the entire UI. The default `uiFontSize` is raised from 12 to 14 in both the Rust core defaults and the browser settings repository (range 11–20 unchanged).

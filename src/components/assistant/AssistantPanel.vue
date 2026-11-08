@@ -1,12 +1,40 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { Bot, Check, Database, Eraser, ExternalLink, KeyRound, Paperclip, Pencil, Plus, Send, Settings2, Square, Trash2, WandSparkles, X } from 'lucide-vue-next';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import {
+  Bot,
+  Check,
+  ChevronDown,
+  Compass,
+  Copy,
+  Cpu,
+  Database,
+  Eraser,
+  ExternalLink,
+  KeyRound,
+  MessageSquare,
+  Paperclip,
+  Pencil,
+  Plus,
+  Send,
+  Settings2,
+  ShieldAlert,
+  Sparkles,
+  Square,
+  Trash2,
+  WandSparkles,
+  X,
+} from 'lucide-vue-next';
 import { t } from '@/i18n';
 import {
   releaseAssistantContextFile,
   selectAssistantContextFile,
   type AssistantContextFileReference,
 } from '@/api/domain/assistantApi';
+import {
+  assistantSuggestedModels,
+  matchAssistantProviderPreset,
+} from '@/domain/assistantProviders';
+import AssistantMarkdown from '@/components/assistant/AssistantMarkdown.vue';
 import { useAssistantStore, type AssistantMessage } from '@/stores/assistant';
 import { useConnectionsStore } from '@/stores/connections';
 import { useEventsStore } from '@/stores/events';
@@ -25,6 +53,7 @@ const sessions = useSessionsStore();
 const transfers = useTransfersStore();
 const tunnels = useTunnelsStore();
 const ui = useUiStore();
+
 const mode = ref<'explain' | 'draft'>('explain');
 const prompt = ref('');
 const attachSession = ref(false);
@@ -38,17 +67,27 @@ const contextFiles = ref<AssistantContextFileReference[]>([]);
 const contextFileBusy = ref(false);
 const contextFileError = ref<string | null>(null);
 const assistantSendInProgress = ref(false);
-const showSettings = ref(false);
 const consentSaving = ref(false);
-const endpoint = ref('https://api.openai.com/v1');
-const model = ref('gpt-4o-mini');
-const apiKey = ref('');
+const contextOpen = ref(false);
+const conversationMenuOpen = ref(false);
+const modelMenuOpen = ref(false);
+const customModel = ref('');
 const editingConversationTitle = ref(false);
 const conversationTitleDraft = ref('');
-const activeConversation = computed(() => assistant.conversations.find((conversation) => conversation.id === assistant.activeConversationId));
-const activeConversationTitle = computed(() => activeConversation.value?.title || t('assistant.newConversation'));
+const transcriptRef = ref<HTMLElement | null>(null);
+const composerRef = ref<HTMLTextAreaElement | null>(null);
+const conversationMenuRef = ref<HTMLElement | null>(null);
+const modelMenuRef = ref<HTMLElement | null>(null);
+const copiedCommands = ref<Record<string, boolean>>({});
 let releaseContextOnCompletion = false;
 let panelUnmounted = false;
+const copyTimers = new Set<number>();
+
+const activeConversation = computed(() => assistant.conversations.find((conversation) => conversation.id === assistant.activeConversationId));
+const activeConversationTitle = computed(() => activeConversation.value?.title || t('assistant.newConversation'));
+const providerPreset = computed(() => matchAssistantProviderPreset(assistant.provider.endpoint));
+const providerLabel = computed(() => assistant.provider.endpoint ? providerPreset.value.name : t('settings.assistantNotConfigured'));
+const modelSuggestions = computed(() => assistantSuggestedModels(providerPreset.value.id, assistant.provider.model));
 const providerDestination = computed(() => {
   try {
     return new URL(assistant.provider.endpoint).origin;
@@ -56,15 +95,18 @@ const providerDestination = computed(() => {
     return assistant.provider.endpoint.slice(0, 160);
   }
 });
+
 watch(() => ui.assistantTerminalSelection, (selection) => {
   attachTerminalSelection.value = selection !== null;
 }, { immediate: true });
+
 const errorText = computed(() => assistant.error ? t(assistant.error as Parameters<typeof t>[0]) : '');
 const contextFileErrorText = computed(() => contextFileError.value
   ? t(contextFileError.value as Parameters<typeof t>[0])
   : '');
 const cancelErrorText = computed(() => assistant.cancelError ? t(assistant.cancelError as Parameters<typeof t>[0]) : '');
 const historyErrorText = computed(() => assistant.historyError ? t(assistant.historyError as Parameters<typeof t>[0]) : '');
+
 const recentEvents = computed(() => events.entries
   .filter((event) => event.severity === 'warning' || event.severity === 'error')
   .slice(0, 8));
@@ -82,12 +124,14 @@ const selectedTunnelFailure = computed(() => failedTunnels.value.find((tunnel) =
 const selectedTunnelTargetHost = computed(() => selectedTunnelFailure.value
   ? safeTunnelTargetHost(selectedTunnelFailure.value.targetHost)
   : null);
+
 watch(failedTunnels, (failures) => {
   if (selectedTunnelFailureId.value && !failures.some((tunnel) => tunnel.id === selectedTunnelFailureId.value)) {
     selectedTunnelFailureId.value = '';
     attachTunnelFailure.value = false;
   }
 });
+
 const selectedContext = computed(() => {
   const items: Array<Record<string, unknown>> = [];
   const labels: string[] = [];
@@ -212,48 +256,93 @@ const disclosure = computed(() => {
   if (historyForDisclosure.value.length > 0) labels.push(t('assistant.disclosureHistory'));
   return `${labels.join('、')} · ${t('assistant.disclosureApproxSize', { size: approximateOutgoingSize.value })}`;
 });
+const contextCount = computed(() => selectedContext.value.labels.length + contextFiles.value.length);
+
+watch(
+  () => {
+    const last = assistant.messages[assistant.messages.length - 1];
+    return `${assistant.messages.length}:${last?.status ?? ''}:${last?.content.length ?? 0}`;
+  },
+  () => void scrollToBottom(),
+);
 
 function formatByteLength(bytes: number): string {
   return bytes < 1_024 ? `${bytes} B` : `${(bytes / 1_024).toFixed(1)} KiB`;
 }
 
-onBeforeUnmount(() => {
-  panelUnmounted = true;
-  const selected = contextFiles.value;
-  contextFiles.value = [];
-  if (selected.length > 0 && assistantSendInProgress.value) {
-    releaseContextOnCompletion = true;
-    return;
+async function scrollToBottom(): Promise<void> {
+  await nextTick();
+  const transcript = transcriptRef.value;
+  if (transcript) transcript.scrollTop = transcript.scrollHeight;
+}
+
+function closeMenus(): void {
+  conversationMenuOpen.value = false;
+  modelMenuOpen.value = false;
+}
+
+function handleDocumentPointerDown(event: PointerEvent): void {
+  const target = event.target;
+  if (!(target instanceof Node)) return;
+  if (conversationMenuOpen.value && !conversationMenuRef.value?.contains(target)) {
+    conversationMenuOpen.value = false;
   }
-  selected.forEach((file) => void releaseAssistantContextFile(file.id));
-});
-
-onMounted(async () => {
-  await assistant.initialize();
-  if (assistant.provider.endpoint) endpoint.value = assistant.provider.endpoint;
-  if (assistant.provider.model) model.value = assistant.provider.model;
-  showSettings.value = !assistant.provider.configured;
-});
-
-async function configure(): Promise<void> {
-  if (!apiKey.value.trim()) return;
-  const saved = await assistant.configure({ endpoint: endpoint.value, model: model.value, apiKey: apiKey.value });
-  if (saved) {
-    apiKey.value = '';
-    showSettings.value = false;
-    ui.notify(t('assistant.configured'));
+  if (modelMenuOpen.value && !modelMenuRef.value?.contains(target)) {
+    modelMenuOpen.value = false;
   }
 }
 
-async function updateProviderConsent(event: Event): Promise<void> {
-  const input = event.currentTarget as HTMLInputElement;
-  consentSaving.value = true;
-  try {
-    const saved = await assistant.setProviderConsent(input.checked);
-    if (!saved) input.checked = assistant.provider.externalDataConsent;
-  } finally {
-    consentSaving.value = false;
+function openAssistantSettings(): void {
+  closeMenus();
+  ui.openSettings('assistant');
+}
+
+function closeAssistant(): void {
+  closeMenus();
+  ui.assistantOpen = false;
+}
+
+function toggleConversationMenu(): void {
+  conversationMenuOpen.value = !conversationMenuOpen.value;
+  modelMenuOpen.value = false;
+  editingConversationTitle.value = false;
+}
+
+function toggleModelMenu(): void {
+  if (!assistant.provider.configured) {
+    openAssistantSettings();
+    return;
   }
+  if (assistant.busy || assistant.historySaving) return;
+  conversationMenuOpen.value = false;
+  editingConversationTitle.value = false;
+  customModel.value = assistant.provider.model;
+  modelMenuOpen.value = !modelMenuOpen.value;
+}
+
+function showCopied(key: string): void {
+  copiedCommands.value = { ...copiedCommands.value, [key]: true };
+  const timer = window.setTimeout(() => {
+    const next = { ...copiedCommands.value };
+    delete next[key];
+    copiedCommands.value = next;
+    copyTimers.delete(timer);
+  }, 1_800);
+  copyTimers.add(timer);
+}
+
+async function copyText(text: string, key: string): Promise<void> {
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+    await navigator.clipboard.writeText(text);
+    showCopied(key);
+  } catch {
+    ui.notify(t('assistant.copyFailed'));
+  }
+}
+
+function notifyCopyFailure(): void {
+  ui.notify(t('assistant.copyFailed'));
 }
 
 async function chooseContextFile(): Promise<void> {
@@ -271,8 +360,8 @@ async function chooseContextFile(): Promise<void> {
       await releaseAssistantContextFile(result.data.id);
       return;
     }
-
     contextFiles.value = [...contextFiles.value, result.data];
+    contextOpen.value = true;
   } finally {
     contextFileBusy.value = false;
   }
@@ -285,6 +374,46 @@ async function removeContextFile(id: string): Promise<void> {
   if (!selected) return;
   const result = await releaseAssistantContextFile(selected.id);
   if (!result.ok) contextFileError.value = result.error.messageKey;
+}
+
+async function updateProviderConsent(event: Event): Promise<void> {
+  const input = event.currentTarget as HTMLInputElement;
+  consentSaving.value = true;
+  try {
+    const saved = await assistant.setProviderConsent(input.checked);
+    if (!saved) input.checked = assistant.provider.externalDataConsent;
+  } finally {
+    consentSaving.value = false;
+  }
+}
+
+async function setModel(model: string): Promise<void> {
+  if (!model.trim() || assistant.busy) return;
+  if (model.trim() === assistant.provider.model) {
+    modelMenuOpen.value = false;
+    return;
+  }
+  if (await assistant.setModel(model.trim())) {
+    modelMenuOpen.value = false;
+    ui.notify(t('assistant.modelChanged'));
+  }
+}
+
+function useQuickPrompt(kind: 'failure' | 'monitor' | 'plan'): void {
+  mode.value = kind === 'plan' ? 'draft' : 'explain';
+  const keys = {
+    failure: 'assistant.quickExplainFailure',
+    monitor: 'assistant.quickReviewMonitor',
+    plan: 'assistant.quickDraftPlan',
+  } as const;
+  prompt.value = t(keys[kind]);
+  void nextTick(() => composerRef.value?.focus());
+}
+
+function handleComposerKeydown(event: KeyboardEvent): void {
+  if (event.isComposing || event.key !== 'Enter' || event.shiftKey) return;
+  event.preventDefault();
+  if (!assistant.busy) void send();
 }
 
 async function send(): Promise<void> {
@@ -322,6 +451,10 @@ async function send(): Promise<void> {
   }
 }
 
+async function stop(): Promise<void> {
+  await assistant.cancel();
+}
+
 function proposalIsStale(proposal: AssistantDraftProposalV1): boolean {
   const target = proposal.target;
   if (!target) return false;
@@ -355,18 +488,25 @@ async function clearChat(): Promise<void> {
 
 async function createChat(): Promise<void> {
   editingConversationTitle.value = false;
-  await assistant.createConversation();
+  conversationMenuOpen.value = false;
+  if (await assistant.createConversation()) void nextTick(() => composerRef.value?.focus());
 }
 
-async function selectChat(event: Event): Promise<void> {
-  const conversationId = (event.target as HTMLSelectElement).value;
+async function selectChat(conversationId: string): Promise<boolean> {
+  if (conversationId === assistant.activeConversationId) {
+    conversationMenuOpen.value = false;
+    return true;
+  }
   editingConversationTitle.value = false;
-  await assistant.selectConversation(conversationId);
+  const selected = await assistant.selectConversation(conversationId);
+  if (selected) conversationMenuOpen.value = false;
+  return selected;
 }
 
 function beginRenameConversation(): void {
   conversationTitleDraft.value = activeConversation.value?.title ?? '';
   editingConversationTitle.value = true;
+  conversationMenuOpen.value = true;
 }
 
 async function saveConversationTitle(): Promise<void> {
@@ -377,16 +517,24 @@ async function saveConversationTitle(): Promise<void> {
   }
 }
 
-async function deleteChat(): Promise<void> {
-  const conversationId = assistant.activeConversationId;
+async function selectAndRenameConversation(conversationId: string): Promise<void> {
+  if (await selectChat(conversationId)) beginRenameConversation();
+}
+
+async function deleteChat(conversationId = assistant.activeConversationId): Promise<void> {
   if (!conversationId || assistant.conversations.length <= 1) return;
+  const title = assistant.conversations.find((conversation) => conversation.id === conversationId)?.title
+    || t('assistant.newConversation');
   const accepted = await ui.confirm({
     title: t('assistant.deleteConversationTitle'),
-    message: t('assistant.deleteConversationMessage', { title: activeConversationTitle.value }),
+    message: t('assistant.deleteConversationMessage', { title }),
     confirmLabel: t('assistant.deleteConversation'),
     danger: true,
   });
-  if (accepted && await assistant.deleteConversation(conversationId)) editingConversationTitle.value = false;
+  if (accepted && await assistant.deleteConversation(conversationId)) {
+    editingConversationTitle.value = false;
+    if (assistant.conversations.length === 0) conversationMenuOpen.value = false;
+  }
 }
 
 function clearTerminalContext(): void {
@@ -400,7 +548,6 @@ function toggleTunnelFailureContext(event: Event): void {
     attachTunnelFailure.value = false;
     return;
   }
-
   const selected = failedTunnels.value.find((tunnel) => tunnel.id === selectedTunnelFailureId.value)
     ?? failedTunnels.value[0];
   if (!selected) return;
@@ -419,69 +566,241 @@ function safeTunnelTargetHost(host: string | null): string | null {
     return null;
   }
 }
+
+onMounted(async () => {
+  document.addEventListener('pointerdown', handleDocumentPointerDown);
+  await assistant.initialize();
+  void scrollToBottom();
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', handleDocumentPointerDown);
+  copyTimers.forEach((timer) => window.clearTimeout(timer));
+  copyTimers.clear();
+  panelUnmounted = true;
+  const selected = contextFiles.value;
+  contextFiles.value = [];
+  if (selected.length > 0 && assistantSendInProgress.value) {
+    releaseContextOnCompletion = true;
+    return;
+  }
+  selected.forEach((file) => void releaseAssistantContextFile(file.id));
+});
 </script>
 
 <template>
-  <aside class="assistant-panel" aria-label="AI assistant">
+  <aside class="assistant-panel" :aria-label="t('assistant.title')" @keydown.esc="closeMenus">
     <header class="assistant-header">
-      <div><Bot :size="15" /><strong>{{ t('assistant.title') }}</strong></div>
-      <button type="button" class="icon-button" :aria-label="t('assistant.configure')" @click="showSettings = !showSettings"><Settings2 :size="14" /></button>
+      <div ref="conversationMenuRef" class="assistant-conversation-control">
+        <button
+          type="button"
+          class="assistant-title-button"
+          :aria-expanded="conversationMenuOpen"
+          :title="t('assistant.conversationMenu')"
+          @click="toggleConversationMenu"
+        >
+          <span class="assistant-brand-icon"><Bot :size="14" /></span>
+          <strong>{{ activeConversationTitle }}</strong>
+          <ChevronDown :size="12" />
+        </button>
+        <section v-if="conversationMenuOpen" class="assistant-popover assistant-conversation-menu" :aria-label="t('assistant.conversationMenu')">
+          <header>
+            <strong>{{ t('assistant.conversationMenu') }}</strong>
+            <button type="button" :disabled="assistant.busy || assistant.historySaving" @click="createChat">
+              <Plus :size="12" />{{ t('assistant.newChat') }}
+            </button>
+          </header>
+          <div class="assistant-conversation-list">
+            <article
+              v-for="conversation in assistant.conversations"
+              :key="conversation.id"
+              class="assistant-conversation-row"
+              :class="{ active: conversation.id === assistant.activeConversationId }"
+            >
+              <button type="button" class="assistant-conversation-select" @click="selectChat(conversation.id)">
+                <MessageSquare :size="12" />
+                <span>
+                  <strong>{{ conversation.title || t('assistant.newConversation') }}</strong>
+                  <small>{{ t('assistant.messageCount', { count: conversation.messageCount }) }}</small>
+                </span>
+              </button>
+              <div class="assistant-conversation-actions">
+                <button
+                  type="button"
+                  :aria-label="t('assistant.renameConversation')"
+                  :title="t('assistant.renameConversation')"
+                  :disabled="assistant.busy || assistant.historySaving"
+                  @click="selectAndRenameConversation(conversation.id)"
+                >
+                  <Pencil :size="11" />
+                </button>
+                <button
+                  type="button"
+                  :aria-label="t('assistant.deleteConversation')"
+                  :title="t('assistant.deleteConversation')"
+                  :disabled="assistant.busy || assistant.historySaving || assistant.conversations.length <= 1"
+                  @click="deleteChat(conversation.id)"
+                >
+                  <Trash2 :size="11" />
+                </button>
+              </div>
+            </article>
+          </div>
+          <form v-if="editingConversationTitle" class="assistant-conversation-rename" @submit.prevent="saveConversationTitle">
+            <input
+              v-model="conversationTitleDraft"
+              maxlength="120"
+              :aria-label="t('assistant.conversationTitle')"
+              :placeholder="t('assistant.conversationTitle')"
+              @keydown.esc.prevent="editingConversationTitle = false"
+            >
+            <button type="button" :aria-label="t('assistant.saveConversationTitle')" :disabled="assistant.historySaving" @click="saveConversationTitle">
+              <Check :size="12" />
+            </button>
+            <button type="button" :aria-label="t('assistant.cancel')" @click="editingConversationTitle = false">
+              <X :size="12" />
+            </button>
+          </form>
+        </section>
+      </div>
+      <div class="assistant-header-actions">
+        <button type="button" class="icon-button" :aria-label="t('assistant.newChat')" :title="t('assistant.newChat')" :disabled="assistant.busy || assistant.historySaving" @click="createChat">
+          <Plus :size="13" />
+        </button>
+        <button type="button" class="icon-button" :aria-label="t('assistant.clearChat')" :title="t('assistant.clearChat')" :disabled="assistant.busy || assistant.historySaving || assistant.messages.length === 0" @click="clearChat">
+          <Eraser :size="13" />
+        </button>
+        <button type="button" class="icon-button" :aria-label="t('assistant.openProviderSettings')" :title="t('assistant.openProviderSettings')" @click="openAssistantSettings">
+          <Settings2 :size="13" />
+        </button>
+        <button type="button" class="icon-button" :aria-label="t('assistant.close')" :title="t('assistant.close')" @click="closeAssistant">
+          <X :size="13" />
+        </button>
+      </div>
     </header>
 
-    <section v-if="showSettings" class="assistant-config">
-      <div class="assistant-config-heading"><KeyRound :size="14" /><strong>{{ t('assistant.providerSetup') }}</strong></div>
-      <label>{{ t('assistant.endpoint') }}<input v-model="endpoint" type="url" placeholder="https://api.openai.com/v1"></label>
-      <label>{{ t('assistant.model') }}<input v-model="model" autocomplete="off"></label>
-      <label>{{ t('assistant.apiKey') }}<input v-model="apiKey" type="password" autocomplete="new-password" :placeholder="t('assistant.keyOnlyInKeyring')"></label>
-      <p>{{ t('assistant.keyringNotice') }}</p>
-      <p>{{ t('assistant.providerPrivacyNotice') }}</p>
-      <button type="button" class="button primary" :disabled="assistant.busy || assistant.historySaving || !apiKey.trim()" @click="configure">{{ t('assistant.saveProvider') }}</button>
+    <div class="assistant-control-bar">
+      <button
+        type="button"
+        class="assistant-control-pill"
+        :class="{ active: contextOpen, populated: contextCount > 0 }"
+        :aria-expanded="contextOpen"
+        @click="contextOpen = !contextOpen"
+      >
+        <Compass :size="12" />
+        <span>{{ contextCount > 0 ? t('assistant.contextAttached', { count: contextCount }) : t('assistant.context') }}</span>
+      </button>
+      <div ref="modelMenuRef" class="assistant-model-control">
+        <button
+          type="button"
+          class="assistant-control-pill assistant-model-pill"
+          :class="{ active: modelMenuOpen, unconfigured: !assistant.provider.configured }"
+          :aria-expanded="modelMenuOpen"
+          @click="toggleModelMenu"
+        >
+          <Cpu :size="12" />
+          <span>{{ assistant.provider.configured ? `${providerLabel} / ${assistant.provider.model}` : t('assistant.configure') }}</span>
+          <ChevronDown :size="11" />
+        </button>
+        <section v-if="modelMenuOpen" class="assistant-popover assistant-model-menu" :aria-label="t('assistant.modelSelector')">
+          <header>
+            <div><span>{{ t('assistant.profile') }}</span><strong>{{ providerLabel }}</strong></div>
+            <button type="button" @click="openAssistantSettings"><Settings2 :size="12" />{{ t('assistant.change') }}</button>
+          </header>
+          <div class="assistant-model-current">
+            <span>{{ t('assistant.activeModel') }}</span>
+            <code>{{ assistant.provider.model }}</code>
+          </div>
+          <div v-if="modelSuggestions.length > 0" class="assistant-model-suggestions">
+            <small>{{ t('assistant.modelSuggestions') }}</small>
+            <button
+              v-for="suggestion in modelSuggestions"
+              :key="suggestion"
+              type="button"
+              :class="{ selected: suggestion === assistant.provider.model }"
+              :disabled="assistant.busy || assistant.historySaving"
+              @click="setModel(suggestion)"
+            >
+              <span>{{ suggestion }}</span>
+              <Check v-if="suggestion === assistant.provider.model" :size="12" />
+            </button>
+          </div>
+          <form class="assistant-custom-model" @submit.prevent="setModel(customModel)">
+            <label>
+              <span>{{ t('assistant.customModel') }}</span>
+              <input v-model="customModel" maxlength="120" autocomplete="off" spellcheck="false">
+            </label>
+            <button type="submit" :disabled="assistant.busy || assistant.historySaving || !customModel.trim()">{{ t('assistant.applyModel') }}</button>
+          </form>
+        </section>
+      </div>
+    </div>
+
+    <section v-if="!assistant.provider.configured" class="assistant-setup-card">
+      <KeyRound :size="17" />
+      <div>
+        <strong>{{ t('assistant.setupTitle') }}</strong>
+        <p>{{ t('assistant.setupHelp') }}</p>
+      </div>
+      <button type="button" class="button primary" @click="openAssistantSettings">{{ t('assistant.openSettings') }}</button>
     </section>
 
-    <template v-else>
-      <div class="assistant-provider"><span class="state-dot" :class="{ connected: assistant.provider.configured }" />{{ assistant.provider.model }}<button type="button" :disabled="assistant.busy || assistant.historySaving || (assistant.messages.length === 0 && !assistant.historyError)" @click="clearChat"><Eraser :size="12" />{{ t('assistant.clearChat') }}</button><button type="button" @click="showSettings = true">{{ t('assistant.change') }}</button></div>
-      <div class="assistant-conversation-toolbar">
-        <select :value="assistant.activeConversationId" :aria-label="t('assistant.selectConversation')" :disabled="assistant.busy || assistant.historySaving || assistant.conversations.length <= 1" @change="selectChat">
-          <option v-for="conversation in assistant.conversations" :key="conversation.id" :value="conversation.id">{{ conversation.title || t('assistant.newConversation') }}</option>
-        </select>
-        <button type="button" class="icon-button" :aria-label="t('assistant.newConversation')" :title="t('assistant.newConversation')" :disabled="assistant.busy || assistant.historySaving" @click="createChat"><Plus :size="13" /></button>
-        <button type="button" class="icon-button" :aria-label="t('assistant.renameConversation')" :title="t('assistant.renameConversation')" :disabled="assistant.busy || assistant.historySaving || !assistant.activeConversationId" @click="beginRenameConversation"><Pencil :size="12" /></button>
-        <button type="button" class="icon-button danger-button" :aria-label="t('assistant.deleteConversation')" :title="t('assistant.deleteConversation')" :disabled="assistant.busy || assistant.historySaving || assistant.conversations.length <= 1" @click="deleteChat"><Trash2 :size="12" /></button>
-      </div>
-      <div v-if="editingConversationTitle" class="assistant-conversation-rename">
-        <input v-model="conversationTitleDraft" maxlength="120" :aria-label="t('assistant.conversationTitle')" :placeholder="t('assistant.conversationTitle')" @keydown.enter.prevent="saveConversationTitle" @keydown.esc.prevent="editingConversationTitle = false">
-        <button type="button" class="icon-button" :aria-label="t('assistant.saveConversationTitle')" :disabled="assistant.historySaving" @click="saveConversationTitle"><Check :size="13" /></button>
-        <button type="button" class="icon-button" :aria-label="t('assistant.cancel')" @click="editingConversationTitle = false"><X :size="13" /></button>
-      </div>
-      <div class="assistant-disclosure"><ExternalLink :size="13" /><span>{{ t('assistant.externalDisclosure') }} {{ disclosure }}</span></div>
-      <div class="assistant-provider-privacy" role="note">
-        <small>{{ t('assistant.providerRecipient', { endpoint: providerDestination }) }}</small>
+    <section v-else-if="!assistant.provider.externalDataConsent" class="assistant-consent-card">
+      <ShieldAlert :size="16" />
+      <div>
+        <strong>{{ t('assistant.consentRequiredTitle') }}</strong>
+        <p>{{ t('assistant.consentRequiredHelp') }}</p>
         <p>{{ t('assistant.providerPrivacyNotice') }}</p>
-        <label class="assistant-context-toggle"><input type="checkbox" :checked="assistant.provider.externalDataConsent" :disabled="assistant.busy || assistant.historySaving || consentSaving" @change="updateProviderConsent"><span>{{ t('assistant.providerDataConsent', { endpoint: providerDestination }) }}</span></label>
+        <small>{{ t('assistant.providerRecipient', { endpoint: providerDestination }) }}</small>
+        <label class="assistant-consent-toggle">
+          <input
+            type="checkbox"
+            :checked="assistant.provider.externalDataConsent"
+            :disabled="assistant.busy || assistant.historySaving || consentSaving"
+            @change="updateProviderConsent"
+          >
+          <span>{{ t('assistant.providerDataConsent', { endpoint: providerDestination }) }}</span>
+        </label>
       </div>
-      <div class="assistant-history-note"><Database :size="12" /><span>{{ t('assistant.localHistoryNotice') }}</span></div>
-      <label class="assistant-context-toggle"><input v-model="attachSession" type="checkbox" :disabled="!sessions.activeSession"><span>{{ t('assistant.attachSession') }}</span></label>
-      <label class="assistant-context-toggle"><input v-model="attachTerminalSelection" type="checkbox" :disabled="!ui.assistantTerminalSelection"><span>{{ t('assistant.attachTerminalSelection') }}</span></label>
-      <div v-if="attachTerminalSelection && ui.assistantTerminalSelection" class="assistant-context-preview">
-        {{ t('assistant.terminalSelectionPreview', { host: ui.assistantTerminalSelection.host, chars: Array.from(ui.assistantTerminalSelection.text).length, truncated: ui.assistantTerminalSelection.truncated ? t('assistant.yes') : t('assistant.no') }) }}
-        <button type="button" class="button" @click="clearTerminalContext">{{ t('assistant.clearTerminalSelection') }}</button>
+    </section>
+
+    <div v-if="assistant.provider.configured" class="assistant-disclosure-strip">
+      <ExternalLink :size="12" />
+      <span>{{ t('assistant.externalDisclosure') }} {{ disclosure }}</span>
+    </div>
+
+    <div ref="transcriptRef" class="assistant-transcript">
+      <div v-if="assistant.messages.length === 0" class="assistant-empty">
+        <span class="assistant-empty-icon"><WandSparkles :size="20" /></span>
+        <div>
+          <strong>{{ t('assistant.title') }}</strong>
+          <p>{{ t('assistant.empty') }}</p>
+        </div>
+        <div class="assistant-quick-prompts">
+          <span>{{ t('assistant.quickSuggestions') }}</span>
+          <button type="button" @click="useQuickPrompt('failure')">{{ t('assistant.quickExplainFailure') }}</button>
+          <button type="button" @click="useQuickPrompt('monitor')">{{ t('assistant.quickReviewMonitor') }}</button>
+          <button type="button" @click="useQuickPrompt('plan')">{{ t('assistant.quickDraftPlan') }}</button>
+        </div>
       </div>
-      <label class="assistant-context-toggle"><input v-model="attachEvents" type="checkbox" :disabled="recentEvents.length === 0"><span>{{ t('assistant.attachEvents', { count: recentEvents.length }) }}</span></label>
-      <label class="assistant-context-toggle"><input v-model="attachMonitor" type="checkbox" :disabled="!monitor.snapshot"><span>{{ t('assistant.attachMonitor') }}</span></label>
-      <label class="assistant-context-toggle"><input v-model="attachTransfers" type="checkbox" :disabled="recentTransfers.length === 0"><span>{{ t('assistant.attachTransfers', { count: recentTransfers.length }) }}</span></label>
-      <label class="assistant-context-toggle"><input type="checkbox" :checked="attachTunnelFailure" :disabled="failedTunnels.length === 0" @change="toggleTunnelFailureContext"><span>{{ t('assistant.attachTunnelFailure', { count: failedTunnels.length }) }}</span></label>
-      <div v-if="attachTunnelFailure && selectedTunnelFailure" class="assistant-context-preview">
-        <select v-model="selectedTunnelFailureId" class="assistant-context-select" :aria-label="t('assistant.selectTunnelFailure')">
-          <option v-for="tunnel in failedTunnels" :key="tunnel.id" :value="tunnel.id">{{ tunnel.name }} · {{ tunnel.bindHost }}:{{ tunnel.bindPort }} · {{ tunnel.lastError?.code }}</option>
-        </select>
-        <div>{{ t('assistant.tunnelFailurePreview', { kind: selectedTunnelFailure.kind, bindHost: selectedTunnelFailure.bindHost, bindPort: selectedTunnelFailure.bindPort, target: selectedTunnelFailure.kind === 'dynamic' ? t('assistant.dynamicTarget') : `${selectedTunnelTargetHost ?? t('assistant.targetHostOmitted')}:${selectedTunnelFailure.targetPort ?? '—'}`, errorCode: selectedTunnelFailure.lastError?.code ?? '—' }) }}</div>
-      </div>
-      <div v-if="attachSession && sessions.activeSession" class="assistant-context-preview">{{ t('assistant.sessionContextPreview', { host: sessions.activeSession.host }) }}</div>
-      <div class="assistant-transcript" aria-live="polite">
-        <div v-if="assistant.messages.length === 0" class="assistant-empty"><WandSparkles :size="17" /><span>{{ t('assistant.empty') }}</span></div>
-        <article v-for="message in assistant.messages" :key="message.id" class="assistant-message" :class="message.role">
-          <small>{{ message.role === 'user' ? t('assistant.you') : t('assistant.assistantLabel') }} · {{ message.mode === 'draft' ? t('assistant.draftMode') : t('assistant.explainMode') }}</small>
-          <pre>{{ visibleAssistantText(message) || (message.status === 'streaming' ? t('assistant.thinking') : '') }}</pre>
+
+      <article v-for="message in assistant.messages" :key="message.id" class="assistant-message" :class="message.role">
+        <header>
+          <span v-if="message.role === 'assistant'" class="assistant-message-avatar"><Sparkles :size="11" /></span>
+          <strong>{{ message.role === 'user' ? t('assistant.you') : t('assistant.assistantLabel') }}</strong>
+          <small>{{ message.mode === 'draft' ? t('assistant.draftMode') : t('assistant.explainMode') }}</small>
+          <span v-if="message.status === 'cancelled'">{{ t('assistant.cancel') }}</span>
+        </header>
+        <div class="assistant-message-body">
+          <p v-if="message.role === 'user'" class="assistant-user-text">{{ message.content }}</p>
+          <AssistantMarkdown
+            v-else-if="visibleAssistantText(message)"
+            :content="visibleAssistantText(message)"
+            @copy-failed="notifyCopyFailure"
+          />
+          <p v-else-if="message.status === 'streaming'" class="assistant-thinking">
+            <Sparkles :size="12" />{{ t('assistant.thinking') }}
+          </p>
           <section v-if="message.proposal" class="assistant-command-proposal" :class="{ 'is-stale': proposalIsStale(message.proposal) }" :aria-label="t(message.proposal.kind === 'change-plan.draft' ? 'assistant.changePlanTitle' : 'assistant.proposalTitle')">
             <div class="assistant-proposal-heading"><strong>{{ t(message.proposal.kind === 'change-plan.draft' ? 'assistant.changePlanTitle' : 'assistant.proposalTitle') }}</strong><code>{{ message.proposal.kind }}@{{ message.proposal.version }}</code></div>
             <div class="assistant-proposal-meta">
@@ -495,7 +814,13 @@ function safeTunnelTargetHost(host: string | null): string | null {
               <section v-for="(step, stepIndex) in message.proposal.steps" :key="`${message.id}-step-${stepIndex}`" class="assistant-proposal-step">
                 <strong class="assistant-proposal-step-title">{{ t('assistant.planStep', { index: stepIndex + 1, title: step.title }) }}</strong>
                 <div v-for="(command, commandIndex) in step.commands" :key="`${message.id}-step-${stepIndex}-command-${commandIndex}`" class="assistant-proposal-command">
-                  <small>{{ t('assistant.planCommandLabel', { shell: command.shell, index: commandIndex + 1 }) }}</small>
+                  <header>
+                    <small>{{ t('assistant.planCommandLabel', { shell: command.shell, index: commandIndex + 1 }) }}</small>
+                    <button type="button" :aria-label="t('assistant.copyCode')" :title="t('assistant.copyCode')" @click="copyText(command.command, `${message.id}-${stepIndex}-${commandIndex}`)">
+                      <Check v-if="copiedCommands[`${message.id}-${stepIndex}-${commandIndex}`]" :size="11" />
+                      <Copy v-else :size="11" />
+                    </button>
+                  </header>
                   <pre>{{ command.command }}</pre>
                 </div>
                 <p class="assistant-proposal-step-note"><strong>{{ t('assistant.planExpectedEffect') }}</strong> {{ step.expectedEffect }}</p>
@@ -504,7 +829,13 @@ function safeTunnelTargetHost(host: string | null): string | null {
             </template>
             <template v-else>
               <div v-for="(command, index) in message.proposal.commands" :key="`${message.id}-${index}`" class="assistant-proposal-command">
-                <small>{{ t('assistant.proposalCommandLabel', { shell: command.shell, index: index + 1 }) }}</small>
+                <header>
+                  <small>{{ t('assistant.proposalCommandLabel', { shell: command.shell, index: index + 1 }) }}</small>
+                  <button type="button" :aria-label="t('assistant.copyCode')" :title="t('assistant.copyCode')" @click="copyText(command.command, `${message.id}-${index}`)">
+                    <Check v-if="copiedCommands[`${message.id}-${index}`]" :size="11" />
+                    <Copy v-else :size="11" />
+                  </button>
+                </header>
                 <pre>{{ command.command }}</pre>
               </div>
             </template>
@@ -518,38 +849,96 @@ function safeTunnelTargetHost(host: string | null): string | null {
           <p v-else-if="message.proposalNotice === 'plan_too_large'" class="assistant-proposal-notice" role="status">{{ t('assistant.planTooLarge') }}</p>
           <p v-else-if="message.proposalNotice === 'plan_unsafe_control'" class="assistant-proposal-notice" role="status">{{ t('assistant.planUnsafeCharacters') }}</p>
           <span v-if="message.status === 'failed'" class="form-error">{{ errorText }}</span>
-        </article>
+        </div>
+      </article>
+    </div>
+
+    <section v-if="contextOpen" class="assistant-context-drawer" :aria-label="t('assistant.contextDetails')">
+      <header>
+        <strong>{{ t('assistant.contextDetails') }}</strong>
+        <button type="button" class="icon-button" :aria-label="t('assistant.collapseMenu')" @click="contextOpen = false"><X :size="12" /></button>
+      </header>
+      <div class="assistant-context-options">
+        <label class="assistant-context-toggle"><input v-model="attachSession" type="checkbox" :disabled="!sessions.activeSession"><span>{{ t('assistant.attachSession') }}</span></label>
+        <label class="assistant-context-toggle"><input v-model="attachTerminalSelection" type="checkbox" :disabled="!ui.assistantTerminalSelection"><span>{{ t('assistant.attachTerminalSelection') }}</span></label>
+        <label class="assistant-context-toggle"><input v-model="attachEvents" type="checkbox" :disabled="recentEvents.length === 0"><span>{{ t('assistant.attachEvents', { count: recentEvents.length }) }}</span></label>
+        <label class="assistant-context-toggle"><input v-model="attachMonitor" type="checkbox" :disabled="!monitor.snapshot"><span>{{ t('assistant.attachMonitor') }}</span></label>
+        <label class="assistant-context-toggle"><input v-model="attachTransfers" type="checkbox" :disabled="recentTransfers.length === 0"><span>{{ t('assistant.attachTransfers', { count: recentTransfers.length }) }}</span></label>
+        <label class="assistant-context-toggle"><input type="checkbox" :checked="attachTunnelFailure" :disabled="failedTunnels.length === 0" @change="toggleTunnelFailureContext"><span>{{ t('assistant.attachTunnelFailure', { count: failedTunnels.length }) }}</span></label>
       </div>
-      <div class="assistant-compose">
+      <div v-if="attachTerminalSelection && ui.assistantTerminalSelection" class="assistant-context-preview">
+        {{ t('assistant.terminalSelectionPreview', { host: ui.assistantTerminalSelection.host, chars: Array.from(ui.assistantTerminalSelection.text).length, truncated: ui.assistantTerminalSelection.truncated ? t('assistant.yes') : t('assistant.no') }) }}
+        <button type="button" class="button" @click="clearTerminalContext">{{ t('assistant.clearTerminalSelection') }}</button>
+      </div>
+      <div v-if="attachTunnelFailure && selectedTunnelFailure" class="assistant-context-preview">
+        <select v-model="selectedTunnelFailureId" class="assistant-context-select" :aria-label="t('assistant.selectTunnelFailure')">
+          <option v-for="tunnel in failedTunnels" :key="tunnel.id" :value="tunnel.id">{{ tunnel.name }} · {{ tunnel.bindHost }}:{{ tunnel.bindPort }} · {{ tunnel.lastError?.code }}</option>
+        </select>
+        <div>{{ t('assistant.tunnelFailurePreview', { kind: selectedTunnelFailure.kind, bindHost: selectedTunnelFailure.bindHost, bindPort: selectedTunnelFailure.bindPort, target: selectedTunnelFailure.kind === 'dynamic' ? t('assistant.dynamicTarget') : `${selectedTunnelTargetHost ?? t('assistant.targetHostOmitted')}:${selectedTunnelFailure.targetPort ?? '—'}`, errorCode: selectedTunnelFailure.lastError?.code ?? '—' }) }}</div>
+      </div>
+      <div v-if="attachSession && sessions.activeSession" class="assistant-context-preview">{{ t('assistant.sessionContextPreview', { host: sessions.activeSession.host }) }}</div>
+      <p class="assistant-history-note"><Database :size="12" /><span>{{ t('assistant.localHistoryNotice') }}</span></p>
+    </section>
+
+    <div class="assistant-compose">
+      <div class="assistant-compose-toolbar">
         <div class="assistant-mode" role="group" :aria-label="t('assistant.mode')">
-          <button type="button" :aria-pressed="mode === 'explain'" @click="mode = 'explain'">{{ t('assistant.explainMode') }}</button>
-          <button type="button" :aria-pressed="mode === 'draft'" @click="mode = 'draft'">{{ t('assistant.draftMode') }}</button>
+          <button type="button" :aria-pressed="mode === 'explain'" :disabled="assistant.busy" @click="mode = 'explain'">
+            <MessageSquare :size="11" />{{ t('assistant.explainMode') }}
+          </button>
+          <button type="button" :aria-pressed="mode === 'draft'" :disabled="assistant.busy" @click="mode = 'draft'">
+            <WandSparkles :size="11" />{{ t('assistant.draftMode') }}
+          </button>
         </div>
-        <div class="assistant-file-context">
-          <div class="assistant-file-context-actions">
-            <button type="button" class="button" :disabled="assistant.busy || contextFileBusy || assistantSendInProgress || contextFiles.length >= 2" @click="chooseContextFile">
-              <Paperclip :size="12" />{{ contextFileBusy ? t('assistant.selectingFile') : contextFiles.length > 0 ? t('assistant.addContextFile') : t('assistant.attachContextFile') }}
-            </button>
-            <small v-if="contextFiles.length > 0">{{ t('assistant.localFileSelectionNotice') }}</small>
-          </div>
-          <div v-for="contextFile in contextFiles" :key="contextFile.id" class="assistant-context-file-selected" aria-live="polite">
-            <Paperclip :size="12" />
-            <strong>{{ contextFile.fileName }}</strong>
-            <small>{{ contextFile.extension.toUpperCase() }} · {{ formatByteLength(contextFile.byteLength) }}</small>
-            <button type="button" class="icon-button" :aria-label="t('assistant.removeContextFile')" :disabled="assistant.busy || assistantSendInProgress" @click="removeContextFile(contextFile.id)"><X :size="12" /></button>
-          </div>
-          <p v-if="contextFileError" class="assistant-error" role="alert">{{ contextFileErrorText }}</p>
-        </div>
-        <textarea v-model="prompt" :placeholder="t('assistant.promptPlaceholder')" maxlength="20000" :disabled="consentSaving" @keydown.ctrl.enter.prevent="send" />
-        <div class="assistant-compose-footer">
-          <small>{{ t('assistant.neverExecutes') }}</small>
-          <button v-if="assistant.busy" type="button" class="button" @click="assistant.cancel"><Square :size="12" />{{ t('assistant.cancel') }}</button>
-          <button v-else type="button" class="button primary" :disabled="assistant.historySaving || consentSaving || !assistant.provider.configured || !assistant.provider.externalDataConsent || !prompt.trim()" @click="send"><Send :size="12" />{{ t('assistant.send') }}</button>
+        <button
+          type="button"
+          class="assistant-attach-button"
+          :disabled="assistant.busy || contextFileBusy || assistantSendInProgress || contextFiles.length >= 2"
+          :aria-label="t('assistant.attachContextFile')"
+          :title="t('assistant.attachContextFile')"
+          @click="chooseContextFile"
+        >
+          <Paperclip :size="12" />
+        </button>
+      </div>
+      <div v-if="contextFiles.length > 0" class="assistant-file-chips">
+        <div v-for="contextFile in contextFiles" :key="contextFile.id" class="assistant-file-chip">
+          <Paperclip :size="11" />
+          <span :title="contextFile.fileName">{{ contextFile.fileName }}</span>
+          <small>{{ contextFile.extension.toUpperCase() }} · {{ formatByteLength(contextFile.byteLength) }}</small>
+          <button type="button" class="icon-button" :aria-label="t('assistant.removeContextFile')" :disabled="assistant.busy || assistantSendInProgress" @click="removeContextFile(contextFile.id)"><X :size="11" /></button>
         </div>
       </div>
-      <p v-if="assistant.cancelError" class="assistant-error" role="alert">{{ cancelErrorText }}</p>
-    </template>
+      <p v-if="contextFiles.length > 0" class="assistant-file-note">{{ t('assistant.localFileSelectionNotice') }}</p>
+      <p v-if="contextFileError" class="assistant-error" role="alert">{{ contextFileErrorText }}</p>
+      <textarea
+        ref="composerRef"
+        v-model="prompt"
+        :placeholder="t('assistant.promptPlaceholder')"
+        maxlength="20000"
+        :disabled="consentSaving || assistant.busy"
+        @keydown="handleComposerKeydown"
+      />
+      <div class="assistant-compose-footer">
+        <small>{{ t('assistant.neverExecutes') }} {{ t('assistant.sendHint') }}</small>
+        <button v-if="assistant.busy" type="button" class="button" @click="stop"><Square :size="12" />{{ t('assistant.cancel') }}</button>
+        <button
+          v-else
+          type="button"
+          class="button primary"
+          :disabled="assistant.historySaving || consentSaving || !assistant.provider.configured || !assistant.provider.externalDataConsent || !prompt.trim()"
+          @click="send"
+        >
+          <Send :size="12" />{{ t('assistant.send') }}
+        </button>
+      </div>
+    </div>
+
+    <p v-if="assistant.cancelError" class="assistant-error" role="alert">{{ cancelErrorText }}</p>
     <p v-if="assistant.error && !assistant.messages.some((item) => item.status === 'failed')" class="assistant-error" role="alert">{{ errorText }}</p>
     <p v-if="assistant.historyError" class="assistant-error" role="alert">{{ historyErrorText }}</p>
+    <div class="sr-only" role="status" aria-live="polite">
+      {{ assistant.busy ? t('assistant.thinking') : assistant.provider.externalDataConsent ? '' : t('assistant.consentRequiredTitle') }}
+    </div>
   </aside>
 </template>

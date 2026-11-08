@@ -35,4 +35,5 @@ tokio-util = "0.7"
 uuid.workspace = true
 zeroize = "1"
 tauri-plugin-dialog = "=2.7.3"
+tauri-plugin-single-instance = "=2.4.5"
 tempfile = "3"

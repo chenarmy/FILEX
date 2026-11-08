@@ -1,5 +1,22 @@
+@font-face {
+  font-family: "HarmonyOS Sans SC";
+  src: url("/fonts/HarmonyOS_Sans_SC/HarmonyOS_Sans_SC_Regular.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 100 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "HarmonyOS Sans SC";
+  src: url("/fonts/HarmonyOS_Sans_SC/HarmonyOS_Sans_SC_Bold.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 600 900;
+  font-display: swap;
+}
+
 :root {
   color-scheme: dark;
+  --font-ui: "HarmonyOS Sans SC", "HarmonyOS Sans", "PingFang SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif;
   --background: 240 4% 9%;
   --foreground: 0 0% 91%;
   --card: 0 0% 12%;
@@ -97,7 +114,7 @@ body,
 body {
   color: hsl(var(--foreground));
   background: hsl(var(--background));
-  font-family: Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
+  font-family: var(--font-ui);
   font-size: 1rem;
   line-height: 1.4;
   -webkit-font-smoothing: antialiased;

@@ -22,4 +22,19 @@ export default defineConfigWithVueTs(
       '@typescript-eslint/no-floating-promises': 'error',
     },
   },
+  {
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        Buffer: 'readonly',
+        TextDecoder: 'readonly',
+        URL: 'readonly',
+        console: 'readonly',
+        process: 'readonly',
+      },
+      parserOptions: {
+        projectService: false,
+      },
+    },
+  },
 );

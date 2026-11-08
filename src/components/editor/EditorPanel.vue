@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { FileCode2, RefreshCw, Save, X } from 'lucide-vue-next';
 import type * as MonacoApi from 'monaco-editor/editor/editor.api';
+import { resolveTerminalThemeAppearance } from '@/domain/terminalThemes';
 import { t } from '@/i18n';
 import { editorLanguageForPath, useEditorStore } from '@/stores/editor';
 import { useSettingsStore } from '@/stores/settings';
@@ -21,12 +22,11 @@ let emptyModel: MonacoApi.editor.ITextModel | null = null;
 const models = new Map<string, MonacoApi.editor.ITextModel>();
 
 const appearance = computed(() => {
-  const preference = settings.value.terminalTheme;
-  if (preference === 'dark') return 'dark';
-  if (preference === 'light') return 'light';
-  return settings.value.theme === 'system'
-    ? (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
-    : settings.value.theme;
+  return resolveTerminalThemeAppearance(
+    settings.value.terminalTheme,
+    settings.value.theme,
+    window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark',
+  );
 });
 
 async function ensureMonaco(): Promise<void> {

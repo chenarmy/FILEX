@@ -15,6 +15,7 @@ import {
   selectAssistantConversation,
   setAssistantProviderConsent,
   streamAssistantResponse,
+  updateAssistantModel,
   type AssistantChunk,
   type AssistantConversationSummary,
   type AssistantHistoryMessage,
@@ -61,7 +62,7 @@ export const useAssistantStore = defineStore('assistant', () => {
   const activeRequestId = ref<string | null>(null);
   let unlisten: UnlistenFn | null = null;
   let activeCompletion: { requestId: string; resolve: () => void } | null = null;
-  let initialized = false;
+  let initialization: Promise<void> | null = null;
   const browserHistories = new Map<string, AssistantMessage[]>();
   const pendingProposalTargets = new Map<string, PendingProposalTarget>();
   const sessions = useSessionsStore();
@@ -143,9 +144,7 @@ export const useAssistantStore = defineStore('assistant', () => {
     return hydrated;
   }
 
-  async function initialize(): Promise<void> {
-    if (initialized) return;
-    initialized = true;
+  async function initializeOnce(): Promise<void> {
     const [providerResult, conversationsResult] = await Promise.all([
       getAssistantProvider(),
       listAssistantConversations(),
@@ -167,6 +166,11 @@ export const useAssistantStore = defineStore('assistant', () => {
     messages.value = historyResult.data.map(hydrateHistoryMessage);
     browserHistories.set(activeConversationId.value, messages.value.map((message) => ({ ...message })));
     historyError.value = null;
+  }
+
+  async function initialize(): Promise<void> {
+    initialization ??= initializeOnce();
+    await initialization;
   }
 
   async function configure(input: { endpoint: string; model: string; apiKey: string }): Promise<boolean> {
@@ -192,6 +196,21 @@ export const useAssistantStore = defineStore('assistant', () => {
     provider.value = result.data;
     error.value = null;
     useEventsStore().record('system', consent ? 'ASSISTANT_PROVIDER_CONSENT_GRANTED' : 'ASSISTANT_PROVIDER_CONSENT_REVOKED', 'info');
+    return true;
+  }
+
+  async function setModel(model: string): Promise<boolean> {
+    const normalized = model.trim();
+    if (!normalized || normalized.length > 120 || busy.value || historySaving.value || !provider.value.configured) return false;
+    if (normalized === provider.value.model) return true;
+    const result = await updateAssistantModel(normalized);
+    if (!result.ok) {
+      error.value = result.error.messageKey;
+      return false;
+    }
+    provider.value = result.data;
+    error.value = null;
+    useEventsStore().record('system', 'ASSISTANT_PROVIDER_MODEL_CHANGED', 'info');
     return true;
   }
 
@@ -517,6 +536,7 @@ export const useAssistantStore = defineStore('assistant', () => {
     initialize,
     configure,
     setProviderConsent,
+    setModel,
     send,
     cancel,
     clearConversation,

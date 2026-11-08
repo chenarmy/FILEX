@@ -41,7 +41,7 @@ References:
 | Dense workbench, continuous panes, semantic tokens, adjustable layout | Inherit from the GITBX non-functional baseline |
 | Dark-first visual posture, light theme, typography controls, keyboard and RTL readiness | Inherit |
 | Navigation + session tabs + contextual inspector + task drawer + status bar | Adapt to remote operations |
-| Native versus custom window chrome | Use native chrome initially; custom chrome only after cross-platform accessibility validation |
+| Native versus custom window chrome | Use app-owned borderless chrome on Windows with explicit drag, minimize, maximize/restore and close controls; other platforms require their own acceptance |
 | Typed contracts, portable core, thin adapters, structured errors | Inherit |
 | GITBX brand and Git features | Replace completely |
 | FinalShell name, copy, artwork, cloud sync, acceleration and paid tiers | Replace completely |

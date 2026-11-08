@@ -12,6 +12,7 @@ const inputRef = ref<HTMLTextAreaElement | null>(null);
 const historyOpen = ref(false);
 const historyFilter = ref('');
 const historyBrowseIndex = ref<number | null>(null);
+const sending = ref(false);
 const encoder = new TextEncoder();
 
 const connected = computed(() => sessions.activeSession?.state === 'connected');
@@ -22,20 +23,28 @@ const filteredHistory = computed(() => {
   return items.filter((item) => item.toLowerCase().includes(query));
 });
 
-function submit(): void {
+async function submit(): Promise<void> {
   const sessionId = sessions.activeSessionId;
   const command = draft.value;
-  if (!sessionId || !connected.value || !command.trim()) return;
-  void sessions.writeToSession(sessionId, encoder.encode(`${command}\n`));
-  sessions.recordCommandHistory(command);
-  draft.value = '';
-  historyBrowseIndex.value = null;
+  if (!sessionId || !connected.value || !command.trim() || sending.value) return;
+  sending.value = true;
+  try {
+    const sent = await sessions.writeToSession(sessionId, encoder.encode(`${command}\r`));
+    if (!sent) return;
+    sessions.recordCommandHistory(command);
+    if (sessions.activeSessionId === sessionId && draft.value === command) {
+      draft.value = '';
+      historyBrowseIndex.value = null;
+    }
+  } finally {
+    sending.value = false;
+  }
 }
 
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Enter' && !event.shiftKey && !event.altKey) {
     event.preventDefault();
-    submit();
+    void submit();
     return;
   }
   if (event.key === 'Escape' && historyOpen.value) {
@@ -133,7 +142,8 @@ async function clearHistory(): Promise<void> {
         class="command-input-action"
         :aria-label="t('commandBar.send')"
         :title="t('commandBar.send')"
-        :disabled="!connected || !draft.trim()"
+        :aria-busy="sending"
+        :disabled="!connected || !draft.trim() || sending"
         @click="submit"
       >
         <CornerDownLeft :size="13" />

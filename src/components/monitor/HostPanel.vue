@@ -224,7 +224,7 @@ async function terminateProcess(entry: ProcessEntry): Promise<void> {
         </header>
         <dl class="host-info-list mono">
           <div><dt>IP</dt><dd :title="session?.host">{{ session?.host ?? '—' }}</dd></div>
-          <div><dt>{{ t('hostPanel.connection') }}</dt><dd>{{ endpoint }}:{{ endpointPort }}</dd></div>
+          <div><dt>{{ t('hostPanel.connection') }}</dt><dd :title="`${endpoint}:${endpointPort}`">{{ endpoint }}:{{ endpointPort }}</dd></div>
           <div><dt>{{ t('hostPanel.user') }}</dt><dd>{{ session?.username ?? '—' }}</dd></div>
         </dl>
       </section>
@@ -403,7 +403,7 @@ async function terminateProcess(entry: ProcessEntry): Promise<void> {
           <strong><Users :size="12" aria-hidden="true" />{{ t('hostPanel.system') }}</strong>
         </header>
         <dl class="host-metrics">
-          <div class="host-metric-row"><dt>{{ t('hostPanel.hostname') }}</dt><dd class="mono">{{ monitor.snapshot.hostname ?? '—' }}</dd></div>
+          <div class="host-metric-row"><dt>{{ t('hostPanel.hostname') }}</dt><dd class="mono" :title="monitor.snapshot.hostname ?? '—'">{{ monitor.snapshot.hostname ?? '—' }}</dd></div>
           <div class="host-metric-row"><dt>{{ t('hostPanel.os') }}</dt><dd class="mono" :title="monitor.snapshot.osName">{{ monitor.snapshot.osName }}</dd></div>
         </dl>
       </section>

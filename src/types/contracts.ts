@@ -3,7 +3,21 @@ export type ConnectionState = 'idle' | 'connecting' | 'connected' | 'degraded' |
 export type InspectorTab = 'files' | 'monitor' | 'session';
 export type TaskTab = 'transfers' | 'tunnels' | 'events';
 export type ThemePreference = 'system' | 'dark' | 'light';
-export type TerminalThemePreference = 'match' | 'dark' | 'light';
+export type TerminalThemePreference =
+  | 'match'
+  | 'filex-dark'
+  | 'one-dark'
+  | 'dracula'
+  | 'nord'
+  | 'tokyo-night'
+  | 'gruvbox-dark'
+  | 'solarized-dark'
+  | 'monokai'
+  | 'github-dark'
+  | 'filex-light'
+  | 'solarized-light'
+  | 'github-light'
+  | 'catppuccin-latte';
 export type TerminalEncoding = 'utf-8' | 'gbk' | 'big5' | 'shift_jis' | 'windows-1252';
 export type LocaleCode = 'zh-CN' | 'en-US';
 export type CredentialStoreStatus = 'available' | 'locked' | 'unavailable' | 'unsupported';
@@ -490,6 +504,7 @@ export interface SafeSettings {
   taskDrawerOpen: boolean;
   connectionsPaneWidth: number;
   inspectorPaneWidth: number;
+  assistantPaneWidth: number;
   taskDrawerHeight: number;
   hostPanelOpen: boolean;
   fileBrowserOpen: boolean;

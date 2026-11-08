@@ -143,6 +143,8 @@ pub struct SafeSettings {
     pub task_drawer_open: bool,
     pub connections_pane_width: u16,
     pub inspector_pane_width: u16,
+    #[serde(default = "default_assistant_pane_width")]
+    pub assistant_pane_width: u16,
     pub task_drawer_height: u16,
     #[serde(default = "default_host_panel_open")]
     pub host_panel_open: bool,
@@ -179,6 +181,10 @@ fn default_file_browser_open() -> bool {
 
 fn default_host_panel_width() -> u16 {
     280
+}
+
+fn default_assistant_pane_width() -> u16 {
+    360
 }
 
 fn default_file_browser_height() -> u16 {
