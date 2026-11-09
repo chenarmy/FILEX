@@ -96,6 +96,11 @@ jobs:
           FILEX_UPDATER_PUBLIC_KEY: ${{ vars.FILEX_UPDATER_PUBLIC_KEY }}
         run: node scripts/verify-updater-key-pair.mjs
 
+      - name: Embed updater public key in release config
+        env:
+          FILEX_UPDATER_PUBLIC_KEY: ${{ vars.FILEX_UPDATER_PUBLIC_KEY }}
+        run: node scripts/prepare-updater-release-config.mjs src-tauri/tauri.release.conf.json
+
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
