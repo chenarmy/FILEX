@@ -1,5 +1,29 @@
 # FILEX verification evidence
 
+## 2026-11-10 — v0.1.0 signed GitHub release published
+
+Published the first signed FILEX release from tag `v0.1.0` at commit `f34822a6d4971c1be3a0b95427a6ca7198f731fa`:
+
+- Generated a FILEX-specific Tauri updater key pair and proved the configured private key and `FILEX_UPDATER_PUBLIC_KEY` variable match with the workflow's signed-version challenge. The private key remains outside the repository.
+- Embedded the validated public key into release-only Tauri configuration before packaging; ordinary source configuration still contains no private key material.
+- Built and signed Windows NSIS/MSI, Linux AppImage/DEB and macOS updater artifacts. All three platform build jobs passed.
+- Normalized draft updater URLs to immutable `v0.1.0` GitHub download URLs, then passed the exact 12-asset, detached-signature and signed-version gate before publishing.
+- Published [FILEX v0.1.0](https://github.com/chenarmy/FILEX/releases/tag/v0.1.0) as a non-draft, non-prerelease GitHub release. The release contains the expected 12 assets: five signed updater artifacts, five detached signatures, the macOS DMG and `latest.json`.
+
+Remote evidence:
+
+| Check | Result |
+| --- | --- |
+| Release workflow | [Run 42651574217](https://github.com/chenarmy/FILEX/actions/runs/42651574217) built all three platforms and published the GitHub release |
+| Windows package job | Passed |
+| Linux package job | Passed |
+| macOS package job | Passed |
+| GitHub verification/publish job | Passed the asset, signature, manifest and version gates |
+| Published release | `draft=false`, `prerelease=false`, published at `2026-11-09T16:13:56Z` |
+| Published assets | 12 assets with canonical `https://github.com/chenarmy/FILEX/releases/download/v0.1.0/` URLs |
+
+The workflow's final CNB mirror job failed independently of the successful GitHub publication. The `CNB` Actions Secret contained multiline RSA private-key material, but the mirror workflow requires a single-line CNB access token with permission to push the release tag and manage releases. Replace that secret through the repository settings before rerunning `.github/workflows/mirror-cnb-release.yml`; do not store or paste the token into source, logs or documentation. CNB feed availability and packaged install/update behavior on each platform remain pending and are not claimed by this entry.
+
 ## 2026-11-08 — release and updater delivery pipeline (implementation, publication pending)
 
 Added a tag-driven release pipeline based on the GITBX delivery discipline without inheriting its identity, URLs or signing key:
@@ -30,7 +54,7 @@ Local evidence:
 | Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` passed |
 | Workflow syntax | `actionlint` passed for CI, release and both CNB mirror workflows |
 
-Publication is pending because the repository currently has only `TAURI_SIGNING_PRIVATE_KEY` and `CNB` Actions Secrets, with no `FILEX_UPDATER_PUBLIC_KEY` Actions Variable and no GitHub release. The configured private key also has not been proven to be FILEX-specific. No signed release, CNB mirror, download, install or cross-platform update claim is made by this entry.
+This entry records the implementation-time state. The GitHub publication and key-pair checks were completed later and are recorded in the 2026-11-10 entry above. CNB mirroring and packaged cross-platform update installation remain pending.
 
 ## 2026-11-08 — AI provider settings and conversation workbench
 
