@@ -31,6 +31,19 @@ function requireHttpsUrl(name, expected) {
   }
 }
 
+function containsTauriPrivateKey(value) {
+  const matchesSecretKeyHeader = (text) => (
+    /^untrusted comment: (?:minisign|rsign) (?:encrypted )?secret key(?=\s|:|$)/.test(text.trimStart())
+  );
+  if (matchesSecretKeyHeader(value)) return true;
+
+  const normalized = value.replace(/\s+/g, '');
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(normalized) || normalized.length % 4 !== 0) {
+    return false;
+  }
+  return matchesSecretKeyHeader(Buffer.from(normalized, 'base64').toString('utf8'));
+}
+
 const flags = args();
 const githubRepository = flags.get('--github-repository');
 const cnbRepository = flags.get('--cnb-repository');
@@ -39,7 +52,7 @@ if (!githubRepository || !cnbRepository) {
 }
 
 const privateKey = process.env.TAURI_SIGNING_PRIVATE_KEY ?? '';
-if (!privateKey || (!privateKey.includes('untrusted comment:') && !fs.existsSync(privateKey))) {
+if (!privateKey || (!containsTauriPrivateKey(privateKey) && !fs.existsSync(privateKey))) {
   throw new Error('TAURI_SIGNING_PRIVATE_KEY must contain key content or an existing runner path');
 }
 
