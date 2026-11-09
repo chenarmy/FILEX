@@ -26,7 +26,7 @@ jobs:
         include:
           - platform: windows-latest
             args: --bundles nsis --bundles msi
-          - platform: macos-14
+          - platform: macos-15
             args: --bundles app --bundles dmg
           - platform: ubuntu-22.04
             args: --bundles appimage --bundles deb
