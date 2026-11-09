@@ -136,6 +136,19 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir release-assets --clobber
 
+      - name: Normalize draft updater manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node scripts/normalize-updater-manifest.mjs \
+            --assets-dir release-assets \
+            --tag "$RELEASE_TAG" \
+            --repository "$GITHUB_REPOSITORY"
+          gh release upload "$RELEASE_TAG" release-assets/latest.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
       - name: Verify updater assets and signatures
         env:
           FILEX_UPDATER_PUBLIC_KEY: ${{ vars.FILEX_UPDATER_PUBLIC_KEY }}

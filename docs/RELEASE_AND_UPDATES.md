@@ -68,10 +68,11 @@ The release workflow:
 3. injects that validated public key into the release-only Tauri configuration used to create updater artifacts;
 4. reads the version's release notes from `CHANGELOG.md`;
 5. builds a visible Windows/macOS/Linux draft;
-6. downloads and cryptographically verifies the updater metadata and signatures;
-7. publishes GitHub only after the exact asset set passes;
-8. mirrors the same assets to CNB and rewrites `latest.json` to CNB URLs;
-9. verifies the mirrored CNB release contains the expected assets.
+6. replaces GitHub's draft API asset URLs in `latest.json` with stable tag-scoped URLs by matching each manifest signature to exactly one detached signature asset;
+7. downloads and cryptographically verifies the updater metadata and signatures;
+8. publishes GitHub only after the exact asset set passes;
+9. mirrors the same assets to CNB and rewrites `latest.json` to CNB URLs;
+10. verifies the mirrored CNB release contains the expected assets.
 
 Release builds embed these stable feeds in order:
 
