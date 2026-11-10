@@ -1,5 +1,41 @@
 # FILEX verification evidence
 
+## 2026-11-11 — v0.1.1 signed GitHub and CNB release published
+
+Published FILEX `v0.1.1` from commit `c09e0543d5b129ac50ef57fda82b95f7389d9444`. The unpublished local `v0.1.1` tag from the interrupted prior attempt was moved to the final verified commit only after confirming that no remote tag existed.
+
+The tag-triggered release workflow completed successfully:
+
+| Check | Result |
+| --- | --- |
+| Release workflow | [Run 42852029839](https://github.com/chenarmy/FILEX/actions/runs/42852029839) completed with every job successful |
+| Windows build | Signed NSIS and MSI build passed |
+| Linux build | Signed AppImage and DEB build passed |
+| macOS build | Signed ARM64 DMG and updater app bundle build passed |
+| Updater key proof | Private/public key pairing challenge passed before packaging |
+| GitHub asset gate | Detached signatures and signed versions passed for the exact 12-asset set |
+| GitHub release | [FILEX v0.1.1](https://github.com/chenarmy/FILEX/releases/tag/v0.1.1) is public, not a draft or prerelease, and marked Latest |
+| CNB mirror | All 12 assets, CNB release tag and mirrored updater feed passed verification |
+
+Observed update-source state:
+
+| Feed | Version | Platforms | URL result |
+| --- | --- | --- | --- |
+| GitHub latest | `0.1.1` | Linux AppImage/DEB, macOS ARM64 app/DMG, Windows NSIS/MSI | GitHub release-download URLs verified |
+| CNB latest | `0.1.1` | Same eight update targets | All asset URLs rewritten to `https://cnb.cool/chenarmy/FILEX/-/releases/download/v0.1.1/`; no GitHub asset URLs remained |
+
+The published assets are:
+
+- `FILEX_0.1.1_amd64.AppImage` and `.sig`
+- `FILEX_0.1.1_amd64.deb` and `.sig`
+- `FILEX_0.1.1_aarch64.app.tar.gz` and `.sig`
+- `FILEX_0.1.1_aarch64.dmg`
+- `FILEX_0.1.1_x64-setup.exe` and `.sig`
+- `FILEX_0.1.1_x64_en-US.msi` and `.sig`
+- `latest.json`
+
+Signed installation over an older installed FILEX build remains a separate packaged-update acceptance step and is not claimed by this publication entry.
+
 ## 2026-11-11 — complete monitoring views and session isolation
 
 Completed the monitoring-detail continuation with an explicit All interfaces view, per-interface endpoint narrowing, safe POSIX process start times, and active-session isolation. Network data now opens unfiltered, while selecting an interface adds its state, addresses, MTU and cumulative counters and retains wildcard listeners. Process and network stores clear when their owning session changes and discard late responses from the previous session; the dialog also closes immediately when the active session changes.
