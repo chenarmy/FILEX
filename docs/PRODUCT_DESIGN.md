@@ -247,7 +247,7 @@ FTP/FTPS support stays deferred pending its own design approval; see "Later".
 4. Repeated collector failure backs off and does not flood terminal history or remote load.
 5. The compact host panel exposes three keyboard-accessible entry points: Processes, Network, and Routes. Each opens a session-scoped monitoring workspace without replacing the active terminal or file context.
 6. Processes shows the complete bounded snapshot rather than only the compact top list. Selecting a row exposes safe process metadata (PID, parent PID, owner when available, state, CPU, resident memory, and start time); command arguments, environment variables, and working directories remain excluded because they can contain credentials.
-7. Network shows a bounded interface and socket snapshot. The user can switch the active interface; interface addresses, state, MTU, byte counters, and matching endpoints update together. Wildcard listeners remain visible because they apply to every interface.
+7. Network opens in an All interfaces mode so the complete bounded socket set remains visible. The user may switch to one interface to inspect its state, addresses, MTU and byte counters; endpoint rows then narrow to wildcard listeners and endpoints assigned to that interface. Switching interfaces is local presentation state and never retargets or restarts the SSH session.
 8. Routes shows the bounded operating-system routing table for the active host, including destination, gateway, interface, metric, and protocol when the platform exposes them. It does not perform traceroute or contact a geolocation service implicitly.
 
 Monitoring-detail inheritance ledger:
@@ -263,7 +263,8 @@ Acceptance checks:
 
 - Processes, Network, and Routes open with pointer, Enter, or Space and restore focus on close.
 - Process and network rows expose a selected state and a detail region; all visible copy is localized.
-- Interface switching is local and immediate, never restarts the SSH session, and preserves wildcard listeners.
+- Network initially shows all records; interface switching is local and immediate, never restarts the SSH session, and preserves wildcard listeners.
+- Active-session changes close the monitoring workspace instead of displaying or retargeting the previous host's snapshot.
 - Collection is capped at 100 processes, 500 endpoints, 128 interfaces, and 500 routes; truncation is visible.
 - Disconnect, unsupported platform, empty, loading, stale, and structured failure states remain distinguishable; permission failures are never presented as valid zero values.
 - The workspace is usable at 960 x 640 and 1440 x 900 in dark and light themes without page-level overflow.

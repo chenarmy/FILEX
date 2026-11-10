@@ -408,3 +408,295 @@ test('allows SSH Agent profiles through preflight and reaches the desktop runtim
   await expect(page.getByRole('alert')).toContainText('桌面应用');
   await expect(page.getByRole('dialog')).toHaveCount(0);
 });
+
+test('inspects complete session-scoped process, network, interface and route views', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => Boolean(
+    (document.querySelector('#app') as HTMLElement & { __vue_app__?: unknown }).__vue_app__,
+  ));
+  await page.evaluate(() => {
+    type StoreLike = Record<string, unknown> & {
+      $patch?: (value: Record<string, unknown>) => void;
+    };
+    type AppRoot = HTMLElement & {
+      __vue_app__?: {
+        _context: { provides: Record<PropertyKey, unknown> };
+        config: { globalProperties: { $pinia?: PiniaLike } };
+      };
+    };
+    type PiniaLike = {
+      _s: Map<string, StoreLike>;
+    };
+
+    const root = document.querySelector('#app') as AppRoot;
+    const app = root.__vue_app__;
+    if (!app) throw new Error('Vue application was not available for the monitoring fixture');
+    const pinia = app.config.globalProperties.$pinia;
+    if (!pinia) throw new Error('Pinia store registry was not available for the monitoring fixture');
+
+    const sessions = pinia._s.get('sessions');
+    const settings = pinia._s.get('settings');
+    if (!sessions || !settings) {
+      throw new Error('Core monitoring fixture stores were not initialized');
+    }
+
+    Object.assign(settings.value as Record<string, unknown>, {
+      hostPanelOpen: true,
+      focusMode: false,
+      locale: 'zh-CN',
+      theme: 'dark',
+    });
+    (settings.apply as (() => void) | undefined)?.();
+    sessions.summaries = [
+      {
+        id: 'session-alpha',
+        generation: 1,
+        profileId: 'profile-alpha',
+        state: 'connected',
+        host: '10.24.1.33',
+        port: 22,
+        username: 'ops',
+        lastError: null,
+      },
+      {
+        id: 'session-beta',
+        generation: 1,
+        profileId: 'profile-beta',
+        state: 'connected',
+        host: '10.24.1.34',
+        port: 22,
+        username: 'ops',
+        lastError: null,
+      },
+    ];
+    sessions.activeSessionId = 'session-alpha';
+  });
+
+  const hostPanel = page.locator('.host-panel');
+  await expect(hostPanel).toBeVisible();
+  await page.evaluate(() => {
+    const root = document.querySelector('#app') as HTMLElement & {
+      __vue_app__?: {
+        config: {
+          globalProperties: {
+            $pinia?: { _s: Map<string, Record<string, unknown>> };
+          };
+        };
+      };
+    };
+    const pinia = root.__vue_app__?.config.globalProperties.$pinia;
+    const processes = pinia?._s.get('processes');
+    const monitor = pinia?._s.get('monitor');
+    if (!processes || !monitor) throw new Error('Monitor polling stores were not initialized');
+
+    processes.collect = () => Promise.resolve();
+    monitor.collect = () => Promise.resolve();
+    (processes.clear as (() => void) | undefined)?.();
+    (monitor.clear as (() => void) | undefined)?.();
+    processes.snapshot = {
+      state: 'live',
+      platform: 'posix',
+      collectedAtMs: Date.now(),
+      snapshotId: 'process-snapshot-alpha',
+      truncated: true,
+      processes: [
+        {
+          pid: 4242,
+          parentPid: 1,
+          name: 'filex-agent',
+          user: 'ops',
+          cpuPercent: 12.5,
+          cpuTimeSeconds: 62,
+          memoryBytes: 268_435_456,
+          state: 'S',
+          startedAtMs: Date.parse('2026-11-10T09:30:00+08:00'),
+          canTerminate: true,
+        },
+        {
+          pid: 1919,
+          parentPid: 1,
+          name: 'nginx',
+          user: 'www-data',
+          cpuPercent: 2.1,
+          cpuTimeSeconds: 9,
+          memoryBytes: 67_108_864,
+          state: 'S',
+          startedAtMs: Date.parse('2026-11-09T08:00:00+08:00'),
+          canTerminate: true,
+        },
+      ],
+    };
+  });
+
+  await hostPanel.getByRole('button', { name: '网络', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '主机监控详情' });
+  await expect(dialog).toBeVisible();
+  await page.evaluate(() => {
+    const root = document.querySelector('#app') as HTMLElement & {
+      __vue_app__?: {
+        config: {
+          globalProperties: {
+            $pinia?: { _s: Map<string, Record<string, unknown>> };
+          };
+        };
+      };
+    };
+    const pinia = root.__vue_app__?.config.globalProperties.$pinia;
+    const network = pinia?._s.get('network');
+    if (!network) throw new Error('Network store was not initialized');
+
+    network.collect = () => Promise.resolve();
+    (network.clear as (() => void) | undefined)?.();
+    network.snapshot = {
+      state: 'live',
+      platform: 'linux',
+      collectedAtMs: Date.now(),
+      interfaces: [
+        {
+          name: 'eth0',
+          state: 'up',
+          addresses: ['10.24.1.33/24', 'fe80::21/64'],
+          mtu: 1500,
+          receivedBytes: 8_589_934_592,
+          transmittedBytes: 4_294_967_296,
+          loopback: false,
+        },
+        {
+          name: 'eth1',
+          state: 'up',
+          addresses: ['10.24.2.33/24'],
+          mtu: 9000,
+          receivedBytes: 2_147_483_648,
+          transmittedBytes: 1_073_741_824,
+          loopback: false,
+        },
+        {
+          name: 'lo',
+          state: 'unknown',
+          addresses: ['127.0.0.1/8', '::1/128'],
+          mtu: 65536,
+          receivedBytes: 4096,
+          transmittedBytes: 2048,
+          loopback: true,
+        },
+      ],
+      endpoints: [
+        {
+          protocol: 'tcp',
+          localAddress: '0.0.0.0',
+          localPort: 22,
+          remoteAddress: null,
+          remotePort: null,
+          state: 'LISTEN',
+          pid: 4242,
+          processName: 'sshd',
+        },
+        {
+          protocol: 'tcp',
+          localAddress: '10.24.2.33',
+          localPort: 8080,
+          remoteAddress: null,
+          remotePort: null,
+          state: 'LISTEN',
+          pid: 1919,
+          processName: 'nginx',
+        },
+        {
+          protocol: 'tcp',
+          localAddress: '127.0.0.1',
+          localPort: 5432,
+          remoteAddress: null,
+          remotePort: null,
+          state: 'LISTEN',
+          pid: 3306,
+          processName: 'postgres',
+        },
+      ],
+      routes: [
+        {
+          destination: 'default',
+          gateway: '10.24.1.1',
+          interfaceName: 'eth0',
+          metric: 100,
+          protocol: 'dhcp',
+        },
+        {
+          destination: '10.24.2.0/24',
+          gateway: null,
+          interfaceName: 'eth1',
+          metric: 200,
+          protocol: 'static',
+        },
+      ],
+      endpointsTruncated: false,
+      routesTruncated: false,
+    };
+  });
+
+  const interfaceSelect = dialog.getByLabel('网口');
+  await expect(interfaceSelect).toHaveValue('');
+  await expect(interfaceSelect.locator('option').first()).toHaveText('全部网口');
+  await expect(dialog.getByRole('cell', { name: '127.0.0.1:5432' })).toBeVisible();
+  await page.screenshot({ path: 'test-results/monitor-details-network-all-1440.png' });
+
+  await interfaceSelect.selectOption('eth1');
+  await expect(dialog.getByRole('cell', { name: '10.24.2.33:8080' })).toBeVisible();
+  await expect(dialog.getByRole('cell', { name: '127.0.0.1:5432' })).toHaveCount(0);
+  await dialog.getByRole('row', { name: /nginx/ }).click();
+  await expect(dialog.getByText('网络记录详情')).toBeVisible();
+  await page.screenshot({ path: 'test-results/monitor-details-network-detail-1440.png' });
+
+  await dialog.getByRole('tab', { name: '路由' }).click();
+  await expect(dialog.getByRole('cell', { name: '10.24.2.0/24' })).toBeVisible();
+  await expect(dialog.getByRole('cell', { name: 'eth1' })).toBeVisible();
+  await page.screenshot({ path: 'test-results/monitor-details-routes-1440.png' });
+
+  await dialog.getByRole('tab', { name: '进程' }).click();
+  await expect(dialog.getByText('进程较多，仅显示前 100 项。')).toBeVisible();
+  await expect(dialog.getByRole('cell', { name: 'filex-agent' })).toBeVisible();
+  await expect(dialog.getByText('启动时间')).toBeVisible();
+  await page.screenshot({ path: 'test-results/monitor-details-process-1440.png' });
+
+  await dialog.getByRole('tab', { name: '网络' }).click();
+  await page.setViewportSize({ width: 960, height: 640 });
+  await page.evaluate(() => {
+    const key = 'filex.safe-settings.v1';
+    const current = JSON.parse(localStorage.getItem(key) ?? '{}') as Record<string, unknown>;
+    localStorage.setItem(key, JSON.stringify({ ...current, theme: 'light', locale: 'zh-CN', uiFontSize: 20 }));
+    const root = document.querySelector('#app') as HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const pinia = root.__vue_app__?.config.globalProperties.$pinia;
+    const settings = pinia?._s.get('settings');
+    if (settings) {
+      Object.assign(settings.value as Record<string, unknown>, {
+        theme: 'light',
+        locale: 'zh-CN',
+        uiFontSize: 20,
+      });
+      const apply = settings.apply;
+      if (typeof apply === 'function') apply.call(settings);
+    }
+  });
+  const box = await dialog.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(960);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(640);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: 'test-results/monitor-details-network-light-960-font20.png' });
+
+  await page.evaluate(() => {
+    const root = document.querySelector('#app') as HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const pinia = root.__vue_app__?.config.globalProperties.$pinia;
+    const sessions = pinia?._s.get('sessions');
+    if (sessions) sessions.activeSessionId = 'session-beta';
+  });
+  await expect(dialog).toHaveCount(0);
+});

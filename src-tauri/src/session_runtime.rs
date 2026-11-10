@@ -2840,7 +2840,7 @@ impl SessionRuntime {
                 truncated: false,
             });
         }
-        let parsed = parse_posix_process_output(&text)?;
+        let parsed = parse_posix_process_output(&text, now_ms()?)?;
         self.save_process_snapshot(session_id, ProcessPlatform::Posix, parsed)
     }
 
@@ -4793,11 +4793,12 @@ ps -e -o pid=,ppid=,user=,pcpu=,time=,rss=,stat= 2>/dev/null | sort -k4,4nr | he
   name=${name##*/}
   name=$(printf '%s' "$name" | cut -c 1-128)
   start=$(ps -p "$pid" -o lstart= 2>/dev/null | tr -d '\012\015')
+  elapsed=$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' \012\015')
   [ -n "$name" ] || continue
   name_hex=$(printf '%s' "$name" | od -An -tx1 | tr -d ' \012')
   user_hex=$(printf '%s' "$user" | cut -c 1-128 | od -An -tx1 | tr -d ' \012')
   start_hex=$(printf '%s' "$start" | od -An -tx1 | tr -d ' \012')
-  printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$user_hex" "$cpu" "$cpu_time" "$rss" "$state" "$start_hex" "$name_hex"
+  printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$user_hex" "$cpu" "$cpu_time" "$rss" "$state" "$start_hex" "$elapsed" "$name_hex"
 done"#;
 
 const WINDOWS_PROCESS_SCRIPT: &str = r#"if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { exit 42 }
@@ -4864,7 +4865,10 @@ printf 'PROCESS_SIGNAL_SENT\n'"#
     )
 }
 
-fn parse_posix_process_output(output: &str) -> Result<ParsedProcesses, AppError> {
+fn parse_posix_process_output(
+    output: &str,
+    collected_at_ms: u64,
+) -> Result<ParsedProcesses, AppError> {
     if !output.lines().any(|line| line.trim() == "PLATFORM=POSIX") {
         return Err(process_probe_error());
     }
@@ -4877,13 +4881,13 @@ fn parse_posix_process_output(output: &str) -> Result<ParsedProcesses, AppError>
     let mut identities = HashMap::new();
     for record in records.into_iter().take(100) {
         let fields = record.split('\t').collect::<Vec<_>>();
-        if fields.len() != 10 {
+        if fields.len() != 11 {
             continue;
         }
         let Ok(pid) = fields[1].parse::<u32>() else {
             continue;
         };
-        let name_marker_hex = fields[9];
+        let name_marker_hex = fields[10];
         let start_marker_hex = fields[8];
         let name =
             decode_process_name(name_marker_hex, true).unwrap_or_else(|| "unknown".to_owned());
@@ -4914,7 +4918,11 @@ fn parse_posix_process_output(output: &str) -> Result<ParsedProcesses, AppError>
             cpu_time_seconds: parse_posix_cpu_time(fields[5]),
             memory_bytes,
             state: sanitize_process_state(fields[7]),
-            started_at_ms: None,
+            started_at_ms: fields[9]
+                .parse::<u64>()
+                .ok()
+                .and_then(|seconds| seconds.checked_mul(1_000))
+                .and_then(|milliseconds| collected_at_ms.checked_sub(milliseconds)),
             can_terminate: identity_valid,
         });
     }
@@ -7515,13 +7523,14 @@ mod tests {
     #[test]
     fn parses_safe_process_detail_metadata() {
         let output = format!(
-            "PLATFORM=POSIX\nP\t42\t1\t{}\t12.5\t00:01:02\t2048\tS\t{}\t{}\n",
+            "PLATFORM=POSIX\nP\t42\t1\t{}\t12.5\t00:01:02\t2048\tS\t{}\t120\t{}\n",
             hex("root"),
             hex("Mon Nov 10 10:00:00 2026"),
             hex("sshd"),
         );
 
-        let parsed = parse_posix_process_output(&output).expect("process fixture should parse");
+        let parsed = parse_posix_process_output(&output, 1_700_000_000_000)
+            .expect("process fixture should parse");
         assert_eq!(parsed.processes.len(), 1);
         let process = &parsed.processes[0];
         assert_eq!(process.pid, 42);
@@ -7529,6 +7538,7 @@ mod tests {
         assert_eq!(process.user.as_deref(), Some("root"));
         assert_eq!(process.name, "sshd");
         assert_eq!(process.memory_bytes, Some(2 * 1024 * 1024));
+        assert_eq!(process.started_at_ms, Some(1_699_999_880_000));
         assert!(process.can_terminate);
     }
 

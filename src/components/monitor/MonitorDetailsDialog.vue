@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { CircleStop, RefreshCw, X } from 'lucide-vue-next';
-import { t } from '@/i18n';
+import { currentLocale, t } from '@/i18n';
+import { ALL_NETWORK_INTERFACES, networkEndpointsForInterface } from '@/domain/monitorDetails';
 import { useNetworkStore } from '@/stores/network';
 import { useProcessesStore } from '@/stores/processes';
 import { useSessionsStore } from '@/stores/sessions';
@@ -19,7 +20,7 @@ const network = useNetworkStore();
 const ui = useUiStore();
 const activeView = ref<MonitorDetailsView>(props.initialView);
 const selectedPid = ref<number | null>(null);
-const selectedInterfaceName = ref('');
+const selectedInterfaceName = ref(ALL_NETWORK_INTERFACES);
 const selectedEndpointIndex = ref<number | null>(null);
 const closeButton = ref<HTMLButtonElement | null>(null);
 const dialogRoot = ref<HTMLElement | null>(null);
@@ -28,20 +29,18 @@ const connected = computed(() => sessions.activeSession?.state === 'connected');
 const selectedProcess = computed(() => processes.snapshot?.processes.find((entry) => entry.pid === selectedPid.value) ?? null);
 const interfaces = computed(() => network.snapshot?.interfaces ?? []);
 const selectedInterface = computed(() => interfaces.value.find((entry) => entry.name === selectedInterfaceName.value) ?? null);
-const filteredEndpoints = computed(() => {
-  const endpoints = network.snapshot?.endpoints ?? [];
-  const selected = selectedInterface.value;
-  if (!selected) return endpoints;
-  const addresses = new Set(selected.addresses.map((address) => address.replace(/\/\d+$/, '')));
-  return endpoints.filter((endpoint) => isWildcardAddress(endpoint.localAddress) || addresses.has(endpoint.localAddress));
-});
+const filteredEndpoints = computed(() => networkEndpointsForInterface(
+  network.snapshot?.endpoints ?? [],
+  selectedInterface.value,
+));
 const selectedEndpoint = computed(() => selectedEndpointIndex.value === null
   ? null
   : filteredEndpoints.value[selectedEndpointIndex.value] ?? null);
 
 watch(interfaces, (entries) => {
-  if (!entries.some((entry) => entry.name === selectedInterfaceName.value)) {
-    selectedInterfaceName.value = entries.find((entry) => !entry.loopback)?.name ?? entries[0]?.name ?? '';
+  if (selectedInterfaceName.value !== ALL_NETWORK_INTERFACES
+    && !entries.some((entry) => entry.name === selectedInterfaceName.value)) {
+    selectedInterfaceName.value = ALL_NETWORK_INTERFACES;
   }
 }, { immediate: true });
 
@@ -52,6 +51,13 @@ watch(filteredEndpoints, () => {
 watch(activeView, (view) => {
   void loadView(view);
 });
+
+watch(
+  () => sessions.activeSessionId,
+  (sessionId, previousSessionId) => {
+    if (previousSessionId && sessionId !== previousSessionId) emit('close');
+  },
+);
 
 watch(
   () => [sessions.activeSessionId, sessions.activeSession?.state] as const,
@@ -97,17 +103,18 @@ function formatCpu(entry: ProcessEntry): string {
 function formatDate(timestamp: number | null | undefined): string {
   if (timestamp === null || timestamp === undefined) return '—';
   const date = new Date(timestamp);
-  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString();
+  return Number.isNaN(date.getTime())
+    ? '—'
+    : new Intl.DateTimeFormat(currentLocale.value, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(date);
 }
 
 function endpointLabel(address: string | null, port: number | null): string {
   if (!address) return '—';
   const formattedAddress = address.includes(':') ? `[${address}]` : address;
   return port === null ? formattedAddress : `${formattedAddress}:${port}`;
-}
-
-function isWildcardAddress(address: string): boolean {
-  return address === '*' || address === '0.0.0.0' || address === '::' || address === '[::]';
 }
 
 function interfaceState(entry: NetworkInterface): string {
@@ -228,18 +235,25 @@ function handleDialogKeydown(event: KeyboardEvent): void {
           <div class="monitor-interface-toolbar">
             <label>{{ t('monitorDetails.interface') }}
               <select v-model="selectedInterfaceName" :disabled="network.loading || interfaces.length === 0">
+                <option :value="ALL_NETWORK_INTERFACES">{{ t('monitorDetails.allInterfaces') }}</option>
                 <option v-for="entry in interfaces" :key="entry.name" :value="entry.name">{{ entry.name }} · {{ interfaceState(entry) }}</option>
               </select>
             </label>
-            <span v-if="selectedInterface" class="mono">↓ {{ formatBytes(selectedInterface.receivedBytes) }} · ↑ {{ formatBytes(selectedInterface.transmittedBytes) }}</span>
+            <span class="mono">{{ t('monitorDetails.visibleRecords', { count: filteredEndpoints.length }) }}</span>
           </div>
           <div v-if="network.error" class="inline-notice error" role="alert">{{ t(network.error.messageKey as Parameters<typeof t>[0]) }}</div>
           <div v-else-if="network.loading && !network.snapshot" class="task-empty">{{ t('monitorDetails.networkLoading') }}</div>
           <div v-else-if="network.snapshot?.state === 'unsupported'" class="task-empty">{{ t('monitorDetails.networkUnsupported') }}</div>
           <template v-else>
             <div v-if="selectedInterface" class="interface-summary">
-              <span><strong>{{ t('monitorDetails.addresses') }}</strong> <span class="mono">{{ selectedInterface.addresses.join(', ') || '—' }}</span></span>
-              <span><strong>MTU</strong> <span class="mono">{{ selectedInterface.mtu ?? '—' }}</span></span>
+              <span><strong>{{ t('monitorDetails.state') }}</strong>{{ interfaceState(selectedInterface) }}</span>
+              <span><strong>{{ t('monitorDetails.addresses') }}</strong><span class="mono">{{ selectedInterface.addresses.join(', ') || '—' }}</span></span>
+              <span><strong>MTU</strong><span class="mono">{{ selectedInterface.mtu ?? '—' }}</span></span>
+              <span><strong>{{ t('monitorDetails.received') }}</strong><span class="mono">{{ formatBytes(selectedInterface.receivedBytes) }}</span></span>
+              <span><strong>{{ t('monitorDetails.transmitted') }}</strong><span class="mono">{{ formatBytes(selectedInterface.transmittedBytes) }}</span></span>
+            </div>
+            <div v-else class="interface-summary">
+              <span>{{ t('monitorDetails.allInterfacesHelp', { interfaces: interfaces.length, endpoints: network.snapshot?.endpoints.length ?? 0 }) }}</span>
             </div>
             <p v-if="network.snapshot?.endpointsTruncated" class="monitor-details-notice">{{ t('monitorDetails.endpointsTruncated') }}</p>
             <div v-if="filteredEndpoints.length" class="monitor-table-scroll">

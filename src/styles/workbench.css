@@ -4460,6 +4460,12 @@
   color: hsl(var(--foreground));
 }
 
+@media (max-width: 1100px) {
+  .monitor-details-body {
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 34%);
+  }
+}
+
 @media (max-width: 760px) {
   .monitor-details-body {
     grid-template-columns: minmax(0, 1fr);

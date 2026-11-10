@@ -139,8 +139,9 @@ Implemented monitoring-detail slice (2026-11-10):
 
 - Keyboard-accessible Processes, Network, and Routes entry points now open a bounded session-scoped monitoring workspace from the compact host panel.
 - The process snapshot includes safe owner, parent, and start metadata when available while continuing to exclude command arguments, environment variables, and working directories.
-- A typed read-only network snapshot exposes interfaces, sockets, and the operating-system routing table. Interface selection is presentation state only; probes use fixed commands, no user-supplied shell fragments, no privilege escalation, and no implicit traceroute or geolocation request.
-- Parser/unit coverage, TypeScript/Rust quality gates, and controlled-fixture layout inspection at 1440 x 900 and 960 x 640 pass. Live Linux and Windows accuracy and macOS support remain platform acceptance work rather than assumed coverage.
+- A typed read-only network snapshot exposes interfaces, sockets, and the operating-system routing table. Network opens with the complete bounded endpoint set and offers an explicit All interfaces mode; selecting one interface narrows the endpoint view. Interface selection is presentation state only, and probes use fixed commands, no user-supplied shell fragments, no privilege escalation, and no implicit traceroute or geolocation request.
+- Monitoring snapshots are session-scoped in presentation state. Switching the active session closes the details workspace so one host's process or endpoint data cannot appear under another host's context.
+- Parser/unit coverage, TypeScript/Rust quality gates, and controlled-fixture interaction and layout inspection at 1440 x 900 and 960 x 640 pass. The fixture verifies All interfaces, per-interface narrowing, process and endpoint details, routes, enlarged text and active-session isolation. Live Linux and Windows accuracy and macOS support remain platform acceptance work rather than assumed coverage.
 
 Still open in this phase: verify tunnel lifecycle and live-host monitoring capability and metric accuracy across Linux, macOS and Windows after the development environment is configured.
 

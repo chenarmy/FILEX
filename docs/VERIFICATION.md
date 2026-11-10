@@ -1,5 +1,32 @@
 # FILEX verification evidence
 
+## 2026-11-11 — complete monitoring views and session isolation
+
+Completed the monitoring-detail continuation with an explicit All interfaces view, per-interface endpoint narrowing, safe POSIX process start times, and active-session isolation. Network data now opens unfiltered, while selecting an interface adds its state, addresses, MTU and cumulative counters and retains wildcard listeners. Process and network stores clear when their owning session changes and discard late responses from the previous session; the dialog also closes immediately when the active session changes.
+
+The controlled browser fixture opened Network from a connected session, verified all three fixture endpoints in All interfaces mode, switched to `eth1`, selected a network record for details, opened the route table, switched to Processes and verified safe metadata including start time, then repeated the network workflow at 960 × 640 in light theme with a 20 px UI font. It also switched the active session and verified that the dialog closed.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| TypeScript | `pnpm typecheck` | Passed |
+| Lint | `pnpm lint` | Passed with zero warnings |
+| Unit tests | `pnpm test` | Passed: 12 files, 39 tests |
+| Front-end build | `pnpm build` | Passed; existing Monaco/main chunk-size warnings remain |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust tests | `cargo test --workspace` | Passed: 30 tests |
+| Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
+| Browser E2E | `pnpm test:e2e -- e2e/workbench.spec.ts` | Passed: 14 scenarios with no page, console or failed-request errors |
+
+Evidence frames:
+
+- `test-results/monitor-details-network-all-1440.png`
+- `test-results/monitor-details-network-detail-1440.png`
+- `test-results/monitor-details-routes-1440.png`
+- `test-results/monitor-details-process-1440.png`
+- `test-results/monitor-details-network-light-960-font20.png`
+
+The browser fixture replaces typed store actions with deterministic session data and therefore does not claim live SSH transport accuracy. Live Linux and Windows collector verification and macOS network inspection remain pending.
+
 ## 2026-11-10 — terminal interaction and full-screen layout hardening
 
 Added a terminal-local selection/context menu for copy, copy-and-input, in-terminal search and local display clearing. The bounded in-memory command history now opens on a plain Alt double-tap and gives every row explicit insert, execute, copy and delete actions. Clipboard failures use the existing local notification surface, multiline copy-and-input retains paste protection, and neither selections nor history entries gain a persistence path.

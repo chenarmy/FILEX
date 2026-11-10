@@ -9,9 +9,18 @@ export const useProcessesStore = defineStore('processes', () => {
   const error = ref<AppError | null>(null);
   const terminatingPid = ref<number | null>(null);
   const displayState = computed(() => snapshot.value?.state ?? 'unprobed');
+  let snapshotSessionId: string | null = null;
   let generation = 0;
 
   async function collect(sessionId: string): Promise<void> {
+    if (snapshotSessionId !== sessionId) {
+      generation += 1;
+      snapshotSessionId = sessionId;
+      snapshot.value = null;
+      error.value = null;
+      loading.value = false;
+      terminatingPid.value = null;
+    }
     if (loading.value || terminatingPid.value !== null) return;
     const request = ++generation;
     loading.value = true;
@@ -31,7 +40,7 @@ export const useProcessesStore = defineStore('processes', () => {
 
   async function terminate(sessionId: string, pid: number): Promise<boolean> {
     const snapshotId = snapshot.value?.snapshotId;
-    if (!snapshotId || terminatingPid.value !== null || loading.value) return false;
+    if (snapshotSessionId !== sessionId || !snapshotId || terminatingPid.value !== null || loading.value) return false;
     const request = ++generation;
     terminatingPid.value = pid;
     error.value = null;
@@ -53,6 +62,7 @@ export const useProcessesStore = defineStore('processes', () => {
 
   function clear(): void {
     generation += 1;
+    snapshotSessionId = null;
     snapshot.value = null;
     error.value = null;
     loading.value = false;
