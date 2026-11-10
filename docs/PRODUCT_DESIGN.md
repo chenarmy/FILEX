@@ -178,6 +178,8 @@ A typed, inspectable proposal produced by the assistant. It contains the target 
 Aligned with the public feature set of open SSH workbenches (FileTerm as reference, implementation our own):
 
 - Floating command input bar bound to the active terminal session: Enter sends, Shift+Enter inserts a newline, with a bounded in-memory history that is never persisted, exported, or logged.
+- Terminal-local interaction affordances: a double-tap of Alt opens the bounded command history; each history row can insert, execute, copy or delete that entry. Selecting terminal text opens a compact copy/copy-and-input/search menu, while the terminal context menu adds a local clear action. Clipboard failures are reported and no selection or history item is persisted.
+- Terminal rendering requires an effective monospace font. Unavailable or proportional font choices fall back locally to the safe terminal stack, and every stable pane/font/layout change re-fits xterm before synchronizing the remote PTY size so full-screen TTY programs retain column alignment.
 - Optional terminal working-directory tracking through OSC 7 shell integration. When enabled, the remote file browser may follow the shell's current directory; reliability limits stay visible and the paths remain independently navigable.
 - Remote permission mode editing (chmod) with an explicit octal review before mutation; file rows display numeric uid/gid ownership when the server provides it.
 - Monitor samples extend to load averages 1/5/15 and a bounded multi-mount disk list; the host panel renders a bounded network rate history chart.
@@ -243,6 +245,28 @@ FTP/FTPS support stays deferred pending its own design approval; see "Later".
 2. Supported collectors begin bounded polling.
 3. Each metric indicates live, stale, unsupported, or permission denied.
 4. Repeated collector failure backs off and does not flood terminal history or remote load.
+5. The compact host panel exposes three keyboard-accessible entry points: Processes, Network, and Routes. Each opens a session-scoped monitoring workspace without replacing the active terminal or file context.
+6. Processes shows the complete bounded snapshot rather than only the compact top list. Selecting a row exposes safe process metadata (PID, parent PID, owner when available, state, CPU, resident memory, and start time); command arguments, environment variables, and working directories remain excluded because they can contain credentials.
+7. Network shows a bounded interface and socket snapshot. The user can switch the active interface; interface addresses, state, MTU, byte counters, and matching endpoints update together. Wildcard listeners remain visible because they apply to every interface.
+8. Routes shows the bounded operating-system routing table for the active host, including destination, gateway, interface, metric, and protocol when the platform exposes them. It does not perform traceroute or contact a geolocation service implicitly.
+
+Monitoring-detail inheritance ledger:
+
+| Area | Inherit | Adapt | Replace |
+| --- | --- | --- | --- |
+| Dense workbench tables, selection, focus and contextual detail | GITBX-derived interaction grammar | Session-scoped modal workspace sized for FILEX | Any Git-domain entities or actions |
+| Compact host-panel summaries | Existing FILEX shell | Headings become explicit open actions | FinalShell tabs, artwork, labels and layout |
+| Typed facade, structured errors, bounded work | FILEX architecture and security baseline | Add a read-only network-inspection capability | Direct UI-to-SSH commands |
+| Process and network data | Existing FILEX snapshots | Add safe metadata, interfaces, endpoints and routes | Environment/argument disclosure, silent privilege escalation, third-party geolocation |
+
+Acceptance checks:
+
+- Processes, Network, and Routes open with pointer, Enter, or Space and restore focus on close.
+- Process and network rows expose a selected state and a detail region; all visible copy is localized.
+- Interface switching is local and immediate, never restarts the SSH session, and preserves wildcard listeners.
+- Collection is capped at 100 processes, 500 endpoints, 128 interfaces, and 500 routes; truncation is visible.
+- Disconnect, unsupported platform, empty, loading, stale, and structured failure states remain distinguishable; permission failures are never presented as valid zero values.
+- The workspace is usable at 960 x 640 and 1440 x 900 in dark and light themes without page-level overflow.
 
 ### 8.5 Tunnel lifecycle
 

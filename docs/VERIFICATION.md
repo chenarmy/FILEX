@@ -1,5 +1,25 @@
 # FILEX verification evidence
 
+## 2026-11-10 — terminal interaction and full-screen layout hardening
+
+Added a terminal-local selection/context menu for copy, copy-and-input, in-terminal search and local display clearing. The bounded in-memory command history now opens on a plain Alt double-tap and gives every row explicit insert, execute, copy and delete actions. Clipboard failures use the existing local notification surface, multiline copy-and-input retains paste protection, and neither selections nor history entries gain a persistence path.
+
+The xterm pane now rejects an effectively proportional font at render time, retries after browser fonts settle, and re-fits through two animation frames before synchronizing the final columns and rows to the existing typed PTY resize facade. Session, connection-state, pane and font changes invalidate the previous resize signature so full-screen TTY programs receive the current geometry.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| TypeScript | `pnpm typecheck` | Passed |
+| Lint | `pnpm lint` | Passed with zero warnings |
+| Unit tests | `pnpm test` | Passed: 10 files, 35 tests; includes Alt double-tap bounds, proportional-font fallback and menu clamping |
+| Front-end build | `pnpm build` | Passed with the existing large-chunk warnings |
+| Browser E2E regression | `pnpm test:e2e -- e2e/workbench.spec.ts` | Passed: 13 scenarios, including the terminal context-menu flow, with no page, console or failed-request errors |
+| Terminal-menu E2E | `pnpm exec playwright test e2e/workbench.spec.ts --grep "local terminal context menu"` | Passed; right-click menu was keyboard-focused, cleared locally and closed without page/console/request errors |
+| Native debug build | `pnpm tauri build --debug --no-bundle` | Passed; produced `target/debug/filex-desktop.exe` |
+
+Evidence frame: `test-results/terminal-context-menu-1440.png`.
+
+Live SSH acceptance for selection actions and an interactive `top` resize remains pending on a disposable test host; this entry does not claim remote-platform visual parity.
+
 ## 2026-11-10 — v0.1.0 signed GitHub release published
 
 Published the first signed FILEX release from tag `v0.1.0` at commit `f34822a6d4971c1be3a0b95427a6ca7198f731fa`:
@@ -943,4 +963,25 @@ Artifact:
 - Authenticode: `NotSigned`
 
 The local shell proxy pointed to an unavailable `127.0.0.1` endpoint. Cargo dependencies and the NSIS toolchain were fetched through verified direct/mirror downloads, then the package command was run with `CARGO_NET_OFFLINE=true`. Updater signing variables and feed endpoints remain unset, so this artifact is for local inspection only. No unit, integration, E2E, live-host, installer interaction or GitHub release/publish step was run.
+
+## 2026-11-10 — process, network, interface, and route inspection
+
+Implemented a session-scoped monitoring details workspace opened from the compact host panel. Processes shows the complete bounded 100-row snapshot and a selectable safe-detail pane. Network shows up to 128 interfaces and 500 endpoints, supports local interface switching while retaining wildcard listeners, and exposes a selectable endpoint detail pane. Routes shows up to 500 operating-system route records. The collectors use fixed bounded commands and do not read process arguments, environments, or working directories, elevate privileges, run traceroute, or contact a geolocation service.
+
+Verification:
+
+| Check | Result |
+| --- | --- |
+| `pnpm typecheck` | Passed |
+| `pnpm lint` | Passed with zero warnings |
+| `pnpm test` | 10 files, 35 tests passed |
+| `pnpm build` | Production build passed; existing Monaco/main chunk-size warnings remain |
+| `cargo fmt --all -- --check` | Passed |
+| `cargo check --workspace` | Passed |
+| `cargo test --workspace` | 30 Rust tests passed, including new safe-process and Linux network-parser fixtures |
+| `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
+
+A controlled browser fixture rendered populated Process and Network detail states at 1440×900, a dark Process state at 1440×900, and Routes at 960×640. It exercised process/endpoint row selection, the `eth1` interface switch, tab switching, keyboard focus containment, Escape close, opener-focus restoration, and the minimum-size route table. The pages emitted zero errors; the 960×640 frame reported no document overflow and the dialog remained inside the 12 px viewport inset. Evidence screenshots were written to `test-results/monitor-details-processes-1440x900.png`, `test-results/monitor-details-processes-dark-1440x900.png`, `test-results/monitor-details-network-1440x900.png`, and `test-results/monitor-details-routes-960x640.png`.
+
+Still outside this pass: accuracy against live Linux and Windows hosts, macOS network-inspection support, native screen-reader behavior, and packaged desktop interaction. Unsupported remote platforms return an explicit unsupported state rather than fabricated values.
 

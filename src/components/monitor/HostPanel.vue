@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, nextTick, ref } from 'vue';
 import {
   Activity,
   CircleStop,
@@ -8,6 +8,7 @@ import {
   HardDrive,
   MemoryStick,
   RefreshCw,
+  Route,
   Server,
   Users,
 } from 'lucide-vue-next';
@@ -20,6 +21,7 @@ import { useProcessesStore } from '@/stores/processes';
 import { useSettingsStore } from '@/stores/settings';
 import { useMonitorPolling } from '@/composables/useMonitorPolling';
 import Sparkline from '@/components/ui/Sparkline.vue';
+import MonitorDetailsDialog from '@/components/monitor/MonitorDetailsDialog.vue';
 import type { ProcessEntry } from '@/types/contracts';
 
 const connections = useConnectionsStore();
@@ -30,6 +32,8 @@ const monitor = useMonitorStore();
 const processes = useProcessesStore();
 
 const processView = ref<'memory' | 'cpu' | 'command'>('memory');
+const detailsView = ref<'processes' | 'network' | 'routes' | null>(null);
+let detailsOpener: HTMLElement | null = null;
 const connected = computed(() => sessions.activeSession?.state === 'connected');
 
 useMonitorPolling({
@@ -199,6 +203,16 @@ async function terminateProcess(entry: ProcessEntry): Promise<void> {
     ui.notify(t('inspector.processSignalSent', { name: entry.name, pid: entry.pid }));
   }
 }
+
+function openDetails(view: 'processes' | 'network' | 'routes', event: MouseEvent): void {
+  detailsOpener = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  detailsView.value = view;
+}
+
+function closeDetails(): void {
+  detailsView.value = null;
+  void nextTick(() => detailsOpener?.focus());
+}
 </script>
 
 <template>
@@ -312,7 +326,7 @@ async function terminateProcess(entry: ProcessEntry): Promise<void> {
 
       <section class="host-panel-card">
         <header class="host-panel-card-heading">
-          <strong>{{ t('hostPanel.processes') }}</strong>
+          <button type="button" class="host-panel-heading-action" @click="openDetails('processes', $event)">{{ t('hostPanel.processes') }}</button>
           <div class="host-process-tabs" role="tablist" :aria-label="t('hostPanel.processes')">
             <button
               v-for="view in (['memory', 'cpu', 'command'] as const)"
@@ -354,7 +368,7 @@ async function terminateProcess(entry: ProcessEntry): Promise<void> {
 
       <section class="host-panel-card">
         <header class="host-panel-card-heading">
-          <strong>{{ t('hostPanel.network') }}</strong>
+          <button type="button" class="host-panel-heading-action" @click="openDetails('network', $event)">{{ t('hostPanel.network') }}</button>
           <span class="mono host-network-rates">
             ↑ {{ formatRate(monitor.snapshot?.networkTransmitBytesPerSecond) }}
             ↓ {{ formatRate(monitor.snapshot?.networkReceiveBytesPerSecond) }}
@@ -376,6 +390,14 @@ async function terminateProcess(entry: ProcessEntry): Promise<void> {
           />
         </div>
         <p v-if="monitor.history.length < 2" class="host-network-note">{{ t('hostPanel.networkPending') }}</p>
+      </section>
+
+      <section class="host-panel-card host-route-card">
+        <button type="button" class="host-panel-route-action" @click="openDetails('routes', $event)">
+          <Route :size="12" aria-hidden="true" />
+          <span>{{ t('hostPanel.routes') }}</span>
+          <small>{{ t('hostPanel.routesHint') }}</small>
+        </button>
       </section>
 
       <section v-if="mounts.length" class="host-panel-card host-mounts-card">
@@ -408,5 +430,9 @@ async function terminateProcess(entry: ProcessEntry): Promise<void> {
         </dl>
       </section>
     </template>
+
+    <Teleport to="body">
+      <MonitorDetailsDialog v-if="detailsView" :initial-view="detailsView" @close="closeDetails" />
+    </Teleport>
   </aside>
 </template>

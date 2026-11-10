@@ -135,6 +135,13 @@ Implemented slice:
 - Server rejection of remote forwarding is classified separately from SSH transport failure, returned as a non-retryable structured error, and localized with the relevant server policy settings.
 - Added a loopback SSH fixture covering host-key probe/mismatch rejection, password authentication, PTY input/output, remote-forward channel delivery/cancellation and server shutdown. It runs and passes on Windows since the `request_remote_forward` port-handling fix (a successful `tcpip-forward` reply for a specific port has an empty body, which russh maps to `Ok(0)`).
 
+Implemented monitoring-detail slice (2026-11-10):
+
+- Keyboard-accessible Processes, Network, and Routes entry points now open a bounded session-scoped monitoring workspace from the compact host panel.
+- The process snapshot includes safe owner, parent, and start metadata when available while continuing to exclude command arguments, environment variables, and working directories.
+- A typed read-only network snapshot exposes interfaces, sockets, and the operating-system routing table. Interface selection is presentation state only; probes use fixed commands, no user-supplied shell fragments, no privilege escalation, and no implicit traceroute or geolocation request.
+- Parser/unit coverage, TypeScript/Rust quality gates, and controlled-fixture layout inspection at 1440 x 900 and 960 x 640 pass. Live Linux and Windows accuracy and macOS support remain platform acceptance work rather than assumed coverage.
+
 Still open in this phase: verify tunnel lifecycle and live-host monitoring capability and metric accuracy across Linux, macOS and Windows after the development environment is configured.
 
 Deliverables:
@@ -200,6 +207,8 @@ Scope (implemented):
 
 - Shell restyle: top session tab bar, left host panel, terminal, command input bar, bottom dual-pane file browser; connections navigation, session details inspector, assistant panel and task drawer remain as collapsible surfaces. New visual tokens for both themes.
 - Floating command input bar with bounded in-memory history (never persisted or logged).
+- Terminal interaction hardening: Alt double-tap history access; per-entry insert/execute/copy/delete; selection and right-click menus for copy, copy-and-input, in-terminal search and local clear; accessible keyboard dismissal and clipboard feedback.
+- Full-screen TTY layout hardening: reject proportional terminal fonts at render time, retry after browser fonts settle, and synchronize the fitted xterm geometry to the PTY after pane, font and session changes.
 - OSC 7 terminal working-directory tracking with a follow-terminal option in the file browser.
 - Remote permission mode editing (chmod) with explicit octal review; numeric uid/gid ownership columns.
 - Monitor extension: load averages 1/5/15 and a bounded multi-mount disk list; network rate history chart in the host panel.

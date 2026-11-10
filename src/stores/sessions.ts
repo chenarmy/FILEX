@@ -685,6 +685,10 @@ export const useSessionsStore = defineStore('sessions', () => {
     commandHistory.value = [];
   }
 
+  function removeCommandHistory(command: string): void {
+    commandHistory.value = commandHistory.value.filter((item) => item !== command);
+  }
+
   async function closeSession(sessionId: string): Promise<void> {
     if (pendingConnectionSessionId.value === sessionId) await cancelPendingAttempt();
     const summary = summaries.value.find((item) => item.id === sessionId);
@@ -798,6 +802,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     commandHistory,
     recordCommandHistory,
     clearCommandHistory,
+    removeCommandHistory,
     profileForId,
     profileForSession,
     isQuickProfile,

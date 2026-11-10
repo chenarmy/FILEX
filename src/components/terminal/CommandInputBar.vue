@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue';
-import { ChevronDown, CornerDownLeft, History, Trash2, X } from 'lucide-vue-next';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { ChevronDown, Copy, CornerDownLeft, History, Play, Trash2, X } from 'lucide-vue-next';
+import { registerAltTap } from '@/domain/terminalInteractions';
 import { useSessionsStore } from '@/stores/sessions';
 import { useUiStore } from '@/stores/ui';
 import { t } from '@/i18n';
@@ -9,11 +10,13 @@ const sessions = useSessionsStore();
 const ui = useUiStore();
 const draft = ref('');
 const inputRef = ref<HTMLTextAreaElement | null>(null);
+const historyFilterRef = ref<HTMLInputElement | null>(null);
 const historyOpen = ref(false);
 const historyFilter = ref('');
 const historyBrowseIndex = ref<number | null>(null);
 const sending = ref(false);
 const encoder = new TextEncoder();
+let lastAltTapAt: number | null = null;
 
 const connected = computed(() => sessions.activeSession?.state === 'connected');
 const filteredHistory = computed(() => {
@@ -79,12 +82,32 @@ function onKeydown(event: KeyboardEvent): void {
 }
 
 function toggleHistory(): void {
-  historyOpen.value = !historyOpen.value;
+  if (historyOpen.value) {
+    historyOpen.value = false;
+    return;
+  }
+  openHistory();
+}
+
+function openHistory(): void {
+  historyOpen.value = true;
   historyFilter.value = '';
-  if (historyOpen.value) void nextTick(() => window.requestAnimationFrame(() => {
-    const panel = document.querySelector<HTMLInputElement>('.command-history-filter input');
-    panel?.focus();
+  void nextTick(() => window.requestAnimationFrame(() => {
+    historyFilterRef.value?.focus();
   }));
+}
+
+function handleWindowKeyup(event: KeyboardEvent): void {
+  const next = registerAltTap(lastAltTapAt, performance.now(), event);
+  lastAltTapAt = next.lastTapAt;
+  if (next.openHistory) openHistory();
+}
+
+function handleWindowKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Escape' || !historyOpen.value) return;
+  event.preventDefault();
+  historyOpen.value = false;
+  inputRef.value?.focus();
 }
 
 function useHistoryItem(command: string): void {
@@ -92,6 +115,35 @@ function useHistoryItem(command: string): void {
   historyOpen.value = false;
   historyBrowseIndex.value = null;
   inputRef.value?.focus();
+}
+
+async function executeHistoryItem(command: string): Promise<void> {
+  const sessionId = sessions.activeSessionId;
+  if (!sessionId || !connected.value || sending.value) return;
+  sending.value = true;
+  try {
+    const sent = await sessions.writeToSession(sessionId, encoder.encode(`${command}\r`));
+    if (!sent) return;
+    sessions.recordCommandHistory(command);
+    historyOpen.value = false;
+  } finally {
+    sending.value = false;
+  }
+}
+
+async function copyHistoryItem(command: string): Promise<void> {
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+    await navigator.clipboard.writeText(command);
+    ui.notify(t('commandBar.copied'));
+  } catch {
+    ui.notify(t('commandBar.copyFailed'));
+  }
+}
+
+function deleteHistoryItem(command: string): void {
+  sessions.removeCommandHistory(command);
+  if (sessions.commandHistory.length === 0) historyBrowseIndex.value = null;
 }
 
 async function clearHistory(): Promise<void> {
@@ -105,6 +157,15 @@ async function clearHistory(): Promise<void> {
   sessions.clearCommandHistory();
   historyBrowseIndex.value = null;
 }
+
+onMounted(() => {
+  window.addEventListener('keydown', handleWindowKeydown);
+  window.addEventListener('keyup', handleWindowKeyup);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleWindowKeydown);
+  window.removeEventListener('keyup', handleWindowKeyup);
+});
 </script>
 
 <template>
@@ -154,18 +215,23 @@ async function clearHistory(): Promise<void> {
       <header class="command-history-header">
         <label class="command-history-filter">
           {{ t('commandBar.historyFilter') }}
-          <input v-model="historyFilter" type="search" maxlength="120" :placeholder="t('commandBar.historyFilter')">
+          <input ref="historyFilterRef" v-model="historyFilter" type="search" maxlength="120" :placeholder="t('commandBar.historyFilter')">
         </label>
         <button type="button" class="icon-button" :aria-label="t('commandBar.clearHistory')" :title="t('commandBar.clearHistory')" @click="clearHistory"><Trash2 :size="12" /></button>
         <button type="button" class="icon-button" :aria-label="t('settings.close')" :title="t('settings.close')" @click="historyOpen = false"><X :size="12" /></button>
       </header>
       <div v-if="filteredHistory.length === 0" class="command-history-empty">{{ t('commandBar.historyEmpty') }}</div>
-      <ul v-else class="command-history-list" role="listbox" :aria-label="t('commandBar.history')">
+      <ul v-else class="command-history-list" :aria-label="t('commandBar.history')">
         <li v-for="item in filteredHistory" :key="item">
-          <button type="button" role="option" :aria-selected="false" class="mono" :title="item" @click="useHistoryItem(item)">
+          <button type="button" class="mono command-history-use" :title="t('commandBar.insertHistory')" @click="useHistoryItem(item)">
             <ChevronDown class="history-insert-glyph" :size="11" aria-hidden="true" />
             <span>{{ item }}</span>
           </button>
+          <div class="command-history-actions">
+            <button type="button" class="icon-button" :aria-label="t('commandBar.executeHistory')" :title="t('commandBar.executeHistory')" :disabled="!connected || sending" @click="executeHistoryItem(item)"><Play :size="11" /></button>
+            <button type="button" class="icon-button" :aria-label="t('commandBar.copyHistory')" :title="t('commandBar.copyHistory')" @click="copyHistoryItem(item)"><Copy :size="11" /></button>
+            <button type="button" class="icon-button danger" :aria-label="t('commandBar.deleteHistory')" :title="t('commandBar.deleteHistory')" @click="deleteHistoryItem(item)"><Trash2 :size="11" /></button>
+          </div>
         </li>
       </ul>
       <footer class="command-history-note">{{ t('commandBar.historyNote') }}</footer>

@@ -93,6 +93,17 @@ test('supports keyboard shortcuts and accessible pane resizing', async ({ page }
   expect(Number.parseInt(width, 10)).toBeGreaterThan(244);
 });
 
+test('exposes the local terminal context menu', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.locator('.terminal-pane-surface').click({ button: 'right', position: { x: 80, y: 70 } });
+  const menu = page.getByRole('menu', { name: '终端窗格' });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: '清空终端显示' })).toBeFocused();
+  await page.screenshot({ path: 'test-results/terminal-context-menu-1440.png' });
+  await menu.getByRole('menuitem', { name: '清空终端显示' }).click();
+  await expect(menu).toHaveCount(0);
+});
+
 test('opens the assistant and configures provider presets in the shared settings surface', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.evaluate(() => {

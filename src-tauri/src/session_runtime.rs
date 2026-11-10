@@ -15,8 +15,9 @@ use filex_contracts::{
     AppError, AuthenticationMethod, ConflictPolicy, ConnectionProfile, CreateLocalTunnelInput,
     DirectorySyncChangeKind, DirectorySyncEntryKind, DirectorySyncPreview,
     DirectorySyncPreviewEntry, FileChecksumComparison, HostKeyChallenge, HostTrustEvaluation,
-    MonitorState, ProcessEntry, ProcessPlatform, ProcessSnapshot, RemoteFileEntry, RemoteState,
-    RemoteTextPreview, RemoteTextSaveResult, SessionConnectionProgress, SessionState,
+    MonitorState, NetworkEndpoint, NetworkInterface, NetworkPlatform, NetworkSnapshot,
+    ProcessEntry, ProcessPlatform, ProcessSnapshot, RemoteFileEntry, RemoteState,
+    RemoteTextPreview, RemoteTextSaveResult, RouteEntry, SessionConnectionProgress, SessionState,
     SessionSummary, SystemMonitorSnapshot, TransferDirection, TransferTask, TunnelKind,
     TunnelState, TunnelSummary,
 };
@@ -2843,6 +2844,45 @@ impl SessionRuntime {
         self.save_process_snapshot(session_id, ProcessPlatform::Posix, parsed)
     }
 
+    pub async fn collect_network_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<NetworkSnapshot, AppError> {
+        let session = self.session_handle(session_id).await?;
+        let windows_output = session
+            .execute_bounded(
+                &windows_network_command(),
+                256 * 1024,
+                Duration::from_secs(12),
+            )
+            .await
+            .map_err(|error| ssh_error(&error))?;
+        let windows_text = String::from_utf8_lossy(&windows_output.stdout);
+        if windows_text
+            .lines()
+            .any(|line| line.trim() == "PLATFORM=WINDOWS")
+        {
+            if windows_output.exit_status.is_some_and(|status| status != 0) {
+                return Err(network_probe_error());
+            }
+            return parse_windows_network_output(&windows_text, now_ms()?);
+        }
+
+        let output = session
+            .execute_bounded(
+                NETWORK_INSPECTION_PROBE,
+                256 * 1024,
+                Duration::from_secs(12),
+            )
+            .await
+            .map_err(|error| ssh_error(&error))?;
+        if output.exit_status.is_some_and(|status| status != 0) {
+            return Err(network_probe_error());
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        parse_linux_network_output(&text, now_ms()?)
+    }
+
     pub async fn compare_file_checksums(
         &self,
         operation_id: &str,
@@ -4643,13 +4683,111 @@ if ($null -ne $networkBefore -and $null -ne $networkAfter -and $networkWatch.Ela
 }
 "#;
 
+const NETWORK_INSPECTION_PROBE: &str = r#"LC_ALL=C; export LC_ALL
+if [ ! -d /sys/class/net ] || ! command -v ip >/dev/null 2>&1 || ! command -v od >/dev/null 2>&1 || ! command -v tr >/dev/null 2>&1; then
+  printf 'PLATFORM=UNSUPPORTED\n'
+  exit 0
+fi
+hex() { printf '%s' "$1" | od -An -tx1 | tr -d ' \012'; }
+printf 'PLATFORM=LINUX\n'
+interface_count=0
+for directory in /sys/class/net/*; do
+  [ -e "$directory" ] || continue
+  interface_count=$((interface_count + 1))
+  [ "$interface_count" -le 128 ] || break
+  name=${directory##*/}
+  state=$(cat "$directory/operstate" 2>/dev/null | tr -d '\012\015')
+  mtu=$(cat "$directory/mtu" 2>/dev/null | tr -d '\012\015')
+  received=$(cat "$directory/statistics/rx_bytes" 2>/dev/null | tr -d '\012\015')
+  transmitted=$(cat "$directory/statistics/tx_bytes" 2>/dev/null | tr -d '\012\015')
+  addresses=$(ip -o addr show dev "$name" 2>/dev/null | awk '{print $4}' | paste -sd, -)
+  loopback=0
+  [ "$name" = lo ] && loopback=1
+  printf 'I\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(hex "$name")" "$(hex "$state")" "$(hex "$addresses")" "$mtu" "$received" "$transmitted" "$loopback"
+done
+if command -v ss >/dev/null 2>&1; then
+  ss -H -tunap 2>/dev/null | head -n 501 | while read -r protocol state recvq sendq local_endpoint remote_endpoint details; do
+    [ -n "$protocol" ] || continue
+    printf 'E\t%s\t%s\t%s\t%s\t%s\n' "$(hex "$protocol")" "$(hex "$state")" "$(hex "$local_endpoint")" "$(hex "$remote_endpoint")" "$(hex "$details")"
+  done
+fi
+ip -o route show table all 2>/dev/null | head -n 501 | while IFS= read -r route; do
+  [ -n "$route" ] || continue
+  set -- $route
+  destination=$1
+  gateway=''
+  interface=''
+  metric=''
+  protocol=''
+  previous=''
+  for token in "$@"; do
+    case "$previous" in
+      via) gateway=$token ;;
+      dev) interface=$token ;;
+      metric) metric=$token ;;
+      proto) protocol=$token ;;
+    esac
+    previous=$token
+  done
+  printf 'T\t%s\t%s\t%s\t%s\t%s\n' "$(hex "$destination")" "$(hex "$gateway")" "$(hex "$interface")" "$metric" "$(hex "$protocol")"
+done"#;
+
+const WINDOWS_NETWORK_SCRIPT: &str = r#"if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { exit 42 }
+Write-Output 'PLATFORM=WINDOWS'
+$ErrorActionPreference = 'Continue'
+function Encode-Text([string]$value) {
+  if ([string]::IsNullOrEmpty($value)) { return '' }
+  return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($value))
+}
+$adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Sort-Object -Property ifIndex | Select-Object -First 128)
+foreach ($adapter in $adapters) {
+  $addresses = @((Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue | ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)" })) -join ','
+  $received = ''
+  $transmitted = ''
+  try {
+    $statistics = Get-NetAdapterStatistics -InterfaceIndex $adapter.ifIndex -ErrorAction Stop
+    $received = [uint64]$statistics.ReceivedBytes
+    $transmitted = [uint64]$statistics.SentBytes
+  } catch {}
+  $loopback = if ($adapter.InterfaceDescription -match 'Loopback') { 1 } else { 0 }
+  Write-Output ("I`t{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}" -f (Encode-Text $adapter.Name), (Encode-Text ([string]$adapter.Status)), (Encode-Text $addresses), $adapter.MtuSize, $received, $transmitted, $loopback)
+}
+$processNames = @{}
+Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $processNames[[uint32]$_.Id] = [string]$_.ProcessName }
+function Process-Name([uint32]$processId) {
+  if ($processId -eq 0) { return '' }
+  if ($processNames.ContainsKey($processId)) { return $processNames[$processId] }
+  return ''
+}
+$tcp = @(Get-NetTCPConnection -ErrorAction SilentlyContinue | Select-Object -First 501)
+foreach ($endpoint in $tcp) {
+  Write-Output ("E`t{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}`t{7}" -f (Encode-Text 'tcp'), (Encode-Text ([string]$endpoint.State)), (Encode-Text $endpoint.LocalAddress), $endpoint.LocalPort, (Encode-Text $endpoint.RemoteAddress), $endpoint.RemotePort, $endpoint.OwningProcess, (Encode-Text (Process-Name $endpoint.OwningProcess)))
+}
+$remaining = [Math]::Max(0, 501 - $tcp.Count)
+if ($remaining -gt 0) {
+  $udp = @(Get-NetUDPEndpoint -ErrorAction SilentlyContinue | Select-Object -First $remaining)
+  foreach ($endpoint in $udp) {
+    Write-Output ("E`t{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}`t{7}" -f (Encode-Text 'udp'), (Encode-Text 'UNCONN'), (Encode-Text $endpoint.LocalAddress), $endpoint.LocalPort, '', '', $endpoint.OwningProcess, (Encode-Text (Process-Name $endpoint.OwningProcess)))
+  }
+}
+$routes = @(Get-NetRoute -ErrorAction SilentlyContinue | Sort-Object -Property RouteMetric | Select-Object -First 501)
+foreach ($route in $routes) {
+  $alias = ''
+  try { $alias = [string](Get-NetAdapter -InterfaceIndex $route.InterfaceIndex -IncludeHidden -ErrorAction Stop).Name } catch {}
+  Write-Output ("T`t{0}`t{1}`t{2}`t{3}`t{4}" -f (Encode-Text $route.DestinationPrefix), (Encode-Text $route.NextHop), (Encode-Text $alias), $route.RouteMetric, (Encode-Text ([string]$route.Protocol)))
+}"#;
+
+fn windows_network_command() -> String {
+    powershell_script_command(WINDOWS_NETWORK_SCRIPT)
+}
+
 const PROCESS_LIST_PROBE: &str = r#"LC_ALL=C; export LC_ALL
 if ! command -v ps >/dev/null 2>&1 || ! command -v od >/dev/null 2>&1 || ! command -v cut >/dev/null 2>&1 || ! command -v tr >/dev/null 2>&1 || ! command -v sort >/dev/null 2>&1 || ! command -v head >/dev/null 2>&1; then
   printf 'PLATFORM=UNSUPPORTED\n'
   exit 0
 fi
 printf 'PLATFORM=POSIX\n'
-ps -e -o pid=,pcpu=,time=,rss=,stat= 2>/dev/null | sort -k2,2nr | head -n 101 | while read -r pid cpu cpu_time rss state; do
+ps -e -o pid=,ppid=,user=,pcpu=,time=,rss=,stat= 2>/dev/null | sort -k4,4nr | head -n 101 | while read -r pid ppid user cpu cpu_time rss state; do
   case "$pid" in ''|*[!0-9]*) continue;; esac
   name=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '\012\015')
   name=${name##*/}
@@ -4657,8 +4795,9 @@ ps -e -o pid=,pcpu=,time=,rss=,stat= 2>/dev/null | sort -k2,2nr | head -n 101 | 
   start=$(ps -p "$pid" -o lstart= 2>/dev/null | tr -d '\012\015')
   [ -n "$name" ] || continue
   name_hex=$(printf '%s' "$name" | od -An -tx1 | tr -d ' \012')
+  user_hex=$(printf '%s' "$user" | cut -c 1-128 | od -An -tx1 | tr -d ' \012')
   start_hex=$(printf '%s' "$start" | od -An -tx1 | tr -d ' \012')
-  printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$cpu" "$cpu_time" "$rss" "$state" "$start_hex" "$name_hex"
+  printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$user_hex" "$cpu" "$cpu_time" "$rss" "$state" "$start_hex" "$name_hex"
 done"#;
 
 const WINDOWS_PROCESS_SCRIPT: &str = r#"if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { exit 42 }
@@ -4670,11 +4809,15 @@ foreach ($process in $items) {
   $cpu = ''
   $memory = ''
   $start = 0
+  $startMs = ''
+  $parent = ''
   try { if ($null -ne $process.CPU) { $cpu = ([double]$process.CPU).ToString('0.###', $culture) } } catch {}
   try { $memory = [int64]$process.WorkingSet64 } catch {}
   try { $start = [int64]($process.StartTime.ToUniversalTime().Ticks) } catch {}
+  try { $startMs = [DateTimeOffset]::new($process.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds() } catch {}
+  try { if ($null -ne $process.Parent) { $parent = [int64]$process.Parent.Id } } catch {}
   $name = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$process.ProcessName))
-  Write-Output ("P`t{0}`t{1}`t{2}`t{3}`t{4}" -f $process.Id, $cpu, $memory, $start, $name)
+  Write-Output ("P`t{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}" -f $process.Id, $parent, $cpu, $memory, $start, $startMs, $name)
 }"#;
 
 fn windows_process_command() -> String {
@@ -4734,14 +4877,14 @@ fn parse_posix_process_output(output: &str) -> Result<ParsedProcesses, AppError>
     let mut identities = HashMap::new();
     for record in records.into_iter().take(100) {
         let fields = record.split('\t').collect::<Vec<_>>();
-        if fields.len() != 8 {
+        if fields.len() != 10 {
             continue;
         }
         let Ok(pid) = fields[1].parse::<u32>() else {
             continue;
         };
-        let name_marker_hex = fields[7];
-        let start_marker_hex = fields[6];
+        let name_marker_hex = fields[9];
+        let start_marker_hex = fields[8];
         let name =
             decode_process_name(name_marker_hex, true).unwrap_or_else(|| "unknown".to_owned());
         let identity_valid = pid > 1
@@ -4758,17 +4901,20 @@ fn parse_posix_process_output(output: &str) -> Result<ParsedProcesses, AppError>
                 },
             );
         }
-        let memory_bytes = fields[4]
+        let memory_bytes = fields[6]
             .parse::<u64>()
             .ok()
             .and_then(|kib| kib.checked_mul(1024));
         processes.push(ProcessEntry {
             pid,
+            parent_pid: fields[2].parse::<u32>().ok(),
             name,
-            cpu_percent: parse_process_float(fields[2]),
-            cpu_time_seconds: parse_posix_cpu_time(fields[3]),
+            user: decode_process_name(fields[3], true),
+            cpu_percent: parse_process_float(fields[4]),
+            cpu_time_seconds: parse_posix_cpu_time(fields[5]),
             memory_bytes,
-            state: sanitize_process_state(fields[5]),
+            state: sanitize_process_state(fields[7]),
+            started_at_ms: None,
             can_terminate: identity_valid,
         });
     }
@@ -4792,25 +4938,28 @@ fn parse_windows_process_output(output: &str) -> Result<ParsedProcesses, AppErro
     let mut identities = HashMap::new();
     for record in records.into_iter().take(100) {
         let fields = record.split('\t').collect::<Vec<_>>();
-        if fields.len() != 6 {
+        if fields.len() != 8 {
             continue;
         }
         let Ok(pid) = fields[1].parse::<u32>() else {
             continue;
         };
-        let name = decode_process_name(fields[5], false).unwrap_or_else(|| "unknown".to_owned());
-        let start_time_ticks = fields[4].parse::<u64>().unwrap_or_default();
+        let name = decode_process_name(fields[7], false).unwrap_or_else(|| "unknown".to_owned());
+        let start_time_ticks = fields[5].parse::<u64>().unwrap_or_default();
         let identity_valid = pid > 1 && start_time_ticks > 0;
         if identity_valid {
             identities.insert(pid, ProcessIdentity::Windows { start_time_ticks });
         }
         processes.push(ProcessEntry {
             pid,
+            parent_pid: fields[2].parse::<u32>().ok(),
             name,
+            user: None,
             cpu_percent: None,
-            cpu_time_seconds: parse_process_float(fields[2]),
-            memory_bytes: fields[3].parse::<u64>().ok(),
+            cpu_time_seconds: parse_process_float(fields[3]),
+            memory_bytes: fields[4].parse::<u64>().ok(),
             state: None,
+            started_at_ms: fields[6].parse::<u64>().ok(),
             can_terminate: identity_valid,
         });
     }
@@ -4904,6 +5053,253 @@ fn decode_hex_marker(value: &str, maximum_length: usize) -> Option<Vec<u8>> {
             Some(((high << 4) | low) as u8)
         })
         .collect()
+}
+
+fn decode_probe_text(value: &str, hexadecimal: bool, maximum_bytes: usize) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+    let bytes = if hexadecimal {
+        decode_hex_marker(value, maximum_bytes.saturating_mul(2))?
+    } else {
+        BASE64_STANDARD.decode(value).ok()?
+    };
+    let mut decoded = String::new();
+    for character in String::from_utf8_lossy(&bytes).chars().take(maximum_bytes) {
+        if character.is_control() {
+            decoded.push(' ');
+        } else {
+            decoded.push(character);
+        }
+    }
+    let decoded = decoded.trim();
+    (!decoded.is_empty()).then(|| decoded.to_owned())
+}
+
+fn parse_linux_network_output(
+    output: &str,
+    collected_at_ms: u64,
+) -> Result<NetworkSnapshot, AppError> {
+    if output
+        .lines()
+        .any(|line| line.trim() == "PLATFORM=UNSUPPORTED")
+    {
+        return Ok(NetworkSnapshot {
+            state: MonitorState::Unsupported,
+            platform: None,
+            collected_at_ms,
+            interfaces: Vec::new(),
+            endpoints: Vec::new(),
+            routes: Vec::new(),
+            endpoints_truncated: false,
+            routes_truncated: false,
+        });
+    }
+    if !output.lines().any(|line| line.trim() == "PLATFORM=LINUX") {
+        return Err(network_probe_error());
+    }
+
+    let interfaces = output
+        .lines()
+        .filter(|line| line.starts_with("I\t"))
+        .take(128)
+        .filter_map(|line| parse_network_interface(line, true))
+        .collect::<Vec<_>>();
+    let endpoint_records = output
+        .lines()
+        .filter(|line| line.starts_with("E\t"))
+        .collect::<Vec<_>>();
+    let route_records = output
+        .lines()
+        .filter(|line| line.starts_with("T\t"))
+        .collect::<Vec<_>>();
+    Ok(NetworkSnapshot {
+        state: MonitorState::Live,
+        platform: Some(NetworkPlatform::Linux),
+        collected_at_ms,
+        interfaces,
+        endpoints: endpoint_records
+            .iter()
+            .take(500)
+            .filter_map(|line| parse_linux_endpoint(line))
+            .collect(),
+        routes: route_records
+            .iter()
+            .take(500)
+            .filter_map(|line| parse_route_entry(line, true))
+            .collect(),
+        endpoints_truncated: endpoint_records.len() > 500,
+        routes_truncated: route_records.len() > 500,
+    })
+}
+
+fn parse_windows_network_output(
+    output: &str,
+    collected_at_ms: u64,
+) -> Result<NetworkSnapshot, AppError> {
+    if !output.lines().any(|line| line.trim() == "PLATFORM=WINDOWS") {
+        return Err(network_probe_error());
+    }
+    let interfaces = output
+        .lines()
+        .filter(|line| line.starts_with("I\t"))
+        .take(128)
+        .filter_map(|line| parse_network_interface(line, false))
+        .collect::<Vec<_>>();
+    let endpoint_records = output
+        .lines()
+        .filter(|line| line.starts_with("E\t"))
+        .collect::<Vec<_>>();
+    let route_records = output
+        .lines()
+        .filter(|line| line.starts_with("T\t"))
+        .collect::<Vec<_>>();
+    Ok(NetworkSnapshot {
+        state: MonitorState::Live,
+        platform: Some(NetworkPlatform::Windows),
+        collected_at_ms,
+        interfaces,
+        endpoints: endpoint_records
+            .iter()
+            .take(500)
+            .filter_map(|line| parse_windows_endpoint(line))
+            .collect(),
+        routes: route_records
+            .iter()
+            .take(500)
+            .filter_map(|line| parse_route_entry(line, false))
+            .collect(),
+        endpoints_truncated: endpoint_records.len() > 500,
+        routes_truncated: route_records.len() > 500,
+    })
+}
+
+fn parse_network_interface(line: &str, hexadecimal: bool) -> Option<NetworkInterface> {
+    let fields = line.split('\t').collect::<Vec<_>>();
+    if fields.len() != 8 {
+        return None;
+    }
+    let name = decode_probe_text(fields[1], hexadecimal, 128)?;
+    let addresses = decode_probe_text(fields[3], hexadecimal, 1_024)
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .take(32)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(NetworkInterface {
+        name,
+        state: decode_probe_text(fields[2], hexadecimal, 64),
+        addresses,
+        mtu: fields[4].parse::<u64>().ok(),
+        received_bytes: fields[5].parse::<u64>().ok(),
+        transmitted_bytes: fields[6].parse::<u64>().ok(),
+        loopback: fields[7] == "1",
+    })
+}
+
+fn parse_linux_endpoint(line: &str) -> Option<NetworkEndpoint> {
+    let fields = line.split('\t').collect::<Vec<_>>();
+    if fields.len() != 6 {
+        return None;
+    }
+    let protocol = decode_probe_text(fields[1], true, 16)?;
+    let state = decode_probe_text(fields[2], true, 32);
+    let local = decode_probe_text(fields[3], true, 256)?;
+    let remote = decode_probe_text(fields[4], true, 256);
+    let details = decode_probe_text(fields[5], true, 512).unwrap_or_default();
+    let (local_address, local_port) = split_network_endpoint(&local);
+    let (remote_address, remote_port) = remote
+        .as_deref()
+        .map(split_network_endpoint)
+        .unwrap_or((String::new(), None));
+    let pid = details.split("pid=").nth(1).and_then(|value| {
+        value
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .ok()
+    });
+    let process_name = details
+        .split("((\"")
+        .nth(1)
+        .and_then(|value| value.split('\"').next())
+        .and_then(|value| sanitize_probe_label(value, 128));
+    Some(NetworkEndpoint {
+        protocol,
+        local_address,
+        local_port,
+        remote_address: (!remote_address.is_empty() && remote_address != "*")
+            .then_some(remote_address),
+        remote_port,
+        state,
+        pid,
+        process_name,
+    })
+}
+
+fn parse_windows_endpoint(line: &str) -> Option<NetworkEndpoint> {
+    let fields = line.split('\t').collect::<Vec<_>>();
+    if fields.len() != 9 {
+        return None;
+    }
+    Some(NetworkEndpoint {
+        protocol: decode_probe_text(fields[1], false, 16)?,
+        state: decode_probe_text(fields[2], false, 32),
+        local_address: decode_probe_text(fields[3], false, 256)?,
+        local_port: fields[4].parse::<u16>().ok(),
+        remote_address: decode_probe_text(fields[5], false, 256)
+            .filter(|value| value != "0.0.0.0" && value != "::" && value != "*"),
+        remote_port: fields[6].parse::<u16>().ok().filter(|port| *port > 0),
+        pid: fields[7].parse::<u32>().ok().filter(|pid| *pid > 0),
+        process_name: decode_probe_text(fields[8], false, 128),
+    })
+}
+
+fn parse_route_entry(line: &str, hexadecimal: bool) -> Option<RouteEntry> {
+    let fields = line.split('\t').collect::<Vec<_>>();
+    if fields.len() != 6 {
+        return None;
+    }
+    Some(RouteEntry {
+        destination: decode_probe_text(fields[1], hexadecimal, 256)?,
+        gateway: decode_probe_text(fields[2], hexadecimal, 256)
+            .filter(|value| value != "0.0.0.0" && value != "::"),
+        interface_name: decode_probe_text(fields[3], hexadecimal, 128),
+        metric: fields[4].parse::<u32>().ok(),
+        protocol: decode_probe_text(fields[5], hexadecimal, 64),
+    })
+}
+
+fn split_network_endpoint(value: &str) -> (String, Option<u16>) {
+    let Some((address, port)) = value.rsplit_once(':') else {
+        return (value.trim_matches(['[', ']']).to_owned(), None);
+    };
+    (
+        address.trim_matches(['[', ']']).to_owned(),
+        port.parse::<u16>().ok(),
+    )
+}
+
+fn sanitize_probe_label(value: &str, maximum_characters: usize) -> Option<String> {
+    let sanitized = value
+        .chars()
+        .take(maximum_characters)
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let sanitized = sanitized.trim();
+    (!sanitized.is_empty()).then(|| sanitized.to_owned())
 }
 
 async fn hash_reader<R>(
@@ -5393,6 +5789,16 @@ fn process_probe_error() -> AppError {
     AppError {
         code: "PROCESS_PROBE_FAILED".to_owned(),
         message_key: "errors.processProbeFailed".to_owned(),
+        retryable: true,
+        remote_state: RemoteState::Unchanged,
+        field: None,
+    }
+}
+
+fn network_probe_error() -> AppError {
+    AppError {
+        code: "NETWORK_PROBE_FAILED".to_owned(),
+        message_key: "errors.networkProbeFailed".to_owned(),
         retryable: true,
         remote_state: RemoteState::Unchanged,
         field: None,
@@ -7039,7 +7445,15 @@ mod tests {
         AuthenticationMethod, ConnectionProfile, ConnectionState, EnvironmentKind,
     };
 
-    use super::SessionRuntime;
+    use super::{SessionRuntime, parse_linux_network_output, parse_posix_process_output};
+
+    fn hex(value: &str) -> String {
+        value
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
 
     fn profile(
         authentication_method: AuthenticationMethod,
@@ -7096,5 +7510,54 @@ mod tests {
         let jump_error = SessionRuntime::validate_profile_support(&jump_host)
             .expect_err("unmapped ProxyJump must not fall back to a direct connection");
         assert_eq!(jump_error.code, "SSH_PROXY_JUMP_MAPPING_REQUIRED");
+    }
+
+    #[test]
+    fn parses_safe_process_detail_metadata() {
+        let output = format!(
+            "PLATFORM=POSIX\nP\t42\t1\t{}\t12.5\t00:01:02\t2048\tS\t{}\t{}\n",
+            hex("root"),
+            hex("Mon Nov 10 10:00:00 2026"),
+            hex("sshd"),
+        );
+
+        let parsed = parse_posix_process_output(&output).expect("process fixture should parse");
+        assert_eq!(parsed.processes.len(), 1);
+        let process = &parsed.processes[0];
+        assert_eq!(process.pid, 42);
+        assert_eq!(process.parent_pid, Some(1));
+        assert_eq!(process.user.as_deref(), Some("root"));
+        assert_eq!(process.name, "sshd");
+        assert_eq!(process.memory_bytes, Some(2 * 1024 * 1024));
+        assert!(process.can_terminate);
+    }
+
+    #[test]
+    fn parses_bounded_linux_interfaces_endpoints_and_routes() {
+        let output = format!(
+            "PLATFORM=LINUX\nI\t{}\t{}\t{}\t1500\t1000\t2000\t0\nE\t{}\t{}\t{}\t{}\t{}\nT\t{}\t{}\t{}\t100\t{}\n",
+            hex("eth0"),
+            hex("up"),
+            hex("10.0.0.2/24,fe80::1/64"),
+            hex("tcp"),
+            hex("LISTEN"),
+            hex("0.0.0.0:22"),
+            hex("*:*"),
+            hex("users:((\"sshd\",pid=123,fd=3))"),
+            hex("default"),
+            hex("10.0.0.1"),
+            hex("eth0"),
+            hex("dhcp"),
+        );
+
+        let snapshot =
+            parse_linux_network_output(&output, 1234).expect("network fixture should parse");
+        assert_eq!(snapshot.interfaces[0].name, "eth0");
+        assert_eq!(snapshot.interfaces[0].addresses.len(), 2);
+        assert_eq!(snapshot.endpoints[0].local_port, Some(22));
+        assert_eq!(snapshot.endpoints[0].pid, Some(123));
+        assert_eq!(snapshot.endpoints[0].process_name.as_deref(), Some("sshd"));
+        assert_eq!(snapshot.routes[0].destination, "default");
+        assert_eq!(snapshot.routes[0].gateway.as_deref(), Some("10.0.0.1"));
     }
 }

@@ -1,5 +1,6 @@
 import type { SafeSettings } from '@/types/contracts';
 import { normalizeTerminalTheme } from '@/domain/terminalThemes';
+import { DEFAULT_TERMINAL_FONT_FAMILY } from '@/domain/terminalInteractions';
 import { DEFAULT_KEYBOARD_SHORTCUTS, normalizeKeyboardShortcuts } from '@/utils/keyboardShortcuts';
 
 const storageKey = 'filex.safe-settings.v1';
@@ -11,7 +12,7 @@ export const defaultSafeSettings: SafeSettings = {
   locale: 'zh-CN',
   uiFontFamily: defaultUiFontFamily,
   uiFontSize: 14,
-  terminalFontFamily: 'JetBrains Mono, Consolas, monospace',
+  terminalFontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
   terminalFontSize: 13,
   terminalTheme: 'match',
   terminalEncoding: 'utf-8',

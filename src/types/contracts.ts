@@ -371,11 +371,14 @@ export type ProcessPlatform = 'posix' | 'windows';
 
 export interface ProcessEntry {
   pid: number;
+  parentPid?: number | null;
   name: string;
+  user?: string | null;
   cpuPercent: number | null;
   cpuTimeSeconds: number | null;
   memoryBytes: number | null;
   state: string | null;
+  startedAtMs?: number | null;
   canTerminate: boolean;
 }
 
@@ -386,6 +389,48 @@ export interface ProcessSnapshot {
   snapshotId: string | null;
   processes: ProcessEntry[];
   truncated: boolean;
+}
+
+export type NetworkPlatform = 'linux' | 'windows';
+
+export interface NetworkInterface {
+  name: string;
+  state: string | null;
+  addresses: string[];
+  mtu: number | null;
+  receivedBytes: number | null;
+  transmittedBytes: number | null;
+  loopback: boolean;
+}
+
+export interface NetworkEndpoint {
+  protocol: string;
+  localAddress: string;
+  localPort: number | null;
+  remoteAddress: string | null;
+  remotePort: number | null;
+  state: string | null;
+  pid: number | null;
+  processName: string | null;
+}
+
+export interface RouteEntry {
+  destination: string;
+  gateway: string | null;
+  interfaceName: string | null;
+  metric: number | null;
+  protocol: string | null;
+}
+
+export interface NetworkSnapshot {
+  state: MonitorState;
+  platform: NetworkPlatform | null;
+  collectedAtMs: number;
+  interfaces: NetworkInterface[];
+  endpoints: NetworkEndpoint[];
+  routes: RouteEntry[];
+  endpointsTruncated: boolean;
+  routesTruncated: boolean;
 }
 
 export interface FileChecksumComparison {

@@ -22,12 +22,12 @@ use filex_contracts::{
     CreateTunnelRuleInput, CredentialStoreStatus, DirectorySyncPreview, EnvironmentKind,
     FileChecksumComparison, HostKeyChallenge, HostTrustEvaluation, HostTrustRecord,
     ImportKnownHostsInput, ImportKnownHostsResult, KnownHostsImportPreview, LocalDirectoryListing,
-    LocalFileEntry, LocalTextPreview, LocalTextSaveResult, MaintenanceArtifact, OperationResult,
-    ProcessSnapshot, QuickConnectInput, RecordHostTrustInput, RemoteFileEntry, RemoteState,
-    RemoteTextPreview, RemoteTextSaveResult, RuntimePaths, SafeSettings, SaveCommandSnippetInput,
-    SessionConnectionProgress, SessionSummary, SshConfigImportPreview, SystemMonitorSnapshot,
-    TransferState, TransferTask, TunnelRule, TunnelSummary, UpdateConnectionProfileInput,
-    UpdateStatus, UpdateTunnelRuleInput,
+    LocalFileEntry, LocalTextPreview, LocalTextSaveResult, MaintenanceArtifact, NetworkSnapshot,
+    OperationResult, ProcessSnapshot, QuickConnectInput, RecordHostTrustInput, RemoteFileEntry,
+    RemoteState, RemoteTextPreview, RemoteTextSaveResult, RuntimePaths, SafeSettings,
+    SaveCommandSnippetInput, SessionConnectionProgress, SessionSummary, SshConfigImportPreview,
+    SystemMonitorSnapshot, TransferState, TransferTask, TunnelRule, TunnelSummary,
+    UpdateConnectionProfileInput, UpdateStatus, UpdateTunnelRuleInput,
 };
 use filex_core::{
     HostTrustService, ProfileService, SettingsService, TransferService, TunnelRuleService,
@@ -4723,6 +4723,17 @@ async fn collect_process_snapshot(
 }
 
 #[tauri::command]
+async fn collect_network_snapshot(
+    session_id: String,
+    sessions: State<'_, SessionRuntime>,
+) -> Result<OperationResult<NetworkSnapshot>, ()> {
+    Ok(match sessions.collect_network_snapshot(&session_id).await {
+        Ok(snapshot) => OperationResult::success(snapshot),
+        Err(error) => OperationResult::failure(error),
+    })
+}
+
+#[tauri::command]
 async fn compare_file_checksums(
     operation_id: String,
     session_id: String,
@@ -5370,6 +5381,7 @@ pub fn run() {
             copy_remote_entry,
             collect_system_monitor,
             collect_process_snapshot,
+            collect_network_snapshot,
             terminate_remote_process,
             compare_file_checksums,
             cancel_file_checksum,

@@ -686,7 +686,7 @@ pub struct LocalTextSaveResult {
     pub revision: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MonitorState {
     Live,
@@ -741,11 +741,17 @@ pub enum ProcessPlatform {
 #[serde(rename_all = "camelCase")]
 pub struct ProcessEntry {
     pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_pid: Option<u32>,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
     pub cpu_percent: Option<f64>,
     pub cpu_time_seconds: Option<f64>,
     pub memory_bytes: Option<u64>,
     pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
     pub can_terminate: bool,
 }
 
@@ -758,6 +764,61 @@ pub struct ProcessSnapshot {
     pub snapshot_id: Option<String>,
     pub processes: Vec<ProcessEntry>,
     pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkPlatform {
+    Linux,
+    Windows,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkInterface {
+    pub name: String,
+    pub state: Option<String>,
+    pub addresses: Vec<String>,
+    pub mtu: Option<u64>,
+    pub received_bytes: Option<u64>,
+    pub transmitted_bytes: Option<u64>,
+    pub loopback: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkEndpoint {
+    pub protocol: String,
+    pub local_address: String,
+    pub local_port: Option<u16>,
+    pub remote_address: Option<String>,
+    pub remote_port: Option<u16>,
+    pub state: Option<String>,
+    pub pid: Option<u32>,
+    pub process_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteEntry {
+    pub destination: String,
+    pub gateway: Option<String>,
+    pub interface_name: Option<String>,
+    pub metric: Option<u32>,
+    pub protocol: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkSnapshot {
+    pub state: MonitorState,
+    pub platform: Option<NetworkPlatform>,
+    pub collected_at_ms: u64,
+    pub interfaces: Vec<NetworkInterface>,
+    pub endpoints: Vec<NetworkEndpoint>,
+    pub routes: Vec<RouteEntry>,
+    pub endpoints_truncated: bool,
+    pub routes_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
