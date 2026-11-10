@@ -21,8 +21,9 @@ Remote evidence:
 | GitHub verification/publish job | Passed the asset, signature, manifest and version gates |
 | Published release | `draft=false`, `prerelease=false`, published at `2026-11-09T16:13:56Z` |
 | Published assets | 12 assets with canonical `https://github.com/chenarmy/FILEX/releases/download/v0.1.0/` URLs |
+| CNB mirror workflow | [Run 42825338121](https://github.com/chenarmy/FILEX/actions/runs/42825338121) pushed the tag, published 12 assets and passed the mirrored feed verification |
 
-The workflow's final CNB mirror job failed independently of the successful GitHub publication. The `CNB` Actions Secret contained multiline RSA private-key material, but the mirror workflow requires a single-line CNB access token with permission to push the release tag and manage releases. Replace that secret through the repository settings before rerunning `.github/workflows/mirror-cnb-release.yml`; do not store or paste the token into source, logs or documentation. CNB feed availability and packaged install/update behavior on each platform remain pending and are not claimed by this entry.
+The first CNB mirror attempts exposed invalid credential material and then a token without the required `repo-code:rw` scope. After the repository secret was replaced with a correctly scoped CNB access token, the dedicated mirror workflow pushed `v0.1.0`, uploaded the same 12 release assets, rewrote the updater URLs to the CNB release, and verified the mirrored manifest, detached signatures and signed version. Packaged install/update behavior on each platform remains pending and is not claimed by this entry.
 
 ## 2026-11-08 — release and updater delivery pipeline (implementation, publication pending)
 
@@ -54,7 +55,7 @@ Local evidence:
 | Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` passed |
 | Workflow syntax | `actionlint` passed for CI, release and both CNB mirror workflows |
 
-This entry records the implementation-time state. The GitHub publication and key-pair checks were completed later and are recorded in the 2026-11-10 entry above. CNB mirroring and packaged cross-platform update installation remain pending.
+This entry records the implementation-time state. The GitHub publication, key-pair checks and CNB mirroring were completed later and are recorded in the 2026-11-10 entry above. Packaged cross-platform update installation remains pending.
 
 ## 2026-11-08 — AI provider settings and conversation workbench
 
