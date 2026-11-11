@@ -54,14 +54,35 @@ jobs:
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
-          # The hosted runner's azure.archive mirror has intermittently stalled
-          # on individual package downloads. Pin the stable Ubuntu archive and
-          # bound both update and install so a dead mirror fails visibly.
-          sudo sh -c 'printf "%s\n" "http://archive.ubuntu.com/ubuntu" > /etc/apt/apt-mirrors.txt'
-          sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          # The hosted runner's default Azure mirror has intermittently stalled
+          # on individual package downloads. Probe trusted mirrors over HTTPS
+          # and use the first reachable one; the signed package index remains
+          # authoritative regardless of the selected mirror.
+          set -euo pipefail
+          mirrors=(
+            "https://azure.archive.ubuntu.com/ubuntu"
+            "https://mirrors.edge.kernel.org/ubuntu"
+            "http://archive.ubuntu.com/ubuntu"
+          )
+          selected=""
+          for mirror in "${mirrors[@]}"; do
+            if timeout 20 curl --fail --silent --show-error --location \
+              --head "$mirror/dists/jammy/Release" >/dev/null; then
+              selected="$mirror"
+              break
+            fi
+          done
+          test -n "$selected"
+          printf '%s\n' "$selected" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          sudo timeout 300 apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            update
           sudo env DEBIAN_FRONTEND=noninteractive timeout 600 apt-get \
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
             install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
