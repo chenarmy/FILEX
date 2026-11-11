@@ -160,6 +160,10 @@ pub struct SafeSettings {
     pub host_panel_width: u16,
     #[serde(default = "default_file_browser_height")]
     pub file_browser_height: u16,
+    #[serde(default = "default_text_editor_preference")]
+    pub text_editor_preference: String,
+    #[serde(default)]
+    pub external_editor_path: Option<String>,
     pub terminal_logging: bool,
     pub backup_schedule: String,
     pub update_channel: String,
@@ -189,6 +193,10 @@ fn default_assistant_pane_width() -> u16 {
 
 fn default_file_browser_height() -> u16 {
     260
+}
+
+fn default_text_editor_preference() -> String {
+    "internal".to_owned()
 }
 
 fn default_terminal_theme() -> String {
@@ -629,6 +637,30 @@ pub struct RemoteFileEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemotePermissionScope {
+    All,
+    Files,
+    Directories,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateRemotePermissionsInput {
+    pub path: String,
+    pub mode: u32,
+    pub recursive: bool,
+    pub scope: RemotePermissionScope,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePermissionUpdateResult {
+    pub updated_count: u32,
+    pub skipped_symlink_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalFileEntry {
     pub name: String,
@@ -666,6 +698,37 @@ pub struct RemoteTextSaveResult {
     pub bytes: u32,
     pub revision: String,
     pub recovery_copy_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalEditorState {
+    Watching,
+    Synced,
+    Conflict,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalEditorSession {
+    pub id: String,
+    pub session_id: String,
+    pub remote_path: String,
+    pub local_path: String,
+    pub local_revision: String,
+    pub remote_revision: String,
+    pub bytes: u64,
+    pub state: ExternalEditorState,
+    pub last_synced_at_ms: Option<u64>,
+    pub error: Option<AppError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalEditorSyncResult {
+    pub session: ExternalEditorSession,
+    pub uploaded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

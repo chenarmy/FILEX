@@ -82,15 +82,25 @@ test('supports keyboard shortcuts and accessible pane resizing', async ({ page }
   await page.getByPlaceholder('筛选连接').blur();
 
   await page.keyboard.press('Control+J');
-  await expect(page.locator('.task-drawer')).toHaveCount(0);
-  await page.keyboard.press('Control+J');
   await expect(page.locator('.task-drawer')).toBeVisible();
+  await page.keyboard.press('Control+J');
+  await expect(page.locator('.task-drawer')).toHaveCount(0);
 
   const separator = page.getByRole('separator', { name: 'Resize connections pane' });
   await separator.focus();
   await page.keyboard.press('ArrowRight');
   const width = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--connections-pane-width'));
   expect(Number.parseInt(width, 10)).toBeGreaterThan(244);
+});
+
+test('suppresses the WebView native context menu', async ({ page }) => {
+  const defaultPrevented = await page.evaluate(() => {
+    const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+    document.body.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+
+  expect(defaultPrevented).toBe(true);
 });
 
 test('exposes the local terminal context menu', async ({ page }) => {
@@ -409,6 +419,215 @@ test('allows SSH Agent profiles through preflight and reaches the desktop runtim
   await expect(page.getByRole('dialog')).toHaveCount(0);
 });
 
+test('persists the file editing mode and exposes the external editor tool picker', async ({ page }) => {
+  await page.getByRole('button', { name: '设置', exact: true }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByRole('button', { name: '连接', exact: true }).click();
+  await expect(dialog.getByText('文件编辑方式')).toBeVisible();
+  await dialog.locator('.setting-row', { hasText: '文件编辑方式' }).locator('select').selectOption('external');
+  await expect(dialog.getByRole('button', { name: '选择工具' })).toBeVisible();
+  await dialog.getByRole('button', { name: '应用并保存' }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(async () => page.evaluate(() => {
+    const settings = JSON.parse(localStorage.getItem('filex.safe-settings.v1') ?? '{}') as {
+      textEditorPreference?: string;
+    };
+    return settings.textEditorPreference;
+  })).toBe('external');
+});
+
+test('shows successful quick connections in both connection and recent views', async ({ page }) => {
+  await page.waitForFunction(() => Boolean(
+    (document.querySelector('#app') as HTMLElement & { __vue_app__?: unknown }).__vue_app__,
+  ));
+  await page.evaluate(() => {
+    type Store = Record<string, unknown>;
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Store> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__
+      ?.config.globalProperties.$pinia;
+    const connections = pinia?._s.get('connections');
+    const sessions = pinia?._s.get('sessions');
+    if (!connections || !sessions) throw new Error('Connection stores unavailable');
+    const now = new Date().toISOString();
+    const quickProfile = {
+      id: 'quick-profile-live',
+      name: 'root@10.24.1.42',
+      group: '',
+      host: '10.24.1.42',
+      port: 22,
+      username: 'root',
+      environment: 'development',
+      favorite: false,
+      tags: [],
+      authenticationMethod: 'password',
+      identityFile: null,
+      proxyJump: null,
+      proxyJumpProfileIds: [],
+      credentialRef: null,
+      state: 'connected',
+      latencyMs: null,
+      lastUsedAt: now,
+    };
+    connections.profiles = [];
+    connections.activeProfileId = quickProfile.id;
+    sessions.quickProfiles = { [quickProfile.id]: quickProfile };
+    sessions.summaries = [{
+      id: 'quick-session-live',
+      generation: 1,
+      profileId: quickProfile.id,
+      state: 'connected',
+      host: quickProfile.host,
+      port: quickProfile.port,
+      username: quickProfile.username,
+      lastError: null,
+    }];
+    sessions.activeSessionId = 'quick-session-live';
+  });
+
+  await expect(page.getByText('临时连接', { exact: true })).toBeVisible();
+  const quickRow = page.locator('.connections-pane .connection-row', { hasText: 'root@10.24.1.42' });
+  await expect(quickRow).toBeVisible();
+  await quickRow.click();
+  await expect(page.locator('.connections-pane .state-dot.connected').first()).toBeVisible();
+
+  await page.locator('.nav-mode').getByRole('button', { name: '最近', exact: true }).click();
+  await expect(page.locator('.recent-row', { hasText: 'root@10.24.1.42' })).toBeVisible();
+  await expect(page.locator('.recent-row')).toContainText('最近连接：');
+  await expect(page.getByText('还没有成功连接过的主机。')).toHaveCount(0);
+  await page.screenshot({ path: 'test-results/quick-connection-recent-1440.png' });
+});
+
+test('exposes the keyboard-accessible file menu and recursive permission controls', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => Boolean(
+    (document.querySelector('#app') as HTMLElement & { __vue_app__?: unknown }).__vue_app__,
+  ));
+  await page.evaluate(() => {
+    type Store = Record<string, unknown>;
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Store> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__
+      ?.config.globalProperties.$pinia;
+    const sessions = pinia?._s.get('sessions');
+    const sftp = pinia?._s.get('sftp');
+    const settings = pinia?._s.get('settings');
+    const localFiles = pinia?._s.get('local-files');
+    if (!sessions || !sftp || !settings || !localFiles) {
+      throw new Error('File browser fixture stores were not initialized');
+    }
+    const session = {
+      id: 'session-file-menu',
+      generation: 1,
+      profileId: 'profile-file-menu',
+      state: 'connected',
+      host: '10.24.1.42',
+      port: 22,
+      username: 'operator',
+      lastError: null,
+    };
+    sessions.summaries = [session];
+    sessions.activeSessionId = session.id;
+    sessions.isQuickProfile = () => false;
+    sftp.load = () => Promise.resolve();
+    sftp.sessionId = session.id;
+    sftp.path = '/srv/releases';
+    sftp.entries = [
+      {
+        name: 'current',
+        path: '/srv/releases/current',
+        isDirectory: true,
+        isSymlink: false,
+        size: null,
+        modifiedAtMs: Date.now(),
+        permissionsMode: 0o755,
+        uid: 0,
+        gid: 0,
+      },
+      {
+        name: 'release.env',
+        path: '/srv/releases/release.env',
+        isDirectory: false,
+        isSymlink: false,
+        size: 128,
+        modifiedAtMs: Date.now(),
+        permissionsMode: 0o640,
+        uid: 0,
+        gid: 0,
+      },
+    ];
+    Object.assign(settings.value as Record<string, unknown>, {
+      fileBrowserOpen: true,
+      focusMode: false,
+      dualPaneSftp: false,
+      taskDrawerOpen: false,
+      locale: 'zh-CN',
+      fileBrowserHeight: 260,
+      textEditorPreference: 'internal',
+      externalEditorPath: 'C:\\Tools\\editor.exe',
+    });
+  });
+
+  const resize = page.getByRole('separator', { name: 'Resize file browser' });
+  await resize.focus();
+  for (let index = 0; index < 30; index += 1) await resize.press('ArrowUp');
+  const browserHeight = await page.locator('.file-browser-panel-slot').evaluate((element) => {
+    return element.getBoundingClientRect().height;
+  });
+  expect(browserHeight).toBeGreaterThan(480);
+
+  const folder = page.locator('.file-row', { hasText: 'current' });
+  await folder.click({ button: 'right' });
+  const menu = page.getByRole('menu', { name: '文件操作' });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: '刷新' })).toBeFocused();
+  for (const label of ['上传文件…', '上传文件夹…', '快速删除（递归）', '文件权限…']) {
+    await expect(menu.getByRole('menuitem', { name: label })).toBeVisible();
+  }
+  await page.screenshot({ path: 'test-results/file-context-menu-1440.png' });
+
+  await menu.getByRole('menuitem', { name: '文件权限…' }).click();
+  const permissionDialog = page.getByRole('dialog', { name: '修改权限' });
+  await expect(permissionDialog).toBeVisible();
+  await permissionDialog.getByLabel('应用到子目录内容').check();
+  await expect(permissionDialog.getByRole('radiogroup', { name: '应用范围' })).toBeVisible();
+  await permissionDialog.getByRole('radio', { name: '仅文件', exact: true }).check();
+  await expect(permissionDialog.getByText('递归修改会先检查最多 5,000 项和 16 层目录；符号链接不会被跟随。')).toBeVisible();
+  await page.screenshot({ path: 'test-results/file-context-permission-1440.png' });
+  await permissionDialog.getByRole('button', { name: '取消' }).click();
+
+  const file = page.locator('.file-row', { hasText: 'release.env' });
+  await file.focus();
+  await page.keyboard.press('Shift+F10');
+  await expect(menu).toBeVisible();
+  await menu.getByRole('menuitem', { name: '选择文本编辑器' }).hover();
+  await menu.getByRole('menuitemradio', { name: '外部编辑器' }).click();
+  await expect.poll(async () => page.evaluate(() => {
+    const settings = JSON.parse(localStorage.getItem('filex.safe-settings.v1') ?? '{}') as {
+      textEditorPreference?: string;
+    };
+    return settings.textEditorPreference;
+  })).toBe('external');
+
+  await page.setViewportSize({ width: 960, height: 640 });
+  await file.click({ button: 'right' });
+  const compactMenu = page.getByRole('menu', { name: '文件操作' });
+  await expect(compactMenu).toBeVisible();
+  const menuBox = await compactMenu.boundingBox();
+  expect(menuBox).not.toBeNull();
+  expect(menuBox!.x).toBeGreaterThanOrEqual(0);
+  expect(menuBox!.y).toBeGreaterThanOrEqual(0);
+  expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(960);
+  expect(menuBox!.y + menuBox!.height).toBeLessThanOrEqual(640);
+  await page.screenshot({ path: 'test-results/file-context-menu-960x640.png' });
+});
+
 test('inspects complete session-scoped process, network, interface and route views', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.waitForFunction(() => Boolean(
@@ -699,4 +918,131 @@ test('inspects complete session-scoped process, network, interface and route vie
     if (sessions) sessions.activeSessionId = 'session-beta';
   });
   await expect(dialog).toHaveCount(0);
+});
+
+test('surfaces an automatic signed update and preserves a skipped version', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => Boolean(
+    (document.querySelector('#app') as HTMLElement & { __vue_app__?: unknown }).__vue_app__,
+  ));
+  await page.evaluate(() => {
+    const root = document.querySelector('#app') as HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const pinia = root.__vue_app__?.config.globalProperties.$pinia;
+    const updates = pinia?._s.get('updates');
+    const settings = pinia?._s.get('settings');
+    if (!updates || !settings) throw new Error('Update fixture stores were not initialized');
+
+    updates.check = () => Promise.resolve(true);
+    updates.initialize = () => Promise.resolve();
+    updates.status = {
+      currentVersion: '0.1.0',
+      channel: 'stable',
+      configured: true,
+      availableVersion: '0.1.1',
+      publishedAt: '2026-11-10T16:24:19Z',
+      releaseNotes: '### Added\r\n\r\n- Session-scoped process, network and route inspection.\r\n\r\n### Fixed\r\n\r\n- Signed automatic update discovery.\r\n',
+    };
+    updates.phase = 'available';
+    updates.dialogOpen = false;
+    updates.skippedVersion = null;
+    Object.assign(settings.value as Record<string, unknown>, {
+      theme: 'dark',
+      locale: 'zh-CN',
+    });
+    const apply = settings.apply;
+    if (typeof apply === 'function') apply.call(settings);
+  });
+
+  const updateButton = page.getByRole('button', { name: 'FILEX 0.1.1 可更新' });
+  await expect(updateButton).toBeVisible();
+  await updateButton.click();
+
+  let dialog = page.getByRole('dialog', { name: '发现新版本' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('button', { name: '关闭更新提示' })).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(dialog.getByRole('button', { name: '下载并安装' })).toBeFocused();
+  await expect(dialog.getByText('FILEX 0.1.1 已发布，当前版本为 0.1.0。')).toBeVisible();
+  await expect(dialog.getByText('Session-scoped process, network and route inspection.')).toBeVisible();
+  await page.screenshot({ path: 'test-results/update-available-dark-1440.png' });
+
+  await dialog.getByRole('button', { name: '稍后' }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(updateButton).toBeFocused();
+
+  await page.setViewportSize({ width: 960, height: 640 });
+  await page.evaluate(() => {
+    const root = document.querySelector('#app') as HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const pinia = root.__vue_app__?.config.globalProperties.$pinia;
+    const updates = pinia?._s.get('updates');
+    const settings = pinia?._s.get('settings');
+    if (!updates || !settings) throw new Error('Update fixture stores were not initialized');
+    updates.dialogOpen = true;
+    updates.phase = 'downloading';
+    updates.downloadedBytes = 50;
+    updates.contentLength = 100;
+    Object.assign(settings.value as Record<string, unknown>, {
+      theme: 'light',
+      locale: 'zh-CN',
+      uiFontSize: 20,
+    });
+    const apply = settings.apply;
+    if (typeof apply === 'function') apply.call(settings);
+  });
+
+  dialog = page.getByRole('dialog', { name: '发现新版本' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('签名发布', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('正在下载：50%')).toBeVisible();
+  const box = await dialog.boundingBox();
+  const versionBox = await dialog.locator('.update-version-summary').boundingBox();
+  const notesHeadingBox = await dialog.locator('.update-section-heading').boundingBox();
+  const notesBox = await dialog.locator('.update-notes-scroll').boundingBox();
+  const footerBox = await dialog.locator('.update-dialog-footer').boundingBox();
+  const secondaryActionsBox = await dialog.locator('.update-footer-secondary').boundingBox();
+  const primaryActionsBox = await dialog.locator('.update-footer-primary').boundingBox();
+  expect(box).not.toBeNull();
+  expect(versionBox).not.toBeNull();
+  expect(notesHeadingBox).not.toBeNull();
+  expect(notesBox).not.toBeNull();
+  expect(footerBox).not.toBeNull();
+  expect(secondaryActionsBox).not.toBeNull();
+  expect(primaryActionsBox).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(960);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(640);
+  expect(Math.abs(versionBox!.x - notesBox!.x)).toBeLessThanOrEqual(1);
+  expect(notesHeadingBox!.y - (versionBox!.y + versionBox!.height)).toBeGreaterThanOrEqual(12);
+  expect(notesBox!.y - (notesHeadingBox!.y + notesHeadingBox!.height)).toBeGreaterThanOrEqual(6);
+  expect(footerBox!.y).toBeGreaterThan(notesBox!.y + notesBox!.height);
+  expect(secondaryActionsBox!.x).toBeGreaterThan(footerBox!.x);
+  expect(primaryActionsBox!.x + primaryActionsBox!.width).toBeLessThan(footerBox!.x + footerBox!.width);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: 'test-results/update-download-light-960-font20.png' });
+
+  await page.evaluate(() => {
+    const root = document.querySelector('#app') as HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const updates = root.__vue_app__?.config.globalProperties.$pinia?._s.get('updates');
+    if (updates) {
+      updates.phase = 'available';
+      updates.downloadedBytes = 0;
+      updates.contentLength = null;
+    }
+  });
+  await dialog.getByRole('button', { name: '跳过此版本' }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(updateButton).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('filex.update-preferences.v1'))).toContain('"skippedVersion":"0.1.1"');
 });

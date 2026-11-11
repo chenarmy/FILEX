@@ -98,6 +98,19 @@ export const useSessionsStore = defineStore('sessions', () => {
     quickProfiles.value = next;
   }
 
+  function markQuickProfileUsed(profileId: string): void {
+    const profile = quickProfiles.value[profileId];
+    if (!profile) return;
+    quickProfiles.value = {
+      ...quickProfiles.value,
+      [profileId]: {
+        ...profile,
+        state: 'connected',
+        lastUsedAt: new Date().toISOString(),
+      },
+    };
+  }
+
   function profileSupportError(profile: ConnectionProfile): AppError | null {
     if (profile.authenticationMethod === 'private_key' && !profile.identityFile?.trim()) {
       return {
@@ -447,6 +460,7 @@ export const useSessionsStore = defineStore('sessions', () => {
           return;
         }
         upsert(result.data.session);
+        markQuickProfileUsed(profileId);
         passwordProfileId.value = null;
         challenge.value = null;
         currentRouteProfileId.value = null;
@@ -594,6 +608,9 @@ export const useSessionsStore = defineStore('sessions', () => {
     }
     if (!result.data.connected) return;
     upsert(result.data.session);
+    if (isQuickProfile(result.data.session.profileId)) {
+      markQuickProfileUsed(result.data.session.profileId);
+    }
     challenge.value = null;
     currentRouteProfileId.value = null;
     pendingConnectionSessionId.value = null;

@@ -3,8 +3,10 @@ import { failure, isTauriRuntime, normalizeUnknownError } from '@/api/common';
 import type {
   OperationResult,
   RemoteFileEntry,
+  RemotePermissionUpdateResult,
   RemoteTextPreview,
   RemoteTextSaveResult,
+  UpdateRemotePermissionsInput,
 } from '@/types/contracts';
 
 export async function listRemoteDirectory(
@@ -106,6 +108,45 @@ export async function deleteRemoteEntry(
     return await invoke<OperationResult<void>>('delete_remote_entry', { sessionId, path });
   } catch (error: unknown) {
     return failure(normalizeUnknownError(error, 'SFTP_DELETE_FAILED'));
+  }
+}
+
+export async function deleteRemoteEntryRecursive(
+  sessionId: string,
+  path: string,
+): Promise<OperationResult<number>> {
+  if (!isTauriRuntime()) {
+    return failure({
+      code: 'SFTP_DESKTOP_ONLY',
+      messageKey: 'errors.sshDesktopOnly',
+      retryable: false,
+      remoteState: 'not_applicable',
+    });
+  }
+  try {
+    return await invoke<OperationResult<number>>('delete_remote_entry_recursive', { sessionId, path });
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'SFTP_DELETE_FAILED'));
+  }
+}
+
+export async function createRemoteFile(
+  sessionId: string,
+  parentPath: string,
+  name: string,
+): Promise<OperationResult<void>> {
+  if (!isTauriRuntime()) {
+    return failure({
+      code: 'SFTP_DESKTOP_ONLY',
+      messageKey: 'errors.sshDesktopOnly',
+      retryable: false,
+      remoteState: 'not_applicable',
+    });
+  }
+  try {
+    return await invoke<OperationResult<void>>('create_remote_file', { sessionId, parentPath, name });
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'SFTP_CREATE_FILE_FAILED'));
   }
 }
 
@@ -216,6 +257,28 @@ export async function updateRemoteEntryMode(
   }
   try {
     return await invoke<OperationResult<void>>('update_remote_entry_mode', { sessionId, path, mode });
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'REMOTE_MODE_UPDATE_FAILED'));
+  }
+}
+
+export async function updateRemotePermissions(
+  sessionId: string,
+  input: UpdateRemotePermissionsInput,
+): Promise<OperationResult<RemotePermissionUpdateResult>> {
+  if (!isTauriRuntime()) {
+    return failure({
+      code: 'SFTP_DESKTOP_ONLY',
+      messageKey: 'errors.sshDesktopOnly',
+      retryable: false,
+      remoteState: 'not_applicable',
+    });
+  }
+  try {
+    return await invoke<OperationResult<RemotePermissionUpdateResult>>(
+      'update_remote_permissions',
+      { sessionId, input },
+    );
   } catch (error: unknown) {
     return failure(normalizeUnknownError(error, 'REMOTE_MODE_UPDATE_FAILED'));
   }

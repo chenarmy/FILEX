@@ -10,7 +10,7 @@ import {
   parseOctalMode,
   type PermissionMatrix, type PermissionTriple,
 } from '@/domain/permissions';
-import type { RemoteFileEntry } from '@/types/contracts';
+import type { RemoteFileEntry, RemotePermissionScope } from '@/types/contracts';
 import type { MessageKey } from '@/i18n/locales/zh-CN';
 
 const props = defineProps<{
@@ -21,11 +21,13 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: [];
-  submit: [mode: number];
+  submit: [input: { mode: number; recursive: boolean; scope: RemotePermissionScope }];
 }>();
 
 const octalInput = ref('');
 const matrix = ref<PermissionMatrix>(matrixFromMode(props.entry.permissionsMode ?? 0));
+const recursive = ref(false);
+const scope = ref<RemotePermissionScope>('all');
 
 watch(
   () => props.entry,
@@ -33,6 +35,8 @@ watch(
     const mode = entry.permissionsMode ?? 0;
     octalInput.value = formatOctalMode(mode);
     matrix.value = matrixFromMode(mode);
+    recursive.value = false;
+    scope.value = 'all';
   },
   { immediate: true },
 );
@@ -49,6 +53,16 @@ const ownerLabel = computed(() => {
 const octalInvalid = computed(() => octalInput.value.trim() !== '' && parseOctalMode(octalInput.value) === null);
 const effectiveMode = computed(() => parseOctalMode(octalInput.value) ?? modeFromMatrix(matrix.value));
 const valid = computed(() => !octalInvalid.value && !props.busy);
+const recursiveAvailable = computed(() => props.entry.isDirectory && !props.entry.isSymlink);
+
+function submit(): void {
+  if (!valid.value) return;
+  emit('submit', {
+    mode: effectiveMode.value,
+    recursive: recursiveAvailable.value && recursive.value,
+    scope: scope.value,
+  });
+}
 
 watch(octalInput, (value) => {
   const parsed = parseOctalMode(value);
@@ -81,6 +95,7 @@ const triples: Array<{ section: 'owner' | 'group' | 'other'; label: MessageKey }
   { section: 'group', label: 'permissions.group' },
   { section: 'other', label: 'permissions.other' },
 ];
+const scopeOptions: RemotePermissionScope[] = ['all', 'files', 'directories'];
 </script>
 
 <template>
@@ -91,7 +106,7 @@ const triples: Array<{ section: 'owner' | 'group' | 'other'; label: MessageKey }
       aria-modal="true"
       aria-labelledby="permission-dialog-title"
       :aria-busy="busy"
-      @submit.prevent="valid && emit('submit', effectiveMode)"
+      @submit.prevent="submit"
     >
       <header class="dialog-header">
         <div><ShieldCheck :size="14" /><strong id="permission-dialog-title">{{ t('permissions.title') }}</strong></div>
@@ -136,6 +151,21 @@ const triples: Array<{ section: 'owner' | 'group' | 'other'; label: MessageKey }
             </tr>
           </tbody>
         </table>
+
+        <fieldset class="permission-recursion" :disabled="!recursiveAvailable">
+          <legend>{{ t('permissions.recursion') }}</legend>
+          <label class="permission-recursive-toggle">
+            <input v-model="recursive" type="checkbox">
+            <span>{{ t('permissions.recursiveChildren') }}</span>
+          </label>
+          <div class="permission-scope" role="radiogroup" :aria-label="t('permissions.scope')">
+            <label v-for="option in scopeOptions" :key="option">
+              <input v-model="scope" type="radio" name="permission-scope" :value="option">
+              <span>{{ t(`permissions.scope.${option}` as Parameters<typeof t>[0]) }}</span>
+            </label>
+          </div>
+          <p class="dialog-note">{{ t('permissions.recursionHelp') }}</p>
+        </fieldset>
 
         <label class="field">
           {{ t('permissions.octal') }}

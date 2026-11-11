@@ -2,6 +2,7 @@ import { ref } from 'vue';
 import { defineStore } from 'pinia';
 import {
   copyLocalEntry,
+  createLocalFile,
   createLocalDirectory,
   deleteLocalEntry,
   listLocalDirectory,
@@ -60,6 +61,27 @@ export const useLocalFilesStore = defineStore('local-files', () => {
     error.value = null;
     try {
       const result = await createLocalDirectory(parentPath, name);
+      if (!result.ok) {
+        if (isCurrentListing()) error.value = result.error;
+        return false;
+      }
+      if (isCurrentListing()) await load(parentPath);
+      return true;
+    } finally {
+      if (mutation === mutationGeneration) mutating.value = false;
+    }
+  }
+
+  async function createFile(name: string): Promise<boolean> {
+    if (!listing.value || mutating.value) return false;
+    const parentPath = listing.value.path;
+    const listingGeneration = generation;
+    const isCurrentListing = () => generation === listingGeneration && listing.value?.path === parentPath;
+    const mutation = ++mutationGeneration;
+    mutating.value = true;
+    error.value = null;
+    try {
+      const result = await createLocalFile(parentPath, name);
       if (!result.ok) {
         if (isCurrentListing()) error.value = result.error;
         return false;
@@ -178,6 +200,6 @@ export const useLocalFilesStore = defineStore('local-files', () => {
 
   return {
     listing, loading, error, selectedPath, mutating,
-    load, select, open, parent, createDirectory, rename, move, copy, cancelCopy, remove, clear,
+    load, select, open, parent, createDirectory, createFile, rename, move, copy, cancelCopy, remove, clear,
   };
 });

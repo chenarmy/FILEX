@@ -11,8 +11,10 @@ import TransferDialog from '@/components/dialogs/TransferDialog.vue';
 import TunnelDialog from '@/components/dialogs/TunnelDialog.vue';
 import ConfirmDialog from '@/components/dialogs/ConfirmDialog.vue';
 import RemoteTextPreviewDialog from '@/components/dialogs/RemoteTextPreviewDialog.vue';
+import UpdateAvailableDialog from '@/components/dialogs/UpdateAvailableDialog.vue';
 import SettingsDialog from '@/components/settings/SettingsDialog.vue';
 import ToastNotice from '@/components/ui/ToastNotice.vue';
+import { useUpdateScheduling } from '@/composables/useUpdateScheduling';
 import { useConnectionsStore } from '@/stores/connections';
 import { useUiStore } from '@/stores/ui';
 import { useSessionsStore } from '@/stores/sessions';
@@ -21,6 +23,7 @@ import { useTunnelsStore } from '@/stores/tunnels';
 import { useSettingsStore } from '@/stores/settings';
 import { useSftpStore } from '@/stores/sftp';
 import { useTerminalLogsStore } from '@/stores/terminalLogs';
+import { useUpdatesStore } from '@/stores/updates';
 
 const connections = useConnectionsStore();
 const ui = useUiStore();
@@ -30,6 +33,9 @@ const tunnels = useTunnelsStore();
 const settings = useSettingsStore();
 const sftp = useSftpStore();
 const terminalLogs = useTerminalLogsStore();
+const updates = useUpdatesStore();
+
+useUpdateScheduling();
 
 onMounted(async () => {
   await settings.initialize();
@@ -55,5 +61,6 @@ onMounted(async () => {
   <ConfirmDialog v-if="ui.confirmation" />
   <RemoteTextPreviewDialog v-if="sftp.previewLoading || sftp.preview || sftp.previewError" />
   <SettingsDialog v-if="ui.settingsOpen" />
+  <UpdateAvailableDialog v-if="updates.dialogOpen" />
   <ToastNotice v-if="ui.toast" :message="ui.toast" />
 </template>

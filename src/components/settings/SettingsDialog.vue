@@ -13,13 +13,10 @@ import {
   X,
 } from 'lucide-vue-next';
 import { getCredentialStoreStatus, getRuntimePaths } from '@/api/domain/runtimeApi';
+import { selectExternalEditorExecutable } from '@/api/domain/filePickerApi';
 import {
-  cancelUpdateDownload as cancelUpdateDownloadApi,
-  checkForUpdates as checkForUpdatesApi,
   createBackup,
   createDiagnostics,
-  getUpdateStatus,
-  installUpdate as installUpdateApi,
   restoreBackup,
   selectBackupFile,
 } from '@/api/domain/maintenanceApi';
@@ -35,6 +32,7 @@ import { t } from '@/i18n';
 import { useSettingsStore } from '@/stores/settings';
 import { useTerminalLogsStore } from '@/stores/terminalLogs';
 import { useUiStore, type SettingsSection } from '@/stores/ui';
+import { useUpdatesStore } from '@/stores/updates';
 import {
   formatKeyboardShortcut,
   getKeyboardShortcutValidationError,
@@ -49,12 +47,12 @@ import type {
   KnownHostsImportWarningKind,
   RuntimePaths,
   SafeSettings,
-  UpdateStatus,
 } from '@/types/contracts';
 
 const settings = useSettingsStore();
 const ui = useUiStore();
 const terminalLogs = useTerminalLogsStore();
+const updates = useUpdatesStore();
 const activeSection = ref<SettingsSection>(ui.settingsSection);
 const draft = reactive<SafeSettings>({ ...settings.value, shortcuts: { ...settings.value.shortcuts } });
 const saving = ref(false);
@@ -71,15 +69,20 @@ const trustImportError = ref<string | null>(null);
 const trustImportNotice = ref<string | null>(null);
 const maintenanceBusy = ref(false);
 const backupRestorePath = ref('');
-const updateStatus = ref<UpdateStatus | null>(null);
 const runtimePaths = ref<RuntimePaths | null>(null);
-const updateBusy = ref(false);
-const updateCancelBusy = ref(false);
-const updatePhase = ref<'idle' | 'downloading' | 'installing'>('idle');
-const updateDownloadedBytes = ref(0);
-const updateContentLength = ref<number | null>(null);
-const updateNotice = ref('');
 const assistantSettingsRef = ref<{ save: () => Promise<boolean>; reset: () => void } | null>(null);
+
+async function chooseExternalEditor(): Promise<void> {
+  const selected = await selectExternalEditorExecutable(t('externalEditor.chooseTitle'));
+  if (!selected.ok) {
+    ui.notify(t(selected.error.messageKey as Parameters<typeof t>[0]));
+    return;
+  }
+  if (selected.data) {
+    draft.externalEditorPath = selected.data;
+    draft.textEditorPreference = 'external';
+  }
+}
 
 const credentialStatusLabel = computed(() => {
   const labels = {
@@ -99,22 +102,18 @@ const credentialStatusClass = computed(() => ({
   danger: credentialStatus.value === 'locked' || credentialStatus.value === 'unavailable',
 }));
 const updateChannelPending = computed(() => Boolean(
-  updateStatus.value && draft.updateChannel !== updateStatus.value.channel,
+  updates.status && draft.updateChannel !== updates.channel,
 ));
 const runtimeDataDirectory = computed(() => runtimePaths.value?.dataDirectory
   ?? t('settings.runtimePathUnavailable'));
-const updateProgressPercent = computed(() => {
-  const total = updateContentLength.value;
-  if (!total || total <= 0) return null;
-  return Math.min(100, Math.round((updateDownloadedBytes.value / total) * 100));
-});
+const updateProgressPercent = computed(() => updates.progressPercent);
 const updateProgressLabel = computed(() => {
   const percent = updateProgressPercent.value;
   return percent === null
     ? t('settings.updateDownloading')
     : t('settings.updateDownloadProgress', { percent });
 });
-const updateInstallActive = computed(() => updatePhase.value !== 'idle');
+const updateInstallActive = computed(() => updates.installActive);
 
 const trustImportChangedCount = computed(() => knownHostsPreview.value?.candidates
   .filter((candidate) => isTrustImportChanged(candidate)).length ?? 0);
@@ -241,6 +240,8 @@ function reset(): void {
         inspectorPaneWidth: defaults.inspectorPaneWidth,
         assistantPaneWidth: defaults.assistantPaneWidth,
         taskDrawerHeight: defaults.taskDrawerHeight,
+        textEditorPreference: defaults.textEditorPreference,
+        externalEditorPath: defaults.externalEditorPath,
       });
       break;
     case 'security':
@@ -370,76 +371,17 @@ async function chooseBackupFile(): Promise<void> {
 }
 
 async function checkForUpdatesNow(): Promise<void> {
-  if (updateBusy.value || !updateStatus.value?.configured || updateChannelPending.value) return;
-  updateBusy.value = true;
-  updateNotice.value = '';
-  try {
-    const result = await checkForUpdatesApi();
-    if (!result.ok) {
-      updateNotice.value = t(result.error.messageKey as Parameters<typeof t>[0]);
-      return;
-    }
-    updateStatus.value = result.data;
-    updateNotice.value = result.data.availableVersion
-      ? t('settings.updateAvailable', { version: result.data.availableVersion })
-      : t('settings.upToDate');
-  } finally {
-    updateBusy.value = false;
-  }
+  if (updates.isBusy || !updates.configured || updateChannelPending.value) return;
+  await updates.check(true, true);
 }
 
-async function installAvailableUpdate(): Promise<void> {
-  const version = updateStatus.value?.availableVersion;
-  if (!version || updateBusy.value || updateChannelPending.value) return;
-  const accepted = await ui.confirm({
-    title: t('settings.updateConfirmTitle'),
-    message: t('settings.updateConfirmMessage', { version }),
-    confirmLabel: t('settings.installUpdate'),
-  });
-  if (!accepted) return;
-
-  updateBusy.value = true;
-  updatePhase.value = 'downloading';
-  updateDownloadedBytes.value = 0;
-  updateContentLength.value = null;
-  updateNotice.value = '';
-  try {
-    const result = await installUpdateApi(version, (event) => {
-      if (event.event === 'progress') {
-        updateDownloadedBytes.value = event.data.downloadedBytes;
-        updateContentLength.value = event.data.contentLength;
-      } else {
-        updatePhase.value = 'installing';
-      }
-    });
-    if (!result.ok) {
-      updateNotice.value = t(result.error.messageKey as Parameters<typeof t>[0]);
-      if (result.error.code === 'UPDATE_STALE' || result.error.code === 'UPDATE_NO_AVAILABLE') {
-        if (updateStatus.value) {
-          updateStatus.value = { ...updateStatus.value, availableVersion: null, releaseNotes: null, publishedAt: null };
-        }
-      }
-      return;
-    }
-    updateNotice.value = t('settings.updateInstalling');
-    ui.notify(t('settings.updateInstalling'));
-  } finally {
-    updateBusy.value = false;
-    updatePhase.value = 'idle';
-  }
+function installAvailableUpdate(): void {
+  if (!updates.availableVersion || updates.isBusy || updateChannelPending.value) return;
+  updates.openDialog();
 }
 
 async function cancelUpdateDownload(): Promise<void> {
-  if (updateCancelBusy.value || updatePhase.value !== 'downloading') return;
-  updateCancelBusy.value = true;
-  try {
-    const result = await cancelUpdateDownloadApi();
-    updateNotice.value = t(result.ok
-      ? 'settings.updateCancelRequested'
-      : result.error.messageKey as Parameters<typeof t>[0]);
-  } finally {
-    updateCancelBusy.value = false;
-  }
+  await updates.cancelDownload();
 }
 
 async function loadTrustLedger(): Promise<void> {
@@ -559,13 +501,12 @@ async function commitKnownHostsImport(): Promise<void> {
 onMounted(async () => {
   credentialStatus.value = 'probing';
   const trustLoad = loadTrustLedger();
-  const [credentialResult, updateResult, pathsResult] = await Promise.all([
+  const [credentialResult, , pathsResult] = await Promise.all([
     getCredentialStoreStatus(),
-    getUpdateStatus(),
+    updates.initialize(true),
     getRuntimePaths(),
   ]);
   credentialStatus.value = credentialResult.ok ? credentialResult.data : 'unavailable';
-  updateStatus.value = updateResult.ok ? updateResult.data : null;
   runtimePaths.value = pathsResult.ok ? pathsResult.data : null;
   await trustLoad;
 });
@@ -640,6 +581,8 @@ onMounted(async () => {
             <div class="setting-row"><div><strong>{{ t('settings.keepaliveInterval') }}</strong></div><select v-model.number="draft.keepaliveSeconds"><option :value="30">{{ t('settings.secondsValue', { n: 30 }) }}</option><option :value="60">{{ t('settings.secondsValue', { n: 60 }) }}</option><option :value="0">{{ t('settings.off') }}</option></select></div>
             <div class="setting-row"><div><strong>{{ t('settings.automaticReconnect') }}</strong><small>{{ t('settings.automaticReconnectHelp') }}</small></div><select v-model.number="draft.reconnectAttempts"><option :value="3">{{ t('settings.attemptsValue', { count: 3 }) }}</option><option :value="5">{{ t('settings.attemptsValue', { count: 5 }) }}</option><option :value="0">{{ t('settings.off') }}</option></select></div>
             <div class="setting-row"><div><strong>{{ t('settings.monitorInterval') }}</strong><small>{{ t('settings.monitorIntervalHelp') }}</small></div><select v-model.number="draft.monitorIntervalSeconds"><option :value="15">{{ t('settings.secondsValue', { n: 15 }) }}</option><option :value="30">{{ t('settings.secondsValue', { n: 30 }) }}</option><option :value="60">{{ t('settings.secondsValue', { n: 60 }) }}</option></select></div>
+            <div class="setting-row"><div><strong>{{ t('settings.textEditor') }}</strong><small>{{ t('settings.textEditorHelp') }}</small></div><select v-model="draft.textEditorPreference" :aria-label="t('settings.textEditor')"><option value="internal">{{ t('fileMenu.internalEditor') }}</option><option value="external">{{ t('fileMenu.externalEditor') }}</option></select></div>
+            <div class="setting-row"><div><strong>{{ t('settings.externalEditorTool') }}</strong><small class="mono">{{ draft.externalEditorPath || t('settings.externalEditorNotSet') }}</small></div><button type="button" class="button" @click="chooseExternalEditor"><FolderOpen :size="12" />{{ t('settings.chooseExternalEditor') }}</button></div>
           </section>
 
           <section v-else-if="activeSection === 'security'">
@@ -726,10 +669,10 @@ onMounted(async () => {
           <section v-else-if="activeSection === 'updates'">
             <h2>{{ t('settings.updates') }}</h2>
             <div class="setting-row"><div><strong>{{ t('settings.updateChannel') }}</strong></div><select v-model="draft.updateChannel"><option value="stable">{{ t('settings.stable') }}</option><option value="beta">Beta</option></select></div>
-            <div class="setting-row"><div><strong>{{ t('settings.version') }}</strong></div><span class="mono">FILEX {{ updateStatus?.currentVersion ?? '—' }}</span></div>
-            <div class="setting-row"><div><strong>{{ t('settings.updaterStatus') }}</strong><small>{{ updateStatus?.configured ? t('settings.updaterConfigured') : t('settings.updaterNeedsSigning') }}</small><small v-if="updateChannelPending">{{ t('settings.updateChannelSaveHint') }}</small><small v-if="updateNotice" aria-live="polite">{{ updateNotice }}</small></div><span class="mono">{{ updateStatus?.channel ?? draft.updateChannel }}</span></div>
-            <div class="setting-row"><div><strong>{{ t('settings.checkUpdates') }}</strong><small v-if="updateStatus?.availableVersion">{{ t('settings.updateAvailable', { version: updateStatus.availableVersion }) }}</small><small v-if="updatePhase === 'downloading'" aria-live="polite">{{ updateProgressLabel }}</small><small v-else-if="updatePhase === 'installing'" aria-live="polite">{{ t('settings.updateInstalling') }}</small></div><div class="setting-control-group"><button type="button" class="button" :disabled="updateBusy || !updateStatus?.configured || updateChannelPending" @click="checkForUpdatesNow">{{ updateBusy ? (updatePhase === 'downloading' ? t('settings.updateDownloading') : updatePhase === 'installing' ? t('settings.updateInstallingShort') : t('settings.checkingUpdates')) : t('settings.checkUpdates') }}</button><button v-if="updatePhase === 'downloading'" type="button" class="button danger" :disabled="updateCancelBusy" @click="cancelUpdateDownload">{{ updateCancelBusy ? t('settings.updateCancelling') : t('settings.cancelUpdateDownload') }}</button><button v-else-if="updateStatus?.availableVersion" type="button" class="button primary" :disabled="updateBusy || updateChannelPending" @click="installAvailableUpdate">{{ t('settings.installUpdate') }}</button></div></div>
-            <div v-if="updateStatus?.releaseNotes" class="setting-row update-notes-row"><div><strong>{{ t('settings.updateNotes') }}</strong><pre>{{ updateStatus.releaseNotes }}</pre></div></div>
+            <div class="setting-row"><div><strong>{{ t('settings.version') }}</strong></div><span class="mono">FILEX {{ updates.currentVersion }}</span></div>
+            <div class="setting-row"><div><strong>{{ t('settings.updaterStatus') }}</strong><small>{{ updates.configured ? t('settings.updaterConfigured') : t('settings.updaterNeedsSigning') }}</small><small v-if="updateChannelPending">{{ t('settings.updateChannelSaveHint') }}</small><small v-if="updates.errorMessage" role="alert">{{ updates.errorMessage }}</small></div><span class="mono">{{ updates.channel }}</span></div>
+            <div class="setting-row"><div><strong>{{ t('settings.checkUpdates') }}</strong><small v-if="updates.availableVersion">{{ t('settings.updateAvailable', { version: updates.availableVersion }) }}</small><small v-if="updates.phase === 'downloading'" aria-live="polite">{{ updateProgressLabel }}</small><small v-else-if="updates.phase === 'installing'" aria-live="polite">{{ t('settings.updateInstalling') }}</small></div><div class="setting-control-group"><button type="button" class="button" :disabled="updates.isBusy || !updates.configured || updateChannelPending" @click="checkForUpdatesNow">{{ updates.phase === 'checking' ? t('settings.checkingUpdates') : updates.phase === 'downloading' ? t('settings.updateDownloading') : updates.phase === 'installing' ? t('settings.updateInstallingShort') : t('settings.checkUpdates') }}</button><button v-if="updates.phase === 'downloading'" type="button" class="button danger" :disabled="updates.cancelling" @click="cancelUpdateDownload">{{ updates.cancelling ? t('settings.updateCancelling') : t('settings.cancelUpdateDownload') }}</button><button v-else-if="updates.availableVersion" type="button" class="button primary" :disabled="updates.isBusy || updateChannelPending" @click="installAvailableUpdate">{{ t('settings.installUpdate') }}</button></div></div>
+            <div v-if="updates.releaseNotes" class="setting-row update-notes-row"><div><strong>{{ t('settings.updateNotes') }}</strong><pre>{{ updates.releaseNotes }}</pre></div></div>
             <div class="setting-row"><div><strong>{{ t('settings.diagnostics') }}</strong><small>{{ t('settings.diagnosticsHelp') }}</small></div><button type="button" class="button" :disabled="maintenanceBusy" @click="runMaintenance('diagnostics')">{{ t('settings.createDiagnostics') }}</button></div>
           </section>
 

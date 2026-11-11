@@ -715,17 +715,13 @@ defineExpose({ focusTerminal });
 
 <style scoped>
 .terminal-pane {
-  display: grid;
-  grid-template-rows: 29px minmax(0, 1fr) 22px;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border: 1px solid hsl(var(--border));
+  border: 0;
   background: hsl(var(--terminal-bg));
-}
-
-.terminal-pane.searching {
-  grid-template-rows: 29px auto minmax(0, 1fr) 22px;
 }
 
 .terminal-pane.focused {
@@ -739,14 +735,22 @@ defineExpose({ focusTerminal });
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding-inline: 7px;
+  padding-inline: 8px;
   color: hsl(var(--muted-foreground));
   background: hsl(var(--card));
-  font-size: 0.75rem;
+  font-size: 0.6875rem;
 }
 
 .terminal-pane-header {
+  flex: 0 0 26px;
+  height: 26px;
   border-bottom: 1px solid hsl(var(--border));
+}
+
+.terminal-pane-status {
+  flex: 0 0 20px;
+  height: 20px;
+  border-top: 1px solid hsl(var(--border));
 }
 
 .terminal-pane-heading,
@@ -761,7 +765,7 @@ defineExpose({ focusTerminal });
 .terminal-pane-heading strong {
   overflow: hidden;
   color: hsl(var(--foreground));
-  font-size: 0.8333rem;
+  font-size: 0.75rem;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -771,6 +775,7 @@ defineExpose({ focusTerminal });
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 0.6875rem;
 }
 
 .terminal-pane-actions {
@@ -778,8 +783,8 @@ defineExpose({ focusTerminal });
 }
 
 .terminal-pane-actions .icon-button {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
 }
 
 .pane-reconnect {
@@ -798,6 +803,7 @@ defineExpose({ focusTerminal });
 }
 
 .terminal-search {
+  flex: 0 0 auto;
   display: flex;
   min-width: 0;
   align-items: center;
@@ -834,6 +840,7 @@ defineExpose({ focusTerminal });
 }
 
 .terminal-surface-shell {
+  flex: 1 1 0;
   position: relative;
   min-width: 0;
   min-height: 0;

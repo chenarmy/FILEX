@@ -16,10 +16,10 @@ use filex_contracts::{
     DirectorySyncChangeKind, DirectorySyncEntryKind, DirectorySyncPreview,
     DirectorySyncPreviewEntry, FileChecksumComparison, HostKeyChallenge, HostTrustEvaluation,
     MonitorState, NetworkEndpoint, NetworkInterface, NetworkPlatform, NetworkSnapshot,
-    ProcessEntry, ProcessPlatform, ProcessSnapshot, RemoteFileEntry, RemoteState,
-    RemoteTextPreview, RemoteTextSaveResult, RouteEntry, SessionConnectionProgress, SessionState,
-    SessionSummary, SystemMonitorSnapshot, TransferDirection, TransferTask, TunnelKind,
-    TunnelState, TunnelSummary,
+    ProcessEntry, ProcessPlatform, ProcessSnapshot, RemoteFileEntry, RemotePermissionScope,
+    RemotePermissionUpdateResult, RemoteState, RemoteTextPreview, RemoteTextSaveResult, RouteEntry,
+    SessionConnectionProgress, SessionState, SessionSummary, SystemMonitorSnapshot,
+    TransferDirection, TransferTask, TunnelKind, TunnelState, TunnelSummary,
 };
 use filex_core::{HostTrustService, SessionMachine, parse_monitor_probe};
 use filex_ssh::{
@@ -44,6 +44,10 @@ const DIRECTORY_SYNC_MAX_DEPTH: usize = 16;
 const DIRECTORY_SYNC_MAX_RESULTS: usize = 1_000;
 const DIRECTORY_SYNC_TIMEOUT_SECONDS: u64 = 180;
 const TUNNEL_MAX_CONNECTIONS: usize = 64;
+const REMOTE_TREE_MAX_ENTRIES: usize = 5_000;
+const REMOTE_TREE_MAX_DEPTH: usize = 16;
+const EXTERNAL_EDIT_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const EXTERNAL_EDIT_SYNC_TIMEOUT_SECONDS: u64 = 60;
 
 pub struct SessionRuntime {
     engine: RwLock<RusshEngine>,
@@ -63,6 +67,26 @@ struct RuntimeConnection {
     session: Arc<ConnectedSshSession>,
     terminal: Arc<AsyncMutex<TerminalInput>>,
     upstream_sessions: Vec<Arc<ConnectedSshSession>>,
+}
+
+pub(crate) struct ExternalEditCopy {
+    pub path: PathBuf,
+    pub revision: String,
+    pub bytes: u64,
+}
+
+pub(crate) struct ExternalEditUpload {
+    pub revision: String,
+    pub bytes: u64,
+    pub uploaded: bool,
+}
+
+#[derive(Clone)]
+struct RemoteTreeEntry {
+    path: String,
+    is_directory: bool,
+    is_regular: bool,
+    is_symlink: bool,
 }
 
 struct SessionRouteProgress {
@@ -1724,6 +1748,33 @@ impl SessionRuntime {
         Ok(result)
     }
 
+    pub async fn create_remote_file(
+        &self,
+        session_id: &str,
+        parent_path: &str,
+        name: &str,
+    ) -> Result<(), AppError> {
+        validate_remote_directory_name(parent_path, name)?;
+        let session = self.session_handle(session_id).await?;
+        let sftp = session
+            .open_sftp()
+            .await
+            .map_err(|error| ssh_error(&error))?;
+        let target = join_remote_path(parent_path, name);
+        let result = match sftp
+            .open_with_flags(
+                target,
+                OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+            )
+            .await
+        {
+            Ok(file) => file.close().await.map_err(|_| remote_create_file_error()),
+            Err(_) => Err(remote_create_file_error()),
+        };
+        let _ = sftp.close().await;
+        result
+    }
+
     pub async fn update_remote_entry_mode(
         &self,
         session_id: &str,
@@ -1746,6 +1797,127 @@ impl SessionRuntime {
         let result = sftp.set_metadata(path, attributes).await;
         let _ = sftp.close().await;
         result.map_err(|_| remote_mode_error("REMOTE_MODE_UPDATE_FAILED"))
+    }
+
+    pub async fn update_remote_entry_permissions(
+        &self,
+        session_id: &str,
+        input: &filex_contracts::UpdateRemotePermissionsInput,
+    ) -> Result<RemotePermissionUpdateResult, AppError> {
+        validate_remote_permission_input(input)?;
+        let session = self.session_handle(session_id).await?;
+        let sftp = session
+            .open_sftp()
+            .await
+            .map_err(|error| ssh_error(&error))?;
+        let operation = async {
+            let root = sftp
+                .symlink_metadata(input.path.clone())
+                .await
+                .map_err(|_| remote_mode_error("REMOTE_MODE_UPDATE_FAILED"))?;
+            if root.is_symlink() {
+                return Err(remote_mode_error("REMOTE_MODE_UNSUPPORTED"));
+            }
+            let tree = if input.recursive && root.is_dir() {
+                scan_remote_tree(&sftp, &input.path).await?
+            } else {
+                Vec::new()
+            };
+            let mut updated_count = 0_u32;
+            let mut skipped_symlink_count = 0_u32;
+            if permission_scope_matches(&input.scope, root.is_dir(), root.is_regular()) {
+                set_remote_permission(&sftp, &input.path, &root, input.mode).await?;
+                updated_count = updated_count.saturating_add(1);
+            }
+            for entry in tree {
+                if entry.is_symlink {
+                    skipped_symlink_count = skipped_symlink_count.saturating_add(1);
+                    continue;
+                }
+                if permission_scope_matches(&input.scope, entry.is_directory, entry.is_regular) {
+                    let metadata = sftp
+                        .symlink_metadata(entry.path.clone())
+                        .await
+                        .map_err(|_| remote_mode_error("REMOTE_MODE_UPDATE_FAILED"))?;
+                    set_remote_permission(&sftp, &entry.path, &metadata, input.mode).await?;
+                    updated_count = updated_count.saturating_add(1);
+                }
+            }
+            Ok(RemotePermissionUpdateResult {
+                updated_count,
+                skipped_symlink_count,
+            })
+        };
+        let result = match tokio::time::timeout(
+            Duration::from_secs(DIRECTORY_SYNC_TIMEOUT_SECONDS),
+            operation,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(remote_mode_error("REMOTE_MODE_UPDATE_TIMEOUT")),
+        };
+        let _ = sftp.close().await;
+        result
+    }
+
+    pub async fn delete_remote_entry_recursive(
+        &self,
+        session_id: &str,
+        path: &str,
+    ) -> Result<u32, AppError> {
+        validate_remote_delete_path(path)?;
+        let session = self.session_handle(session_id).await?;
+        let sftp = session
+            .open_sftp()
+            .await
+            .map_err(|error| ssh_error(&error))?;
+        let operation = async {
+            let root = sftp
+                .symlink_metadata(path.to_owned())
+                .await
+                .map_err(|_| remote_quick_delete_error())?;
+            if !root.is_dir() || root.is_symlink() {
+                sftp.remove_file(path.to_owned())
+                    .await
+                    .map_err(|_| remote_quick_delete_error())?;
+                return Ok(1);
+            }
+            let mut descendants = scan_remote_tree(&sftp, path).await?;
+            descendants.sort_by(|left, right| {
+                right
+                    .path
+                    .matches('/')
+                    .count()
+                    .cmp(&left.path.matches('/').count())
+                    .then_with(|| right.path.len().cmp(&left.path.len()))
+            });
+            let mut deleted = 0_u32;
+            for entry in descendants {
+                let result = if entry.is_directory && !entry.is_symlink {
+                    sftp.remove_dir(entry.path).await
+                } else {
+                    sftp.remove_file(entry.path).await
+                };
+                result.map_err(|_| remote_quick_delete_error())?;
+                deleted = deleted.saturating_add(1);
+            }
+            sftp.remove_dir(path.to_owned())
+                .await
+                .map_err(|_| remote_quick_delete_error())?;
+            Ok(deleted.saturating_add(1))
+        };
+        let result = match tokio::time::timeout(
+            Duration::from_secs(DIRECTORY_SYNC_TIMEOUT_SECONDS),
+            operation,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(remote_quick_delete_error()),
+        };
+        let _ = sftp.close().await;
+        result
     }
 
     pub async fn preview_remote_text(
@@ -1914,6 +2086,95 @@ impl SessionRuntime {
         }
         let _ = sftp.close().await;
         result
+    }
+
+    pub(crate) async fn create_external_edit_copy(
+        &self,
+        session_id: &str,
+        remote_path: &str,
+        cache_directory: &std::path::Path,
+    ) -> Result<ExternalEditCopy, AppError> {
+        let path = self
+            .create_external_open_copy(session_id, remote_path, cache_directory)
+            .await?;
+        let local = read_external_edit_local(&path, None).await;
+        match local {
+            Ok((bytes, revision)) => Ok(ExternalEditCopy {
+                path,
+                revision,
+                bytes: bytes.len() as u64,
+            }),
+            Err(error) => {
+                let _ = tokio::fs::remove_file(path).await;
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) async fn sync_external_edit_file(
+        &self,
+        session_id: &str,
+        remote_path: &str,
+        local_path: &std::path::Path,
+        last_local_revision: &str,
+        expected_remote_revision: &str,
+    ) -> Result<ExternalEditUpload, AppError> {
+        if remote_path.is_empty()
+            || remote_path.contains('\0')
+            || remote_path.split('/').any(|component| component == "..")
+        {
+            return Err(invalid_remote_path_error());
+        }
+        let operation = async {
+            let (local_bytes, local_revision) =
+                read_external_edit_local(local_path, Some(last_local_revision)).await?;
+            if local_revision == last_local_revision {
+                return Ok(ExternalEditUpload {
+                    revision: local_revision,
+                    bytes: local_bytes.len() as u64,
+                    uploaded: false,
+                });
+            }
+            let session = self.session_handle(session_id).await?;
+            let sftp = session
+                .open_sftp()
+                .await
+                .map_err(|error| ssh_error(&error))?;
+            let result = async {
+                let (remote_revision, metadata) =
+                    read_external_edit_remote(&sftp, remote_path).await?;
+                if remote_revision != expected_remote_revision {
+                    return Err(external_edit_remote_changed_error());
+                }
+                if local_revision == remote_revision {
+                    return Ok(ExternalEditUpload {
+                        revision: remote_revision,
+                        bytes: local_bytes.len() as u64,
+                        uploaded: false,
+                    });
+                }
+                replace_external_edit_remote(
+                    &sftp,
+                    remote_path,
+                    &metadata,
+                    &local_bytes,
+                    expected_remote_revision,
+                )
+                .await
+            }
+            .await;
+            let _ = sftp.close().await;
+            result
+        };
+        match tokio::time::timeout(
+            Duration::from_secs(EXTERNAL_EDIT_SYNC_TIMEOUT_SECONDS),
+            operation,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(external_edit_sync_error()),
+        }
     }
 
     pub async fn save_remote_text(
@@ -4242,12 +4503,107 @@ fn remote_mode_error(code: &str) -> AppError {
         code: code.to_owned(),
         message_key: match code {
             "REMOTE_MODE_INVALID" => "errors.remoteModeInvalid",
+            "REMOTE_MODE_UNSUPPORTED" => "errors.remoteModeUnsupported",
+            "REMOTE_MODE_UPDATE_TIMEOUT" => "errors.remoteModeUpdateTimeout",
             _ => "errors.remoteModeUpdateFailed",
         }
         .to_owned(),
-        retryable: code == "REMOTE_MODE_UPDATE_FAILED",
+        retryable: matches!(
+            code,
+            "REMOTE_MODE_UPDATE_FAILED" | "REMOTE_MODE_UPDATE_TIMEOUT"
+        ),
         remote_state: RemoteState::Unknown,
         field: None,
+    }
+}
+
+fn remote_create_file_error() -> AppError {
+    AppError {
+        code: "SFTP_CREATE_FILE_FAILED".to_owned(),
+        message_key: "errors.sftpCreateFileFailed".to_owned(),
+        retryable: false,
+        remote_state: RemoteState::Unknown,
+        field: Some("name".to_owned()),
+    }
+}
+
+fn remote_tree_error() -> AppError {
+    AppError {
+        code: "REMOTE_TREE_OPERATION_FAILED".to_owned(),
+        message_key: "errors.remoteTreeOperationFailed".to_owned(),
+        retryable: true,
+        remote_state: RemoteState::Unknown,
+        field: None,
+    }
+}
+
+fn remote_tree_limit_error() -> AppError {
+    AppError {
+        code: "REMOTE_TREE_LIMIT".to_owned(),
+        message_key: "errors.remoteTreeLimit".to_owned(),
+        retryable: false,
+        remote_state: RemoteState::Unchanged,
+        field: Some("path".to_owned()),
+    }
+}
+
+fn external_edit_sync_error() -> AppError {
+    AppError {
+        code: "EXTERNAL_EDIT_SYNC_FAILED".to_owned(),
+        message_key: "errors.externalEditSyncFailed".to_owned(),
+        retryable: true,
+        remote_state: RemoteState::Unknown,
+        field: None,
+    }
+}
+
+fn external_edit_unsupported_error() -> AppError {
+    AppError {
+        code: "EXTERNAL_EDIT_UNSUPPORTED".to_owned(),
+        message_key: "errors.externalEditUnsupported".to_owned(),
+        retryable: false,
+        remote_state: RemoteState::Unchanged,
+        field: None,
+    }
+}
+
+fn external_edit_too_large_error() -> AppError {
+    AppError {
+        code: "EXTERNAL_EDIT_TOO_LARGE".to_owned(),
+        message_key: "errors.externalEditTooLarge".to_owned(),
+        retryable: false,
+        remote_state: RemoteState::Unchanged,
+        field: None,
+    }
+}
+
+fn external_edit_local_changing_error() -> AppError {
+    AppError {
+        code: "EXTERNAL_EDIT_LOCAL_CHANGING".to_owned(),
+        message_key: "errors.externalEditLocalChanging".to_owned(),
+        retryable: true,
+        remote_state: RemoteState::Unchanged,
+        field: None,
+    }
+}
+
+fn external_edit_remote_changed_error() -> AppError {
+    AppError {
+        code: "EXTERNAL_EDIT_REMOTE_CHANGED".to_owned(),
+        message_key: "errors.externalEditRemoteChanged".to_owned(),
+        retryable: false,
+        remote_state: RemoteState::Changed,
+        field: None,
+    }
+}
+
+fn external_edit_recovery_error(backup_path: String) -> AppError {
+    AppError {
+        code: "EXTERNAL_EDIT_RECOVERY_REQUIRED".to_owned(),
+        message_key: "errors.externalEditRecovery".to_owned(),
+        retryable: false,
+        remote_state: RemoteState::Unknown,
+        field: Some(backup_path),
     }
 }
 
@@ -4343,6 +4699,253 @@ fn join_remote_path(parent: &str, name: &str) -> String {
     }
 }
 
+fn validate_remote_permission_input(
+    input: &filex_contracts::UpdateRemotePermissionsInput,
+) -> Result<(), AppError> {
+    if input.path.is_empty()
+        || input.path.contains('\0')
+        || input.path.split('/').any(|component| component == "..")
+        || input.mode > 0o7777
+    {
+        Err(remote_mode_error("REMOTE_MODE_INVALID"))
+    } else {
+        Ok(())
+    }
+}
+
+fn permission_scope_matches(
+    scope: &RemotePermissionScope,
+    is_directory: bool,
+    is_regular: bool,
+) -> bool {
+    match scope {
+        RemotePermissionScope::All => is_directory || is_regular,
+        RemotePermissionScope::Files => is_regular,
+        RemotePermissionScope::Directories => is_directory,
+    }
+}
+
+async fn set_remote_permission(
+    sftp: &russh_sftp::client::SftpSession,
+    path: &str,
+    _metadata: &FileAttributes,
+    mode: u32,
+) -> Result<(), AppError> {
+    let mut attributes = FileAttributes::empty();
+    attributes.permissions = Some(mode);
+    sftp.set_metadata(path.to_owned(), attributes)
+        .await
+        .map_err(|_| remote_mode_error("REMOTE_MODE_UPDATE_FAILED"))
+}
+
+async fn scan_remote_tree(
+    sftp: &russh_sftp::client::SftpSession,
+    root: &str,
+) -> Result<Vec<RemoteTreeEntry>, AppError> {
+    let mut directories = vec![(root.to_owned(), 0_usize)];
+    let mut entries = Vec::new();
+    while let Some((directory, depth)) = directories.pop() {
+        let children = sftp
+            .read_dir(directory.clone())
+            .await
+            .map_err(|_| remote_tree_error())?;
+        for child in children {
+            let metadata = child.metadata();
+            let name = child.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+            if entries.len() >= REMOTE_TREE_MAX_ENTRIES {
+                return Err(remote_tree_limit_error());
+            }
+            let path = join_remote_path(&directory, &name);
+            if path.len() > 4_096 {
+                return Err(remote_tree_limit_error());
+            }
+            let is_symlink = metadata.is_symlink();
+            let is_directory = !is_symlink && metadata.is_dir();
+            let is_regular = !is_symlink && metadata.is_regular();
+            entries.push(RemoteTreeEntry {
+                path: path.clone(),
+                is_directory,
+                is_regular,
+                is_symlink,
+            });
+            if is_directory {
+                if depth + 1 > REMOTE_TREE_MAX_DEPTH {
+                    return Err(remote_tree_limit_error());
+                }
+                directories.push((path, depth + 1));
+            }
+        }
+    }
+    Ok(entries)
+}
+
+async fn read_external_edit_local(
+    path: &std::path::Path,
+    _last_revision: Option<&str>,
+) -> Result<(Vec<u8>, String), AppError> {
+    let before = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|_| external_edit_sync_error())?;
+    if before.file_type().is_symlink() || !before.is_file() {
+        return Err(external_edit_unsupported_error());
+    }
+    if before.len() > EXTERNAL_EDIT_MAX_BYTES {
+        return Err(external_edit_too_large_error());
+    }
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| external_edit_sync_error())?;
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    let mut bounded = file.take(EXTERNAL_EDIT_MAX_BYTES + 1);
+    bounded
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|_| external_edit_sync_error())?;
+    let opened_after = bounded
+        .get_ref()
+        .metadata()
+        .await
+        .map_err(|_| external_edit_sync_error())?;
+    let path_after = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|_| external_edit_local_changing_error())?;
+    if bytes.len() as u64 > EXTERNAL_EDIT_MAX_BYTES {
+        return Err(external_edit_too_large_error());
+    }
+    if path_after.file_type().is_symlink()
+        || !path_after.is_file()
+        || before.len() != opened_after.len()
+        || before.len() != path_after.len()
+        || before.modified().ok() != opened_after.modified().ok()
+        || before.modified().ok() != path_after.modified().ok()
+        || bytes.len() as u64 != path_after.len()
+    {
+        return Err(external_edit_local_changing_error());
+    }
+    let revision = text_revision(&bytes);
+    Ok((bytes, revision))
+}
+
+async fn read_external_edit_remote(
+    sftp: &russh_sftp::client::SftpSession,
+    path: &str,
+) -> Result<(String, FileAttributes), AppError> {
+    let before = sftp
+        .symlink_metadata(path.to_owned())
+        .await
+        .map_err(|_| external_edit_sync_error())?;
+    if before.is_symlink() || !before.is_regular() {
+        return Err(external_edit_unsupported_error());
+    }
+    if before
+        .size
+        .is_some_and(|size| size > EXTERNAL_EDIT_MAX_BYTES)
+    {
+        return Err(external_edit_too_large_error());
+    }
+    let file = sftp
+        .open(path.to_owned())
+        .await
+        .map_err(|_| external_edit_sync_error())?;
+    let mut bytes = Vec::with_capacity(before.size.unwrap_or_default() as usize);
+    let mut bounded = file.take(EXTERNAL_EDIT_MAX_BYTES + 1);
+    let read_failed = bounded.read_to_end(&mut bytes).await.is_err();
+    let file = bounded.into_inner();
+    let close_failed = file.close().await.is_err();
+    if read_failed || close_failed {
+        return Err(external_edit_sync_error());
+    }
+    if bytes.len() as u64 > EXTERNAL_EDIT_MAX_BYTES {
+        return Err(external_edit_too_large_error());
+    }
+    let after = sftp
+        .symlink_metadata(path.to_owned())
+        .await
+        .map_err(|_| external_edit_remote_changed_error())?;
+    if after.is_symlink()
+        || !after.is_regular()
+        || before.size != after.size
+        || before.mtime != after.mtime
+        || before.size.is_some_and(|size| size != bytes.len() as u64)
+    {
+        return Err(external_edit_remote_changed_error());
+    }
+    Ok((text_revision(&bytes), before))
+}
+
+async fn replace_external_edit_remote(
+    sftp: &russh_sftp::client::SftpSession,
+    remote_path: &str,
+    metadata: &FileAttributes,
+    bytes: &[u8],
+    expected_revision: &str,
+) -> Result<ExternalEditUpload, AppError> {
+    let (parent, _) = split_remote_parent(remote_path)?;
+    let id = uuid::Uuid::new_v4();
+    let temporary_path = join_remote_path(parent, &format!(".filex-edit-{id}.part"));
+    let backup_path = join_remote_path(parent, &format!(".filex-edit-{id}.backup"));
+    let mut attributes = FileAttributes::empty();
+    attributes.permissions = metadata.permissions;
+    let mut temporary = sftp
+        .open_with_flags_and_attributes(
+            temporary_path.clone(),
+            OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+            attributes,
+        )
+        .await
+        .map_err(|_| external_edit_sync_error())?;
+    let write_result = temporary.write_all(bytes).await;
+    let close_result = temporary.close().await;
+    if write_result.is_err() || close_result.is_err() {
+        let _ = sftp.remove_file(temporary_path).await;
+        return Err(external_edit_sync_error());
+    }
+
+    let (current_revision, _) = match read_external_edit_remote(sftp, remote_path).await {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = sftp.remove_file(temporary_path).await;
+            return Err(error);
+        }
+    };
+    if current_revision != expected_revision {
+        let _ = sftp.remove_file(temporary_path).await;
+        return Err(external_edit_remote_changed_error());
+    }
+    if sftp
+        .rename(remote_path.to_owned(), backup_path.clone())
+        .await
+        .is_err()
+    {
+        let _ = sftp.remove_file(temporary_path).await;
+        return Err(external_edit_remote_changed_error());
+    }
+    if sftp
+        .rename(temporary_path.clone(), remote_path.to_owned())
+        .await
+        .is_err()
+    {
+        if sftp
+            .rename(backup_path.clone(), remote_path.to_owned())
+            .await
+            .is_err()
+        {
+            return Err(external_edit_recovery_error(backup_path));
+        }
+        let _ = sftp.remove_file(temporary_path).await;
+        return Err(external_edit_sync_error());
+    }
+    let _ = sftp.remove_file(backup_path).await;
+    Ok(ExternalEditUpload {
+        revision: text_revision(bytes),
+        bytes: bytes.len() as u64,
+        uploaded: true,
+    })
+}
+
 fn sftp_save_error() -> AppError {
     AppError {
         code: "SFTP_SAVE_FAILED".to_owned(),
@@ -4422,6 +5025,16 @@ fn remote_delete_error() -> AppError {
     AppError {
         code: "SFTP_DELETE_FAILED".to_owned(),
         message_key: "errors.sftpDeleteFailed".to_owned(),
+        retryable: false,
+        remote_state: RemoteState::Unknown,
+        field: None,
+    }
+}
+
+fn remote_quick_delete_error() -> AppError {
+    AppError {
+        code: "SFTP_QUICK_DELETE_FAILED".to_owned(),
+        message_key: "errors.sftpQuickDeleteFailed".to_owned(),
         retryable: false,
         remote_state: RemoteState::Unknown,
         field: None,
@@ -7453,7 +8066,10 @@ mod tests {
         AuthenticationMethod, ConnectionProfile, ConnectionState, EnvironmentKind,
     };
 
-    use super::{SessionRuntime, parse_linux_network_output, parse_posix_process_output};
+    use super::{
+        SessionRuntime, parse_linux_network_output, parse_posix_process_output,
+        permission_scope_matches, validate_remote_permission_input,
+    };
 
     fn hex(value: &str) -> String {
         value
@@ -7518,6 +8134,50 @@ mod tests {
         let jump_error = SessionRuntime::validate_profile_support(&jump_host)
             .expect_err("unmapped ProxyJump must not fall back to a direct connection");
         assert_eq!(jump_error.code, "SSH_PROXY_JUMP_MAPPING_REQUIRED");
+    }
+
+    #[test]
+    fn permission_scope_distinguishes_files_and_directories() {
+        use filex_contracts::RemotePermissionScope;
+
+        assert!(permission_scope_matches(
+            &RemotePermissionScope::All,
+            false,
+            true,
+        ));
+        assert!(permission_scope_matches(
+            &RemotePermissionScope::All,
+            true,
+            false,
+        ));
+        assert!(!permission_scope_matches(
+            &RemotePermissionScope::Files,
+            true,
+            false,
+        ));
+        assert!(!permission_scope_matches(
+            &RemotePermissionScope::Directories,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn recursive_permission_input_rejects_unsafe_paths_and_modes() {
+        use filex_contracts::{RemotePermissionScope, UpdateRemotePermissionsInput};
+
+        let mut input = UpdateRemotePermissionsInput {
+            path: "/srv/app".to_owned(),
+            mode: 0o750,
+            recursive: true,
+            scope: RemotePermissionScope::Files,
+        };
+        assert!(validate_remote_permission_input(&input).is_ok());
+        input.path = "/srv/../etc".to_owned();
+        assert!(validate_remote_permission_input(&input).is_err());
+        input.path = "/srv/app".to_owned();
+        input.mode = 0o10000;
+        assert!(validate_remote_permission_input(&input).is_err());
     }
 
     #[test]

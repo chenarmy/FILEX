@@ -96,6 +96,8 @@ pub fn default_safe_settings() -> SafeSettings {
         details_pane_open: false,
         host_panel_width: 280,
         file_browser_height: 260,
+        text_editor_preference: "internal".to_owned(),
+        external_editor_path: None,
         terminal_logging: false,
         backup_schedule: "daily".to_owned(),
         update_channel: "stable".to_owned(),
@@ -141,7 +143,11 @@ fn validate_safe_settings(settings: &SafeSettings) -> Result<(), AppError> {
         && (300..=520).contains(&settings.assistant_pane_width)
         && (96..=360).contains(&settings.task_drawer_height)
         && (200..=420).contains(&settings.host_panel_width)
-        && (160..=480).contains(&settings.file_browser_height)
+        && settings.file_browser_height >= 160
+        && ["internal", "external"].contains(&settings.text_editor_preference.as_str())
+        && settings.external_editor_path.as_deref().is_none_or(|path| {
+            !path.trim().is_empty() && !path.contains('\0') && path.len() <= 4_096
+        })
         && ["off", "daily", "weekly"].contains(&settings.backup_schedule.as_str())
         && ["stable", "beta"].contains(&settings.update_channel.as_str())
         && !settings.ui_font_family.trim().is_empty()
@@ -1727,6 +1733,8 @@ mod tests {
         assert!(settings.ui_font_family.contains("HarmonyOS Sans SC"));
         assert_eq!(settings.ui_font_size, 14);
         assert_eq!(settings.assistant_pane_width, 360);
+        assert_eq!(settings.text_editor_preference, "internal");
+        assert!(settings.external_editor_path.is_none());
     }
 
     #[test]
@@ -1769,6 +1777,17 @@ mod tests {
         let mut unsupported = default_safe_settings();
         unsupported.terminal_theme = "unknown-theme".to_owned();
         assert!(service.save(unsupported).is_err());
+    }
+
+    #[test]
+    fn safe_settings_allow_file_browser_taller_than_legacy_limit() {
+        let repository = Arc::new(TestSettingsRepository::default());
+        let service = SettingsService::new(repository);
+        let mut settings = default_safe_settings();
+        settings.file_browser_height = 720;
+        settings.text_editor_preference = "external".to_owned();
+        settings.external_editor_path = Some("/usr/bin/editor".to_owned());
+        assert!(service.save(settings).is_ok());
     }
 
     #[test]

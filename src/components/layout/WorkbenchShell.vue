@@ -6,6 +6,7 @@ import {
   CircleAlert,
   Command,
   Copy,
+  Download,
   FolderOpen,
   Info,
   KeyRound,
@@ -44,6 +45,7 @@ import { useConnectionsStore } from '@/stores/connections';
 import { useSettingsStore } from '@/stores/settings';
 import { useSessionsStore } from '@/stores/sessions';
 import { useUiStore } from '@/stores/ui';
+import { useUpdatesStore } from '@/stores/updates';
 import type { CommandPaletteCommand, CommandPaletteCommandId } from '@/types/commandPalette';
 import {
   formatKeyboardShortcut,
@@ -55,6 +57,7 @@ const connections = useConnectionsStore();
 const settings = useSettingsStore();
 const ui = useUiStore();
 const sessions = useSessionsStore();
+const updates = useUpdatesStore();
 const desktopWindowControls = desktopWindowControlsAvailable();
 const windowMaximized = ref(false);
 let windowControlsDisposed = false;
@@ -246,9 +249,12 @@ function beginFileBrowserResize(event: PointerEvent): void {
   event.preventDefault();
   const startY = event.clientY;
   const initial = settings.value.fileBrowserHeight;
+  const availableHeight = (event.currentTarget as HTMLElement | null)?.parentElement?.clientHeight
+    ?? window.innerHeight - 24;
+  const maxHeight = Math.max(160, availableHeight - 5);
   const move = (next: PointerEvent) => {
     const delta = startY - next.clientY;
-    settings.value.fileBrowserHeight = Math.min(480, Math.max(160, initial + delta));
+    settings.value.fileBrowserHeight = Math.min(maxHeight, Math.max(160, initial + delta));
   };
   const stop = () => {
     window.removeEventListener('pointermove', move);
@@ -279,7 +285,13 @@ function resizeFileBrowserByKeyboard(event: KeyboardEvent): void {
   if (!['ArrowUp', 'ArrowDown'].includes(event.key)) return;
   event.preventDefault();
   const direction = event.key === 'ArrowUp' ? 1 : -1;
-  settings.value.fileBrowserHeight = Math.min(480, Math.max(160, settings.value.fileBrowserHeight + direction * 12));
+  const availableHeight = (event.currentTarget as HTMLElement | null)?.parentElement?.clientHeight
+    ?? window.innerHeight - 24;
+  const maxHeight = Math.max(160, availableHeight - 5);
+  settings.value.fileBrowserHeight = Math.min(
+    maxHeight,
+    Math.max(160, settings.value.fileBrowserHeight + direction * 12),
+  );
 }
 
 function handleShortcut(event: KeyboardEvent): void {
@@ -485,6 +497,17 @@ onBeforeUnmount(() => {
         <button type="button" class="icon-button" :aria-label="t('commands.title')" :title="`${t('commands.title')} · ${formatKeyboardShortcut(settings.value.shortcuts.commandPalette)}`" @click="ui.openCommandPalette">
           <Command :size="15" />
         </button>
+        <button
+          v-if="updates.hasUpdateAvailable"
+          type="button"
+          class="icon-button update-available-button"
+          :class="{ active: updates.dialogOpen }"
+          :aria-label="t('updates.indicator', { version: updates.availableVersion ?? '' })"
+          :title="t('updates.indicator', { version: updates.availableVersion ?? '' })"
+          @click="updates.openDialog"
+        >
+          <Download :size="15" />
+        </button>
         <button type="button" class="icon-button" :aria-label="t('app.settings')" :title="t('app.settings')" @click="ui.openSettings()">
           <Settings :size="15" />
         </button>
@@ -521,19 +544,6 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <div class="session-tabs-bar">
-      <div id="session-tabs-slot" class="session-tabs-slot" />
-      <div v-if="sessionErrorVisible" class="security-summary error" role="alert" :title="sessionErrorText">
-        <CircleAlert :size="13" />
-        <span>{{ sessionErrorText }}</span>
-        <button type="button" class="icon-button" :aria-label="t('app.dismissNotice')" :title="t('app.dismissNotice')" @click="sessions.clearError"><X :size="12" /></button>
-      </div>
-      <div v-else-if="!hasActiveSession" class="security-summary">
-        <ShieldCheck :size="13" />
-        <span>{{ t('inspector.trustUnknown') }}</span>
-      </div>
-    </div>
-
     <section class="workbench-main">
       <ConnectionsPane v-if="!focusMode" ref="connectionsPane" />
       <button
@@ -559,6 +569,18 @@ onBeforeUnmount(() => {
         />
       </template>
       <div class="center-column">
+        <div class="session-tabs-bar">
+          <div id="session-tabs-slot" class="session-tabs-slot" />
+          <div v-if="sessionErrorVisible" class="security-summary error" role="alert" :title="sessionErrorText">
+            <CircleAlert :size="13" />
+            <span>{{ sessionErrorText }}</span>
+            <button type="button" class="icon-button" :aria-label="t('app.dismissNotice')" :title="t('app.dismissNotice')" @click="sessions.clearError"><X :size="12" /></button>
+          </div>
+          <div v-else-if="!hasActiveSession" class="security-summary">
+            <ShieldCheck :size="13" />
+            <span>{{ t('inspector.trustUnknown') }}</span>
+          </div>
+        </div>
         <TerminalWorkspace ref="terminalWorkspace" />
         <CommandInputBar v-if="commandBarVisible" />
         <template v-if="fileBrowserVisible">

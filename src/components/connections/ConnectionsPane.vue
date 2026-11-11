@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import { ChevronDown, CircleAlert, Download, FileInput, LoaderCircle, Plus, Search, Server, Star } from 'lucide-vue-next';
 import { t } from '@/i18n';
 import { useConnectionsStore } from '@/stores/connections';
 import { useSessionsStore } from '@/stores/sessions';
 import { useUiStore } from '@/stores/ui';
 import type { ConnectionProfile } from '@/types/contracts';
+import { filterProfiles } from '@/domain/connections';
 import SnippetPane from '@/components/connections/SnippetPane.vue';
 import TunnelsPane from '@/components/connections/TunnelsPane.vue';
 
@@ -17,6 +18,40 @@ const filterInput = ref<HTMLInputElement | null>(null);
 const showFavoritesOnly = ref(false);
 const displayedProfiles = computed(() => showFavoritesOnly.value ? connections.filteredFavoriteProfiles : connections.filteredProfiles);
 const displayedGroups = computed(() => showFavoritesOnly.value ? connections.favoriteGroupedProfiles : connections.groupedProfiles);
+const quickConnectionProfiles = computed<ConnectionProfile[]>(() => {
+  if (showFavoritesOnly.value) return [];
+  return filterProfiles(
+    Object.values(sessions.quickProfiles)
+      .flatMap((profile) => {
+        const session = [...sessions.summaries]
+          .reverse()
+          .find((candidate) => candidate.profileId === profile.id && candidate.state !== 'closed');
+        if (!session) return [];
+        return [{
+          ...profile,
+          state: session.state === 'connected'
+            ? 'connected' as const
+            : session.state === 'failed'
+              ? 'failed' as const
+              : session.state === 'disconnected'
+                ? 'degraded' as const
+                : 'connecting' as const,
+        }];
+      }),
+    connections.query,
+  );
+});
+const hasDisplayedProfiles = computed(() => displayedProfiles.value.length > 0 || quickConnectionProfiles.value.length > 0);
+const recentEntries = computed(() => {
+  const timestamp = (value: string | null): number => {
+    if (!value) return 0;
+    return /^\d+$/.test(value) ? Number(value) : Date.parse(value) || 0;
+  };
+  return [...connections.recentProfiles, ...Object.values(sessions.quickProfiles)]
+    .filter((profile) => Boolean(profile.lastUsedAt))
+    .sort((left, right) => timestamp(right.lastUsedAt) - timestamp(left.lastUsedAt))
+    .slice(0, 20);
+});
 const emptyProfileMessage = computed(() => {
   if (!showFavoritesOnly.value) return t('nav.empty');
   return connections.profiles.some((profile) => profile.favorite) && connections.query.trim()
@@ -51,6 +86,23 @@ async function openProfile(profile: ConnectionProfile): Promise<void> {
   }
   await sessions.begin(profile);
 }
+
+function selectConnectionsEntry(profile: ConnectionProfile): void {
+  connections.select(profile.id);
+  if (!sessions.isQuickProfile(profile.id)) return;
+  const session = [...sessions.summaries]
+    .reverse()
+    .find((candidate) => candidate.profileId === profile.id && candidate.state !== 'closed');
+  if (session) sessions.selectSession(session.id);
+}
+
+watch(
+  () => sessions.activeSession?.profileId,
+  (profileId) => {
+    if (profileId) connections.select(profileId);
+  },
+  { immediate: true },
+);
 
 async function focusFilter(): Promise<void> {
   activeMode.value = 'connections';
@@ -120,10 +172,40 @@ defineExpose({ focusFilter });
         <CircleAlert :size="16" />
         <span>{{ t(connections.error.messageKey as Parameters<typeof t>[0]) }}</span>
       </div>
-      <div v-else-if="displayedProfiles.length === 0" class="pane-state">
+      <div v-else-if="!hasDisplayedProfiles" class="pane-state">
         {{ emptyProfileMessage }}
       </div>
       <template v-else>
+        <section v-if="quickConnectionProfiles.length" class="connection-group">
+          <h2>
+            <ChevronDown :size="12" />
+            <span>{{ t('nav.quickConnections') }}</span>
+            <small>{{ quickConnectionProfiles.length }}</small>
+          </h2>
+          <div
+            v-for="profile in quickConnectionProfiles"
+            :key="profile.id"
+            class="connection-row-shell"
+            :class="{ selected: profile.id === connections.activeProfileId }"
+          >
+            <button
+              type="button"
+              class="connection-row"
+              :class="{ selected: profile.id === connections.activeProfileId }"
+              :aria-pressed="profile.id === connections.activeProfileId"
+              @click="selectConnectionsEntry(profile)"
+              @dblclick.prevent="openProfile(profile)"
+              @keydown.enter.prevent="openProfile(profile)"
+            >
+              <span class="state-dot" :class="profile.state" :title="stateLabel(profile)" />
+              <span class="connection-copy">
+                <strong :title="profile.name">{{ profile.name }}</strong>
+                <small class="mono" :title="`${profile.username}@${profile.host}`">{{ profile.username }}@{{ profile.host }}</small>
+              </span>
+            </button>
+            <Server :size="11" class="row-muted connection-quick-icon" />
+          </div>
+        </section>
         <section v-for="[group, profiles] in displayedGroups" :key="group" class="connection-group">
           <h2>
             <ChevronDown :size="12" />
@@ -167,8 +249,8 @@ defineExpose({ focusFilter });
       </template>
     </div>
     <div v-else-if="activeMode === 'recent'" class="recent-list">
-      <p v-if="connections.recentProfiles.length === 0" class="pane-state">{{ t('nav.recentEmpty') }}</p>
-      <button v-for="profile in connections.recentProfiles" :key="profile.id" type="button" class="recent-row" :disabled="sessions.busy" @click="openProfile(profile)">
+      <p v-if="recentEntries.length === 0" class="pane-state">{{ t('nav.recentEmpty') }}</p>
+      <button v-for="profile in recentEntries" :key="profile.id" type="button" class="recent-row" :disabled="sessions.busy" @click="openProfile(profile)">
         <span class="state-dot" :class="profile.state" />
         <span class="recent-copy"><strong :title="profile.name">{{ profile.name }}</strong><small class="mono" :title="`${profile.username}@${profile.host}`">{{ profile.username }}@{{ profile.host }}</small><small>{{ t('nav.recentUsed', { time: recentDate(profile.lastUsedAt) }) }}</small></span>
         <Server :size="11" class="row-muted" />
@@ -189,4 +271,5 @@ defineExpose({ focusFilter });
 .recent-copy { display: grid; min-width: 0; gap: 2px; }
 .recent-copy strong, .recent-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .recent-copy small { color: hsl(var(--muted-foreground)); font-size: 0.75rem; }
+.connection-quick-icon { justify-self: center; }
 </style>

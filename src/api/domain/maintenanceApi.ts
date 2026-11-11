@@ -1,5 +1,6 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
+import packageJson from '../../../package.json';
 import { failure, isTauriRuntime, normalizeUnknownError, success } from '@/api/common';
 import type { MaintenanceArtifact, OperationResult, UpdateStatus } from '@/types/contracts';
 
@@ -74,7 +75,7 @@ export async function createDiagnostics(): Promise<OperationResult<MaintenanceAr
 
 export async function getUpdateStatus(): Promise<OperationResult<UpdateStatus>> {
   if (!isTauriRuntime()) return success({
-    currentVersion: '0.1.0',
+    currentVersion: packageJson.version,
     channel: 'stable',
     configured: false,
     availableVersion: null,

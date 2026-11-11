@@ -22,6 +22,7 @@ export type TerminalEncoding = 'utf-8' | 'gbk' | 'big5' | 'shift_jis' | 'windows
 export type LocaleCode = 'zh-CN' | 'en-US';
 export type CredentialStoreStatus = 'available' | 'locked' | 'unavailable' | 'unsupported';
 export type AuthenticationMethod = 'password' | 'private_key' | 'agent';
+export type TextEditorPreference = 'internal' | 'external';
 
 export interface AppError {
   code: string;
@@ -292,6 +293,20 @@ export interface RemoteFileEntry {
   gid?: number | null;
 }
 
+export type RemotePermissionScope = 'all' | 'files' | 'directories';
+
+export interface UpdateRemotePermissionsInput {
+  path: string;
+  mode: number;
+  recursive: boolean;
+  scope: RemotePermissionScope;
+}
+
+export interface RemotePermissionUpdateResult {
+  updatedCount: number;
+  skippedSymlinkCount: number;
+}
+
 export interface LocalFileEntry {
   name: string;
   path: string;
@@ -322,6 +337,26 @@ export interface RemoteTextSaveResult {
   bytes: number;
   revision: string;
   recoveryCopyPath: string | null;
+}
+
+export type ExternalEditorState = 'watching' | 'synced' | 'conflict' | 'failed';
+
+export interface ExternalEditorSession {
+  id: string;
+  sessionId: string;
+  remotePath: string;
+  localPath: string;
+  localRevision: string;
+  remoteRevision: string;
+  bytes: number;
+  state: ExternalEditorState;
+  lastSyncedAtMs: number | null;
+  error: AppError | null;
+}
+
+export interface ExternalEditorSyncResult {
+  session: ExternalEditorSession;
+  uploaded: boolean;
 }
 
 export interface LocalTextPreview {
@@ -558,6 +593,8 @@ export interface SafeSettings {
   detailsPaneOpen: boolean;
   hostPanelWidth: number;
   fileBrowserHeight: number;
+  textEditorPreference: TextEditorPreference;
+  externalEditorPath: string | null;
   terminalLogging: boolean;
   backupSchedule: 'off' | 'daily' | 'weekly';
   updateChannel: 'stable' | 'beta';

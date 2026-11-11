@@ -1,5 +1,63 @@
 # FILEX verification evidence
 
+## 2026-11-11 — file context menu, recursive permissions and managed external editing
+
+Expanded the bottom file browser with a keyboard-accessible context menu, native multi-file/folder upload selection, new file and folder creation, recursive owner/group/other permissions, bounded recursive quick delete, and file-open/editing preferences. The fixed 480 px browser-height ceiling was removed; pointer and keyboard resizing now use the available center-column height, and the persisted height may exceed the old limit.
+
+Successful quick connections now remain visible in both the Connections view and Recent view for the lifetime of their transient session. They are grouped as “Quick connections,” update last-connected time after password authentication, select the matching terminal tab, and are cleared with the in-memory quick profile; no profile or credential metadata is newly persisted.
+
+Opening a remote file with the OS association or a selected external executable now creates a 32 MiB-bounded app-owned copy and a server-side managed edit session. FILEX watches stable local saves, verifies the expected remote SHA-256 revision, writes a sibling temporary remote file, preserves permissions, and atomically replaces the original. A concurrent remote writer changes the state to a visible conflict and prevents automatic upload. Quick delete and recursive permission edits pre-scan at most 5,000 entries and 16 levels and do not follow symbolic links.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| TypeScript | `pnpm typecheck` | Passed |
+| Lint | `pnpm lint` | Passed with zero warnings |
+| Unit tests | `pnpm test` | Passed: 14 files, 51 tests |
+| Front-end build | `pnpm build` | Passed; existing Monaco/main chunk-size warnings remain |
+| Browser E2E | `pnpm exec playwright test e2e/workbench.spec.ts` | Passed: 19 scenarios with no page, console or failed-request errors |
+| Real SSH E2E | dedicated WebView2 CDP run | Passed: quick connect, terminal search, SFTP, monitor, new file, recursive chmod, external-editor auto-upload, remote-conflict protection and recursive delete |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust workspace tests | `cargo test --workspace --locked` | Passed: 33 tests, including permission-scope and tall-browser settings coverage |
+| Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
+
+The real SSH pass finished with 13 named stages: `workbench-visible`, `quick-connect-submitted`, `password-submitted`, `ssh-connected`, `quick-connection-visible-in-navigation`, `terminal-marker-search-pass`, `terminal-accessibility-pass`, `sftp-listing-pass`, `monitor-sampled`, `file-create-and-recursive-permissions-pass`, `external-editor-conflict-pass`, `external-editor-autosync-pass`, and `quick-recursive-delete-pass`. It recorded zero page errors, console errors or failed requests.
+
+Evidence frames:
+
+- `test-results/file-context-menu-1440.png`
+- `test-results/file-context-menu-960x640.png`
+- `test-results/file-context-permission-1440.png`
+- `test-results/quick-connection-recent-1440.png`
+- `test-results/live-ssh-connected-files-monitor-1280x800.png`
+
+The native file/folder picker itself is a system modal and was not driven by this automated pass; its typed desktop boundary, menu triggers and selected-path upload queue were covered by compile/unit checks and the existing transfer path. External-editor launch and automatic upload were verified on Windows against the live SSH target; macOS/Linux executable launch still requires platform acceptance.
+
+## 2026-11-11 — automatic signed update discovery
+
+Adapted the GITBX update cadence to FILEX without importing GITBX endpoints, storage keys, copy or transport logic. The workbench now shares one update state across startup scheduling, the context-bar update entry, Settings → Updates and the update dialog.
+
+The implementation adds a non-blocking 3.5-second startup check, 30-minute periodic checks and foreground-return throttling. The first discovery opens a bounded, keyboard-contained update dialog; later discoveries expose a persistent update button. A skipped version and the last successful check time use the FILEX-specific `filex.update-preferences.v1` local preference. Background failures do not show notifications or advance the success timestamp. Download progress, cancellation, version revalidation and explicit installation continue through the typed maintenance facade and Rust updater commands.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| TypeScript | `pnpm typecheck` | Passed |
+| Lint | `pnpm lint` | Passed with zero warnings |
+| Unit tests | `pnpm test` | Passed: 14 files, 50 tests |
+| Front-end build | `pnpm build` | Passed; existing Monaco/main chunk-size warnings remain |
+| Browser E2E | `pnpm test:e2e -- e2e/workbench.spec.ts` | Passed: 15 scenarios with no page, console or failed-request errors |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust tests | `cargo test --workspace` | Passed: 30 tests |
+| Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
+
+The controlled browser scenario verified the persistent update entry, first-discovery dialog, initial close-button focus, Shift+Tab focus containment, release notes, Later focus restoration, 50% download state, 960 × 640 light theme with 20 px text, no page overflow, Skip this version and persisted skip state.
+
+Evidence frames:
+
+- `test-results/update-available-dark-1440.png`
+- `test-results/update-download-light-960-font20.png`
+
+The currently installed FILEX 0.1.0 predates this logic, so it still requires one manual update to a build containing this slice. Live automatic discovery and installation against a separately published newer signed version remain packaged-release acceptance work and are not claimed here.
+
 ## 2026-11-11 — v0.1.1 signed GitHub and CNB release published
 
 Published FILEX `v0.1.1` from commit `c09e0543d5b129ac50ef57fda82b95f7389d9444`. The unpublished local `v0.1.1` tag from the interrupted prior attempt was moved to the final verified commit only after confirming that no remote tag existed.

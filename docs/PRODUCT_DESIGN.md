@@ -145,7 +145,10 @@ A typed, inspectable proposal produced by the assistant. It contains the target 
 
 - Remote file browser bound to the active session.
 - Optional local file pane for deliberate drag/drop and path selection.
-- Upload, download, create folder, rename, move, copy, delete, refresh, and permission inspection.
+- A keyboard-accessible right-click menu for selection, opening, copy path, upload/download, create file or folder, rename, delete, quick recursive delete, refresh, and permission editing.
+- Native multi-file and folder upload selection. Opening a remote file can use the built-in editor, the OS association, or a user-selected external editor executable.
+- Managed external editing copies one remote file into an app-owned cache and watches local saves. A stable local save is atomically uploaded over the original remote path only when the remote revision still matches the version FILEX opened; conflicts stop automatic upload.
+- Remote permission editing with owner/group/other read-write-execute controls, optional bounded recursion, and explicit all/files/directories scope.
 - Transfer queue with pause when technically supported, cancel, retry, conflict policy, partial failure, and restart recovery.
 - Inline text preview/editor only for bounded text files; binary and oversized files open through an explicit external action.
 - Remote deletion uses clear target context and distinguishes files, directories, and symlinks.
@@ -166,7 +169,7 @@ A typed, inspectable proposal produced by the assistant. It contains the target 
 ### P1 — productivity
 
 - Parameterized command snippets with preview and safe history.
-- Quick connect that does not persist credentials unless explicitly saved.
+- Quick connect that does not persist credentials unless explicitly saved. Successful quick sessions remain visible as in-memory “Quick connections” and in Recent until that session ends, so connected hosts never disappear from navigation merely because they are not durable profiles.
 - Session templates and profile duplication.
 - Host-level notes and tags.
 - File checksum comparison and safe directory synchronization preview.
@@ -182,6 +185,7 @@ Aligned with the public feature set of open SSH workbenches (FileTerm as referen
 - Terminal rendering requires an effective monospace font. Unavailable or proportional font choices fall back locally to the safe terminal stack, and every stable pane/font/layout change re-fits xterm before synchronizing the remote PTY size so full-screen TTY programs retain column alignment.
 - Optional terminal working-directory tracking through OSC 7 shell integration. When enabled, the remote file browser may follow the shell's current directory; reliability limits stay visible and the paths remain independently navigable.
 - Remote permission mode editing (chmod) with an explicit octal review before mutation; file rows display numeric uid/gid ownership when the server provides it.
+- File-browser right-click menus expose the same actions as the toolbar and keyboard paths, including native file/folder upload, new file/folder, recursive permission editing, bounded quick delete, internal/system/external editing, and external-editor configuration.
 - Monitor samples extend to load averages 1/5/15 and a bounded multi-mount disk list; the host panel renders a bounded network rate history chart.
 - Virtualized scrolling for large directory listings so bounded listings stay interactive.
 - Monaco-based editor panel for bounded remote and local text files with syntax highlighting, find/replace and multiple open tabs; the lightweight preview dialog remains available.
@@ -283,6 +287,15 @@ Acceptance checks:
 3. The assistant explains or drafts an action. Generated shell text remains a proposal and is never written into the terminal input buffer without a visible user action.
 4. A requested tool call shows target, parameters, risk, expected mutation and confirmation requirement.
 5. FILEX revalidates session generation, trust and policy before execution, then records a sanitized decision/result event.
+
+### 8.7 Signed update discovery and installation
+
+1. After the workbench is mounted, FILEX checks the signed stable feed without blocking first paint, SSH work or file operations.
+2. Periodic checks run on a bounded 30-minute cadence, and returning to the foreground triggers a check only when the last successful check is older than the interval.
+3. The first available-version discovery in an application session opens a dismissible update workspace containing current/available versions, bounded release notes, download state and explicit Later, Skip this version and Download and install actions.
+4. Later background discoveries expose a persistent contextual update button rather than interrupting the active workbench. A skipped version remains hidden from automatic discovery but remains inspectable through a manual check.
+5. Background failures remain quiet and retryable. Manual check and install failures use localized structured feedback. FILEX records the last successful check time only after a successful feed check.
+6. Installation always requires an explicit user action after reviewing the version; the Rust boundary rechecks the signed feed and verifies that the reviewed version still matches before downloading or installing.
 
 ## 9. State models
 

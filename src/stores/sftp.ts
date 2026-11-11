@@ -2,20 +2,30 @@ import { ref } from 'vue';
 import { defineStore } from 'pinia';
 import {
   createRemoteDirectory,
+  createRemoteFile,
   copyRemoteEntry,
   deleteRemoteEntry,
+  deleteRemoteEntryRecursive,
   listRemoteDirectory,
   moveRemoteEntry,
-  openRemoteFileExternally,
   previewRemoteText,
   renameRemoteEntry,
   saveRemoteText,
   updateRemoteEntryMode,
+  updateRemotePermissions,
 } from '@/api/domain/sftpApi';
 import { cancelCopyOperation } from '@/api/domain/fileOperationsApi';
-import type { AppError, RemoteFileEntry, RemoteTextPreview } from '@/types/contracts';
+import { useExternalEditorsStore } from '@/stores/externalEditors';
+import type {
+  AppError,
+  RemoteFileEntry,
+  RemotePermissionUpdateResult,
+  RemoteTextPreview,
+  UpdateRemotePermissionsInput,
+} from '@/types/contracts';
 
 export const useSftpStore = defineStore('sftp', () => {
+  const externalEditors = useExternalEditorsStore();
   const entries = ref<RemoteFileEntry[]>([]);
   const path = ref('.');
   const sessionId = ref<string | null>(null);
@@ -29,6 +39,7 @@ export const useSftpStore = defineStore('sftp', () => {
   const externalOpening = ref(false);
   const deleting = ref(false);
   const creatingDirectory = ref(false);
+  const creatingFile = ref(false);
   const renaming = ref(false);
   const moving = ref(false);
   const copying = ref(false);
@@ -113,6 +124,29 @@ export const useSftpStore = defineStore('sftp', () => {
     }
   }
 
+  async function removeRecursive(entry: RemoteFileEntry): Promise<number | null> {
+    if (!sessionId.value || deleting.value) return null;
+    const targetSessionId = sessionId.value;
+    const currentPath = path.value;
+    const listingGeneration = requestGeneration;
+    const isCurrentListing = () => listingGeneration === requestGeneration
+      && targetSessionId === sessionId.value
+      && currentPath === path.value;
+    deleting.value = true;
+    error.value = null;
+    try {
+      const result = await deleteRemoteEntryRecursive(targetSessionId, entry.path);
+      if (!result.ok) {
+        if (isCurrentListing()) error.value = result.error;
+        return null;
+      }
+      if (isCurrentListing()) await load(targetSessionId, currentPath);
+      return result.data;
+    } finally {
+      deleting.value = false;
+    }
+  }
+
   async function createDirectory(name: string): Promise<boolean> {
     if (!sessionId.value || creatingDirectory.value) return false;
     const targetSessionId = sessionId.value;
@@ -133,6 +167,29 @@ export const useSftpStore = defineStore('sftp', () => {
       return true;
     } finally {
       creatingDirectory.value = false;
+    }
+  }
+
+  async function createFile(name: string): Promise<boolean> {
+    if (!sessionId.value || creatingFile.value) return false;
+    const targetSessionId = sessionId.value;
+    const currentPath = path.value;
+    const listingGeneration = requestGeneration;
+    const isCurrentListing = () => listingGeneration === requestGeneration
+      && targetSessionId === sessionId.value
+      && currentPath === path.value;
+    creatingFile.value = true;
+    error.value = null;
+    try {
+      const result = await createRemoteFile(targetSessionId, currentPath, name);
+      if (!result.ok) {
+        if (isCurrentListing()) error.value = result.error;
+        return false;
+      }
+      if (isCurrentListing()) await load(targetSessionId, currentPath);
+      return true;
+    } finally {
+      creatingFile.value = false;
     }
   }
 
@@ -241,6 +298,35 @@ export const useSftpStore = defineStore('sftp', () => {
     }
   }
 
+  async function changePermissions(
+    entry: RemoteFileEntry,
+    input: Omit<UpdateRemotePermissionsInput, 'path'>,
+  ): Promise<RemotePermissionUpdateResult | null> {
+    if (!sessionId.value || changingMode.value || entry.isSymlink) return null;
+    const targetSessionId = sessionId.value;
+    const currentPath = path.value;
+    const listingGeneration = requestGeneration;
+    const isCurrentListing = () => listingGeneration === requestGeneration
+      && targetSessionId === sessionId.value
+      && currentPath === path.value;
+    changingMode.value = true;
+    error.value = null;
+    try {
+      const result = await updateRemotePermissions(targetSessionId, {
+        ...input,
+        path: entry.path,
+      });
+      if (!result.ok) {
+        if (isCurrentListing()) error.value = result.error;
+        return null;
+      }
+      if (isCurrentListing()) await load(targetSessionId, currentPath);
+      return result.data;
+    } finally {
+      changingMode.value = false;
+    }
+  }
+
   async function savePreview(content: string): Promise<boolean> {
     const currentPreview = preview.value;
     if (!sessionId.value || !currentPreview || currentPreview.truncated || savingPreview.value) return false;
@@ -280,13 +366,9 @@ export const useSftpStore = defineStore('sftp', () => {
     const targetPath = previewPath.value;
     externalOpening.value = true;
     try {
-      const result = await openRemoteFileExternally(targetSessionId, targetPath);
+      const opened = await externalEditors.openRemote(targetSessionId, targetPath, 'system');
       if (targetSessionId !== sessionId.value || targetPath !== previewPath.value) return false;
-      if (!result.ok) {
-        previewError.value = result.error;
-        return false;
-      }
-      return true;
+      return opened;
     } finally {
       externalOpening.value = false;
     }
@@ -324,6 +406,7 @@ export const useSftpStore = defineStore('sftp', () => {
     loading.value = false;
     deleting.value = false;
     creatingDirectory.value = false;
+    creatingFile.value = false;
     renaming.value = false;
     moving.value = false;
     copying.value = false;
@@ -337,10 +420,10 @@ export const useSftpStore = defineStore('sftp', () => {
 
   return {
     entries, path, sessionId, selectedPath, loading, error,
-    preview, previewPath, previewLoading, previewError, externalOpening, deleting, creatingDirectory, renaming, moving, copying,
+    preview, previewPath, previewLoading, previewError, externalOpening, deleting, creatingDirectory, creatingFile, renaming, moving, copying,
     changingMode, savingPreview, recoveryCopyPath,
     load, open, parent, clear, select, previewFile, closePreview,
-    remove, createDirectory, rename, move, copy, cancelCopy, changeMode, savePreview,
+    remove, removeRecursive, createDirectory, createFile, rename, move, copy, cancelCopy, changeMode, changePermissions, savePreview,
     openPreviewExternally,
   };
 });

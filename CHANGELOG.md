@@ -1,5 +1,23 @@
 # FILEX changelog
 
+## [Unreleased]
+
+## [0.1.2] - 2026-11-11
+
+### Added
+
+- GITBX-style signed update discovery with a delayed startup check, 30-minute background checks and foreground-return throttling.
+- A dismissible update dialog with version context, bounded release notes, download progress, Later, Skip this version and explicit Download and install actions.
+- A persistent contextual update button for versions discovered after the startup check, plus non-secret persistence for the last successful check and skipped version.
+- A keyboard-accessible file context menu with native file/folder upload, new file/folder, copy path, recursive permissions, quick recursive delete, and internal/system/configured external editing.
+- Managed external-editor sessions that upload stable local saves back to the original remote file atomically and stop on remote revision conflicts.
+
+### Fixed
+
+- Successful quick connections now appear as in-memory temporary connections and in Recent while their session exists, instead of leaving the navigation pane empty.
+- The bottom file browser can grow beyond its former fixed 480 px height up to the available workspace height.
+- Terminal tabs and pane chrome are denser and use fewer nested borders, while native WebView context menus are suppressed so FILEX-owned menus behave consistently.
+
 ## [0.1.1] - 2026-11-10
 
 ### Added

@@ -89,4 +89,26 @@ describe('safe settings repository', () => {
       terminalTheme: 'nord',
     });
   });
+
+  it('preserves tall file browsers and sanitizes external editor settings', () => {
+    localStorage.setItem('filex.safe-settings.v1', JSON.stringify({
+      fileBrowserHeight: 720,
+      textEditorPreference: 'external',
+      externalEditorPath: '  C:\\Tools\\editor.exe  ',
+    }));
+    expect(readSafeSettings()).toMatchObject({
+      fileBrowserHeight: 720,
+      textEditorPreference: 'external',
+      externalEditorPath: 'C:\\Tools\\editor.exe',
+    });
+
+    localStorage.setItem('filex.safe-settings.v1', JSON.stringify({
+      textEditorPreference: 'unsupported',
+      externalEditorPath: `bad\u0000path`,
+    }));
+    expect(readSafeSettings()).toMatchObject({
+      textEditorPreference: 'internal',
+      externalEditorPath: null,
+    });
+  });
 });

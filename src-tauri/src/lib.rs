@@ -1,3 +1,4 @@
+mod external_editor;
 mod known_hosts;
 mod profile_export;
 mod session_runtime;
@@ -16,6 +17,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use external_editor::ExternalEditorRuntime;
 use filex_contracts::{
     AppError, AuthenticationMethod, CommandSnippet, ConnectionProfile, ConnectionState,
     CreateConnectionProfileInput, CreateLocalTunnelInput, CreateTransferInput,
@@ -24,10 +26,11 @@ use filex_contracts::{
     ImportKnownHostsInput, ImportKnownHostsResult, KnownHostsImportPreview, LocalDirectoryListing,
     LocalFileEntry, LocalTextPreview, LocalTextSaveResult, MaintenanceArtifact, NetworkSnapshot,
     OperationResult, ProcessSnapshot, QuickConnectInput, RecordHostTrustInput, RemoteFileEntry,
-    RemoteState, RemoteTextPreview, RemoteTextSaveResult, RuntimePaths, SafeSettings,
-    SaveCommandSnippetInput, SessionConnectionProgress, SessionSummary, SshConfigImportPreview,
-    SystemMonitorSnapshot, TransferState, TransferTask, TunnelRule, TunnelSummary,
-    UpdateConnectionProfileInput, UpdateStatus, UpdateTunnelRuleInput,
+    RemotePermissionUpdateResult, RemoteState, RemoteTextPreview, RemoteTextSaveResult,
+    RuntimePaths, SafeSettings, SaveCommandSnippetInput, SessionConnectionProgress, SessionSummary,
+    SshConfigImportPreview, SystemMonitorSnapshot, TransferState, TransferTask, TunnelRule,
+    TunnelSummary, UpdateConnectionProfileInput, UpdateRemotePermissionsInput, UpdateStatus,
+    UpdateTunnelRuleInput,
 };
 use filex_core::{
     HostTrustService, ProfileService, SettingsService, TransferService, TunnelRuleService,
@@ -3699,6 +3702,32 @@ fn preview_local_text(path: String) -> OperationResult<LocalTextPreview> {
 }
 
 #[tauri::command]
+async fn open_local_file_externally(
+    path: String,
+    editor_path: Option<String>,
+) -> OperationResult<()> {
+    let (entry_path, _) = match canonical_local_entry(&path) {
+        Ok(paths) => paths,
+        Err(error) => return OperationResult::failure(error),
+    };
+    let metadata = match fs::symlink_metadata(&entry_path) {
+        Ok(metadata) => metadata,
+        Err(_) => return OperationResult::failure(local_file_operation_error()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return OperationResult::failure(local_file_operation_error());
+    }
+    let editor = match external_editor::normalize_editor_path(editor_path).await {
+        Ok(editor) => editor,
+        Err(error) => return OperationResult::failure(error),
+    };
+    match external_editor::launch_editor(editor.as_deref(), &entry_path) {
+        Ok(()) => OperationResult::success(()),
+        Err(_) => OperationResult::failure(external_open_launch_error()),
+    }
+}
+
+#[tauri::command]
 fn save_local_text(
     path: String,
     content: String,
@@ -3800,6 +3829,25 @@ fn create_local_directory(parent_path: String, name: String) -> OperationResult<
     };
     match fs::create_dir(parent.join(name)) {
         Ok(()) => OperationResult::success(()),
+        Err(_) => OperationResult::failure(local_file_operation_error()),
+    }
+}
+
+#[tauri::command]
+fn create_local_file(parent_path: String, name: String) -> OperationResult<()> {
+    if let Err(error) = validate_local_basename(&name) {
+        return OperationResult::failure(error);
+    }
+    let parent = match canonical_local_directory(&parent_path) {
+        Ok(parent) => parent,
+        Err(error) => return OperationResult::failure(error),
+    };
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(parent.join(name))
+    {
+        Ok(_) => OperationResult::success(()),
         Err(_) => OperationResult::failure(local_file_operation_error()),
     }
 }
@@ -4421,6 +4469,24 @@ async fn preview_remote_text(
 }
 
 #[tauri::command]
+async fn create_remote_file(
+    session_id: String,
+    parent_path: String,
+    name: String,
+    sessions: State<'_, SessionRuntime>,
+) -> Result<OperationResult<()>, ()> {
+    Ok(
+        match sessions
+            .create_remote_file(&session_id, &parent_path, &name)
+            .await
+        {
+            Ok(()) => OperationResult::success(()),
+            Err(error) => OperationResult::failure(error),
+        },
+    )
+}
+
+#[tauri::command]
 async fn update_remote_entry_mode(
     session_id: String,
     path: String,
@@ -4433,6 +4499,40 @@ async fn update_remote_entry_mode(
             .await
         {
             Ok(()) => OperationResult::success(()),
+            Err(error) => OperationResult::failure(error),
+        },
+    )
+}
+
+#[tauri::command]
+async fn update_remote_permissions(
+    session_id: String,
+    input: UpdateRemotePermissionsInput,
+    sessions: State<'_, SessionRuntime>,
+) -> Result<OperationResult<RemotePermissionUpdateResult>, ()> {
+    Ok(
+        match sessions
+            .update_remote_entry_permissions(&session_id, &input)
+            .await
+        {
+            Ok(result) => OperationResult::success(result),
+            Err(error) => OperationResult::failure(error),
+        },
+    )
+}
+
+#[tauri::command]
+async fn delete_remote_entry_recursive(
+    session_id: String,
+    path: String,
+    sessions: State<'_, SessionRuntime>,
+) -> Result<OperationResult<u32>, ()> {
+    Ok(
+        match sessions
+            .delete_remote_entry_recursive(&session_id, &path)
+            .await
+        {
+            Ok(deleted_count) => OperationResult::success(deleted_count),
             Err(error) => OperationResult::failure(error),
         },
     )
@@ -5202,6 +5302,9 @@ fn schedule_graceful_exit<R: tauri::Runtime>(
                 }
             }
         }
+        if let Some(editors) = app.try_state::<ExternalEditorRuntime>() {
+            editors.shutdown().await;
+        }
         if let Some(sessions) = app.try_state::<SessionRuntime>()
             && let Err(error) = sessions.shutdown().await
         {
@@ -5275,6 +5378,7 @@ pub fn run() {
             app.manage(TunnelRuleService::new(repository.clone()));
             app.manage(SystemCredentialStore);
             app.manage(SessionRuntime::default());
+            app.manage(ExternalEditorRuntime::default());
             app.manage(CopyOperationRuntime::default());
             app.manage(Arc::new(UpdateDownloadRuntime::default()));
             #[cfg(not(target_os = "macos"))]
@@ -5362,6 +5466,8 @@ pub fn run() {
             list_remote_directory,
             list_local_directory,
             inspect_local_entry,
+            create_remote_file,
+            create_local_file,
             create_local_directory,
             rename_local_entry,
             move_local_entry,
@@ -5369,12 +5475,18 @@ pub fn run() {
             cancel_copy_operation,
             delete_local_entry,
             preview_local_text,
+            open_local_file_externally,
             save_local_text,
             preview_remote_text,
             open_remote_file_externally,
+            external_editor::open_remote_file_in_editor,
+            external_editor::sync_external_editor,
+            external_editor::close_external_editor,
             save_remote_text,
             update_remote_entry_mode,
+            update_remote_permissions,
             delete_remote_entry,
+            delete_remote_entry_recursive,
             create_remote_directory,
             rename_remote_entry,
             move_remote_entry,

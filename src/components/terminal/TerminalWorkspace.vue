@@ -453,7 +453,7 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 3px;
+  gap: 2px;
   padding-inline: 4px;
   overflow-x: auto;
   background: transparent;
@@ -464,22 +464,23 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
   position: relative;
   display: flex;
   flex: 0 1 auto;
-  min-width: 92px;
-  max-width: 190px;
-  height: 27px;
+  min-width: 88px;
+  max-width: 180px;
+  height: 25px;
   align-items: center;
   gap: 5px;
-  padding-inline: 7px 23px;
+  padding-inline: 7px 22px;
   color: hsl(var(--muted-foreground));
   font-size: 0.75rem;
+  border-radius: 3px 3px 0 0;
 }
 
 .terminal-tab-item {
   position: relative;
   display: flex;
   flex: 0 1 auto;
-  min-width: 92px;
-  max-width: 190px;
+  min-width: 88px;
+  max-width: 180px;
   align-items: center;
 }
 
@@ -491,8 +492,8 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
 
 .terminal-tab.active::after {
   position: absolute;
-  inset-inline: 4px;
-  inset-block-end: -3px;
+  inset-inline: 2px;
+  inset-block-end: -1px;
   height: 2px;
   background: hsl(var(--primary));
   content: '';
@@ -519,11 +520,11 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
   inset-inline-end: 3px;
   display: inline-flex;
   flex: 0 0 auto;
-  width: 19px;
-  height: 27px;
+  width: 17px;
+  height: 17px;
   align-items: center;
   justify-content: center;
-  border-radius: 3px;
+  border-radius: 2px;
   color: hsl(var(--muted-foreground));
   background: transparent;
 }
@@ -545,9 +546,9 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
 
 .terminal-layout-button {
   display: inline-flex;
-  flex: 0 0 24px;
-  width: 24px;
-  height: 24px;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
   align-items: center;
   justify-content: center;
   border: 1px solid transparent;
@@ -578,7 +579,7 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
   align-items: center;
   overflow: hidden;
   color: hsl(var(--warning));
-  font-size: 0.6667rem;
+  font-size: 0.6875rem;
   font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -596,9 +597,14 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
   display: grid;
   min-width: 0;
   min-height: 0;
-  gap: 2px;
-  padding: 2px;
+  gap: 1px;
+  padding: 0;
   overflow: hidden;
+  background: transparent;
+}
+
+.terminal-pane-grid.layout-vertical,
+.terminal-pane-grid.layout-horizontal {
   background: hsl(var(--border));
 }
 
@@ -619,5 +625,9 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
 
 .terminal-pane-grid :deep(.terminal-pane) {
   border: 0;
+}
+
+.terminal-pane-grid.layout-single :deep(.terminal-pane-header) {
+  display: none;
 }
 </style>

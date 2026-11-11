@@ -1,6 +1,6 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { chromium, test } from '@playwright/test';
+import { chromium, expect, test } from '@playwright/test';
 
 const host = process.env.SSH_TEST_HOST?.trim();
 const password = process.env.SSH_TEST_PASSWORD;
@@ -32,6 +32,8 @@ test('live SSH trust, authentication, terminal, SFTP and monitoring', async ({ b
 
   const stages: string[] = [];
   const marker = `FILEX_LIVE_${Date.now()}`;
+  const auditRoot = `/tmp/filex-live-audit-${Date.now()}`;
+  let activeSessionId: string | null = null;
 
   async function waitForAny(selectors: string[], timeoutMs: number): Promise<string> {
     const deadline = Date.now() + timeoutMs;
@@ -51,6 +53,13 @@ test('live SSH trust, authentication, terminal, SFTP and monitoring', async ({ b
   try {
     await page.locator('.workbench-shell').waitFor({ state: 'visible', timeout: 15_000 });
     stages.push('workbench-visible');
+    const fileBrowser = page.locator('.file-browser-panel');
+    if (!await fileBrowser.isVisible().catch(() => false)) {
+      await page.locator(
+        '.context-actions button[aria-label="文件"], .context-actions button[aria-label="Files"]',
+      ).first().click();
+      stages.push('file-browser-opened');
+    }
 
     for (const selector of ['.password-dialog', '.trust-dialog']) {
       const staleDialog = page.locator(selector);
@@ -101,6 +110,12 @@ test('live SSH trust, authentication, terminal, SFTP and monitoring', async ({ b
     await page.locator('.command-input:not([disabled])').waitFor({ state: 'visible', timeout: 30_000 });
     await page.waitForTimeout(1_500);
     stages.push('ssh-connected');
+    await page.locator('.nav-mode').getByRole('button', { name: '最近', exact: true }).click();
+    await expect(page.locator('.recent-row', { hasText: `${username}@${host}` }).first()).toBeVisible();
+    await page.locator('.nav-mode').getByRole('button', { name: '连接', exact: true }).click();
+    await expect(page.getByText('临时连接', { exact: true })).toBeVisible();
+    await expect(page.locator('.connections-pane .connection-row', { hasText: `${username}@${host}` }).first()).toBeVisible();
+    stages.push('quick-connection-visible-in-navigation');
     await capture('live-ssh-connected-1280x800.png');
 
     await page.locator('.command-input').fill(`printf '%s\\n' '${marker}'`);
@@ -175,6 +190,178 @@ test('live SSH trust, authentication, terminal, SFTP and monitoring', async ({ b
     stages.push('monitor-sampled');
     await capture('live-ssh-connected-files-monitor-1280x800.png');
 
+    const invoke = async <T>(command: string, args: Record<string, unknown> = {}) => {
+      return page.evaluate(
+        ({ commandName, commandArgs }) => (
+          window as unknown as Window & {
+            __TAURI_INTERNALS__: {
+              invoke: (command: string, args: Record<string, unknown>) => Promise<unknown>;
+            };
+          }
+        ).__TAURI_INTERNALS__.invoke(commandName, commandArgs),
+        { commandName: command, commandArgs: args },
+      ) as Promise<T>;
+    };
+    type Result<T> = { ok: true; data: T } | { ok: false; error: { code: string } };
+    const ok = <T>(result: Result<T>, label: string): T => {
+      if (!result.ok) throw new Error(`${label}: ${result.error.code}`);
+      return result.data;
+    };
+    activeSessionId = await page.evaluate(() => {
+      const root = document.querySelector('#app') as HTMLElement & {
+        __vue_app__?: {
+          config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+        };
+      };
+      const sessions = root.__vue_app__?.config.globalProperties.$pinia?._s.get('sessions');
+      return sessions?.activeSessionId as string | undefined;
+    }) ?? null;
+    if (!activeSessionId) throw new Error('No active SSH session for file lifecycle checks');
+
+    ok(await invoke<Result<void>>('create_remote_directory', {
+      sessionId: activeSessionId,
+      parentPath: '/tmp',
+      name: auditRoot.split('/').pop(),
+    }), 'create live audit root');
+    ok(await invoke<Result<void>>('create_remote_file', {
+      sessionId: activeSessionId,
+      parentPath: auditRoot,
+      name: 'external-edit.txt',
+    }), 'create remote file');
+    ok(await invoke<Result<void>>('create_remote_directory', {
+      sessionId: activeSessionId,
+      parentPath: auditRoot,
+      name: 'nested',
+    }), 'create nested remote directory');
+    ok(await invoke<Result<void>>('create_remote_file', {
+      sessionId: activeSessionId,
+      parentPath: `${auditRoot}/nested`,
+      name: 'child.txt',
+    }), 'create nested remote file');
+    const initialPreview = ok(await invoke<Result<{ revision: string }>>('preview_remote_text', {
+      sessionId: activeSessionId,
+      path: `${auditRoot}/external-edit.txt`,
+    }), 'preview empty external edit file');
+    ok(await invoke<Result<void>>('save_remote_text', {
+      sessionId: activeSessionId,
+      path: `${auditRoot}/external-edit.txt`,
+      content: 'external-editor-v1\n',
+      expectedRevision: initialPreview.revision,
+    }), 'seed external edit file');
+    const permissions = ok(await invoke<Result<{ updatedCount: number; skippedSymlinkCount: number }>>(
+      'update_remote_permissions',
+      {
+        sessionId: activeSessionId,
+        input: {
+          path: auditRoot,
+          mode: 0o700,
+          recursive: true,
+          scope: 'all',
+        },
+      },
+    ), 'apply recursive permissions');
+    if (permissions.updatedCount < 4) {
+      throw new Error(`Recursive permission update covered only ${permissions.updatedCount} entries`);
+    }
+    stages.push('file-create-and-recursive-permissions-pass');
+
+    const editor = await page.evaluate(async ({ sessionId, remotePath }) => {
+      const root = document.querySelector('#app') as HTMLElement & {
+        __vue_app__?: {
+          config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+        };
+      };
+      const pinia = root.__vue_app__?.config.globalProperties.$pinia;
+      const settings = pinia?._s.get('settings');
+      const externalEditors = pinia?._s.get('external-editors');
+      if (!settings || !externalEditors) throw new Error('External editor stores unavailable');
+      Object.assign(settings.value as Record<string, unknown>, {
+        textEditorPreference: 'external',
+        externalEditorPath: 'C:\\Windows\\System32\\where.exe',
+      });
+      const opened = await (externalEditors.openRemote as (
+        sessionId: string,
+        remotePath: string,
+        mode: string,
+      ) => Promise<boolean>)(sessionId, remotePath, 'external');
+      if (!opened) throw new Error('External editor session did not open');
+      const managed = (externalEditors.sessions as Array<Record<string, unknown>>)
+        .find((candidate) => candidate.remotePath === remotePath);
+      if (!managed) throw new Error('External editor session descriptor unavailable');
+      return managed as {
+        id: string;
+        localPath: string;
+        remoteRevision: string;
+      };
+    }, {
+      sessionId: activeSessionId,
+      remotePath: `${auditRoot}/external-edit.txt`,
+    });
+    await writeFile(editor.localPath, 'external-editor-v2-autosync\n', 'utf8');
+    await page.waitForFunction(({ id, previousRevision }) => {
+      const root = document.querySelector('#app') as HTMLElement & {
+        __vue_app__?: {
+          config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+        };
+      };
+      const externalEditors = root.__vue_app__?.config.globalProperties.$pinia?._s.get('external-editors');
+      const managed = (externalEditors?.sessions as Array<Record<string, unknown>> | undefined)
+        ?.find((candidate) => candidate.id === id);
+      return Boolean(managed && managed.lastSyncedAtMs && managed.remoteRevision !== previousRevision);
+    }, { id: editor.id, previousRevision: editor.remoteRevision }, { timeout: 10_000 });
+    const syncedPreview = ok(await invoke<Result<{ content: string; revision: string }>>('preview_remote_text', {
+      sessionId: activeSessionId,
+      path: `${auditRoot}/external-edit.txt`,
+    }), 'preview external edit result');
+    if (!syncedPreview.content.includes('external-editor-v2-autosync')) {
+      throw new Error('External editor save was not uploaded to the remote file');
+    }
+    ok(await invoke<Result<void>>('save_remote_text', {
+      sessionId: activeSessionId,
+      path: `${auditRoot}/external-edit.txt`,
+      content: 'remote-writer-v3\n',
+      expectedRevision: syncedPreview.revision,
+    }), 'simulate concurrent remote writer');
+    await writeFile(editor.localPath, 'external-editor-v4-must-not-overwrite\n', 'utf8');
+    await page.waitForFunction((id) => {
+      const root = document.querySelector('#app') as HTMLElement & {
+        __vue_app__?: {
+          config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+        };
+      };
+      const externalEditors = root.__vue_app__?.config.globalProperties.$pinia?._s.get('external-editors');
+      const managed = (externalEditors?.sessions as Array<Record<string, unknown>> | undefined)
+        ?.find((candidate) => candidate.id === id);
+      return managed?.state === 'conflict';
+    }, editor.id, { timeout: 10_000 });
+    const conflictPreview = ok(await invoke<Result<{ content: string }>>('preview_remote_text', {
+      sessionId: activeSessionId,
+      path: `${auditRoot}/external-edit.txt`,
+    }), 'preview remote conflict result');
+    if (!conflictPreview.content.includes('remote-writer-v3')
+      || conflictPreview.content.includes('v4-must-not-overwrite')) {
+      throw new Error('External editor conflict did not fail closed');
+    }
+    stages.push('external-editor-conflict-pass');
+    await page.evaluate((id) => {
+      const root = document.querySelector('#app') as HTMLElement & {
+        __vue_app__?: {
+          config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+        };
+      };
+      const externalEditors = root.__vue_app__?.config.globalProperties.$pinia?._s.get('external-editors');
+      return (externalEditors?.close as ((id: string) => Promise<void>) | undefined)?.(id);
+    }, editor.id);
+    await expect.poll(async () => stat(editor.localPath).then(() => true, () => false)).toBe(false);
+    stages.push('external-editor-autosync-pass');
+
+    const deleted = ok(await invoke<Result<number>>('delete_remote_entry_recursive', {
+      sessionId: activeSessionId,
+      path: auditRoot,
+    }), 'quick delete live audit tree');
+    if (deleted < 4) throw new Error(`Quick delete removed only ${deleted} entries`);
+    stages.push('quick-recursive-delete-pass');
+
     const rootStyle = await page.evaluate(() => ({
       fontSize: getComputedStyle(document.documentElement).fontSize,
       fontFamily: getComputedStyle(document.body).fontFamily,
@@ -219,6 +406,18 @@ test('live SSH trust, authentication, terminal, SFTP and monitoring', async ({ b
     });
     console.log(JSON.stringify(result, null, 2));
   } catch (error) {
+    if (activeSessionId) {
+      await page.evaluate(({ sessionId, path }) => (
+        window as unknown as Window & {
+          __TAURI_INTERNALS__: {
+            invoke: (command: string, args: Record<string, unknown>) => Promise<unknown>;
+          };
+        }
+      ).__TAURI_INTERNALS__.invoke(
+        'delete_remote_entry_recursive',
+        { sessionId, path },
+      ), { sessionId: activeSessionId, path: auditRoot }).catch(() => undefined);
+    }
     await capture('live-ssh-failure-1280x800.png').catch(() => undefined);
     const failure = {
       ok: false,

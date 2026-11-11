@@ -44,6 +44,21 @@ export function createLocalDirectory(parentPath: string, name: string): Promise<
   return runLocalOperation('create_local_directory', { parentPath, name }, 'LOCAL_FILE_OPERATION_FAILED');
 }
 
+export function createLocalFile(parentPath: string, name: string): Promise<OperationResult<void>> {
+  return runLocalOperation('create_local_file', { parentPath, name }, 'LOCAL_FILE_OPERATION_FAILED');
+}
+
+export function openLocalFileExternally(
+  path: string,
+  editorPath: string | null,
+): Promise<OperationResult<void>> {
+  return runLocalOperation(
+    'open_local_file_externally',
+    { path, editorPath },
+    'SFTP_EXTERNAL_OPEN_LAUNCH_FAILED',
+  );
+}
+
 export function renameLocalEntry(path: string, targetName: string): Promise<OperationResult<void>> {
   return runLocalOperation('rename_local_entry', { path, targetName }, 'LOCAL_FILE_OPERATION_FAILED');
 }

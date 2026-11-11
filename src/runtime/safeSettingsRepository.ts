@@ -26,18 +26,20 @@ export const defaultSafeSettings: SafeSettings = {
   inspectorTab: 'files',
   dualPaneSftp: false,
   taskTab: 'transfers',
-  taskDrawerOpen: true,
+  taskDrawerOpen: false,
   connectionsPaneWidth: 244,
   inspectorPaneWidth: 286,
   assistantPaneWidth: 360,
-  taskDrawerHeight: 156,
+  taskDrawerHeight: 180,
   hostPanelOpen: true,
   fileBrowserOpen: true,
   followTerminalCwd: false,
   focusMode: false,
   detailsPaneOpen: false,
-  hostPanelWidth: 280,
-  fileBrowserHeight: 260,
+  hostPanelWidth: 260,
+  fileBrowserHeight: 240,
+  textEditorPreference: 'internal',
+  externalEditorPath: null,
   terminalLogging: false,
   backupSchedule: 'daily',
   updateChannel: 'stable',
@@ -103,7 +105,7 @@ function normalizeSettings(input: Partial<SafeSettings>): SafeSettings {
     taskTab: taskTabs.includes(input.taskTab as typeof taskTabs[number])
       ? input.taskTab as SafeSettings['taskTab']
       : 'transfers',
-    taskDrawerOpen: input.taskDrawerOpen !== false,
+    taskDrawerOpen: input.taskDrawerOpen === true,
     connectionsPaneWidth: clampNumber(input.connectionsPaneWidth, 180, 420, defaultSafeSettings.connectionsPaneWidth),
     inspectorPaneWidth: clampNumber(input.inspectorPaneWidth, 220, 760, defaultSafeSettings.inspectorPaneWidth),
     assistantPaneWidth: clampNumber(input.assistantPaneWidth, 300, 520, defaultSafeSettings.assistantPaneWidth),
@@ -114,7 +116,9 @@ function normalizeSettings(input: Partial<SafeSettings>): SafeSettings {
     focusMode: input.focusMode === true,
     detailsPaneOpen: input.detailsPaneOpen === true,
     hostPanelWidth: clampNumber(input.hostPanelWidth, 200, 420, defaultSafeSettings.hostPanelWidth),
-    fileBrowserHeight: clampNumber(input.fileBrowserHeight, 160, 480, defaultSafeSettings.fileBrowserHeight),
+    fileBrowserHeight: clampNumber(input.fileBrowserHeight, 160, 65_535, defaultSafeSettings.fileBrowserHeight),
+    textEditorPreference: input.textEditorPreference === 'external' ? 'external' : 'internal',
+    externalEditorPath: normalizeExternalEditorPath(input.externalEditorPath),
     terminalLogging: input.terminalLogging === true,
     backupSchedule: ['off', 'daily', 'weekly'].includes(input.backupSchedule ?? '')
       ? input.backupSchedule as SafeSettings['backupSchedule']
@@ -129,4 +133,10 @@ function normalizeSettings(input: Partial<SafeSettings>): SafeSettings {
 function clampNumber(value: number | undefined, min: number, max: number, fallback: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
   return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function normalizeExternalEditorPath(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const path = value.trim();
+  return path && path.length <= 4_096 && !path.includes('\0') ? path : null;
 }

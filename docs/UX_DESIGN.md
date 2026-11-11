@@ -41,29 +41,48 @@ Focus mode collapses navigation, host panel, file browser and the details/assist
 
 | Region | Default | Clamp/behavior |
 | --- | ---: | --- |
-| Top bar | 44 px | Fixed; brand, session tabs, global actions |
+| Top bar | 40 px | Fixed; brand, global search, global actions, window controls |
 | Navigation | 240 px | 180 px to 40% window width; collapsible |
-| Host panel | 280 px | 200 px to 420 px; collapsible; appears with a connected session |
-| Command input bar | 36 px | Fixed; hidden without a connected session |
-| File browser | 260 px | 160 px to 65% window height; collapsible |
+| Host panel | 260 px | 200 px to 420 px; collapsible; appears with a connected session |
+| Session tab bar | 32 px | Fixed; scoped above center terminal workspace; tabs + pane actions |
+| Command input bar | 32 px | Fixed; hidden without a connected session; compact 12px mono |
+| File browser | 240 px | 160 px to 65% window height; collapsible; single-row grouped header |
+| File table row | 26 px | Dense virtualized file rows with aligned mono metadata |
 | Details/assistant | 360 px | 280 px to 50% window width; collapsible; assistant replaces details when open |
-| Task drawer | 220 px | 96 px to 55% window height; collapsible |
+| Task drawer | 180 px | 96 px to 55% window height; collapsible; closed by default until tasks exist |
 | Status bar | 24 px | Fixed |
 | Window | 1280 x 800 | Minimum 960 x 640 |
 
 Separators render as 1 px but expose a 7 px hit target. Hover and drag use the primary color. Every size is persisted per workspace and clamped again after monitor or DPI changes.
+
+### Spacing and density system
+
+- **Rhythm scale:** 2 px, 4 px, 6 px, 8 px, 12 px, 16 px. Workspace panes use 0 px external margins and 1 px borders.
+- **Corner radii:** Standard 3 px for buttons, inputs, segmented controls and tabs; 4 px for floating menus and popovers; 6 px for modal dialogs. Pill (999 px) and card (10 px) radii are excluded from workspace surfaces.
+- **Typography hierarchy:** 10 px for micro status/badges, 11 px for dense table headers/pane subtitles, 12 px for default UI and monospace code/paths, 13 px for pane headers and bold titles.
+- **Session tab bar alignment:** Session tabs sit directly above the terminal workspace within the center column, maintaining visual continuity with the active remote host instead of spanning across navigation sidebars.
+- **File context menu:** 200 px width, 26 px row height, 12 px typography, grouped action segments separated by 1 px dividers, active radio indicators, and restrained destructive highlights.
 
 ## 3. Information architecture
 
 ### Global destinations
 
 - **Connections:** tree and search for groups, favorites and profiles.
-- **Recent:** recently used sessions with last result, not a duplicate permanent profile list.
+- **Connections:** durable profiles plus an in-memory “Quick connections” group for successful quick sessions that do not have a saved profile.
+- **Recent:** recently used durable and current quick sessions with last result, not a duplicate permanent profile list. Quick entries never persist and disappear when their transient session state is cleared.
 - **Tunnels:** saved rules and running instances.
 - **Snippets:** user-authored command templates.
 - **Tasks:** transfer history and interrupted work; primarily opens the task drawer.
 - **Assistant:** opens a collapsible right-side assistant panel. It is contextual and opt-in, not a replacement for Connections or Session navigation.
 - **Settings:** appearance, terminal, connections, security, storage, updates and advanced diagnostics.
+
+### Signed update discovery
+
+- FILEX checks the configured signed update feed after startup, on a bounded 30-minute interval and when returning to the foreground if the last successful check is older than the interval.
+- The first discovery in an application session opens a compact, dismissible update dialog showing current and available versions, bounded release notes, download progress and explicit Later, Skip this version and Download and install actions. Later background discoveries expose the same dialog through a persistent update icon instead of interrupting active work.
+- A skipped version remains hidden for automatic discovery until a different version is published or the user manually checks. Manual checks deliberately ignore the skip preference so the user can revisit a release.
+- Background network/configuration failures remain silent and retryable. Manual check and install failures use the existing localized notification and structured-error surfaces.
+- Installation requires a reviewed version, a fresh signed-feed check and an explicit install action. Downloads can be cancelled before the installer starts; no code path silently installs or restarts.
 
 Credentials are managed inside Settings/Security and profile editors, not exposed as a casual top-level browser.
 
@@ -151,7 +170,7 @@ The toolbar prioritizes reconnect/disconnect, new split, Files, Monitor and Tunn
 
 ### 4.6 Files browser
 
-The primary surface is the bottom dual-pane browser inside the center column: a local pane and a remote pane side by side, with a Files | Commands sub-tab strip, path breadcrumb, refresh, upload/download, new folder, follow-terminal chip and a transfer footer that shows the running task count and opens the task drawer.
+The primary surface is the bottom dual-pane browser inside the center column: a local pane and a remote pane side by side, with a Files | Commands sub-tab strip, path breadcrumb, refresh, upload/download, new folder, follow-terminal chip and a transfer footer that shows the running task count and opens the task drawer. The horizontal separator has a 160 px minimum for the browser but no fixed 480 px ceiling; its effective maximum follows the available center-column height so the browser may occupy the workspace without overflowing the shell.
 
 List columns: name, size, type, modified, permissions and owner (numeric uid/gid when the server provides it); responsive collapse begins with owner and permissions. Symlinks are visually distinct and display targets in details. Rows expose a permission-mode action that opens an explicit octal review dialog before any chmod mutation.
 
@@ -165,6 +184,19 @@ The inspector supports:
 - Selection summary and bulk actions.
 - Inline rename with validation.
 - Bounded text preview/editor with changed-on-server detection.
+
+Right-clicking a row selects it and opens one floating menu near the pointer, clamped to the viewport. Right-clicking empty pane space opens the non-row actions. The menu uses arrow/Home/End navigation, nested submenus for Open with, Choose text editor and New, Escape/outside-click dismissal, and restores focus to the row or pane. The menu contains:
+
+- Refresh, Open, Open with (text editor/system association), Choose text editor (built-in/external/set external executable), Copy path.
+- Download, Upload file, Upload folder.
+- New file and new folder in the current or clicked folder.
+- Rename, Delete, Quick recursive delete, and Permissions.
+
+Delete and quick delete use the shared confirmation surface and name the exact host, path and item type. Quick delete is bounded to 5,000 descendants and 16 levels, does not follow symlinks, and is not exposed for root paths. Recursive permission editing pre-scans the same bound before mutation and offers All items, Files only, or Directories only scope.
+
+The permission dialog keeps the owner/group/other matrix and octal review. For directories it adds a recursive checkbox and the three scope choices; recursion is unavailable for files and symlinks. Applying to a directory requires a second host/path/scope confirmation when recursion is enabled.
+
+Settings persist a non-secret text-editor preference (`built-in` or `external`) and an optional external executable path. The executable path is chosen through the native file picker and is never interpreted through a shell. Opening with external editing creates an app-owned cache copy, opens it in the selected tool or OS association, and shows a compact auto-upload state. A stable local save is uploaded atomically over the original; remote revision conflict, local write-in-progress, disconnect and permanent failure are visible states and never reported as a successful overwrite.
 
 Never infer a successful upload from bytes sent alone; show verifying or committed state when the protocol/operation needs it.
 
