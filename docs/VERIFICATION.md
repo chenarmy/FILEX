@@ -1,5 +1,31 @@
 # FILEX verification evidence
 
+## 2026-11-12 — v0.1.2 signed GitHub and CNB release published
+
+Published FILEX `v0.1.2` from tag commit `997bdd4eb2f168a21e2fdcd1a34e2b54d237cf35`. The tag-triggered [Release workflow](https://github.com/chenarmy/FILEX/actions/runs/43058030675) completed every job successfully:
+
+| Check | Result |
+| --- | --- |
+| Windows build | Signed NSIS and MSI assets passed |
+| Linux build | Signed AppImage and DEB assets passed |
+| macOS build | ARM64 DMG and signed updater app bundle passed |
+| Updater key proof | Private/public key pairing challenge passed before packaging |
+| GitHub publication | Public, non-draft, non-prerelease, marked Latest |
+| GitHub asset gate | Exact 12 assets, detached signatures and signed version passed |
+| CNB mirror | All 12 assets, tag and mirrored updater feed passed verification |
+
+The first release attempts exposed a GitHub Ubuntu runner dependency-source problem: the default `azure.archive.ubuntu.com` download stalled, while switching to `archive.ubuntu.com` failed DNS in the runner. The release workflow now probes three trusted Ubuntu mirrors over bounded requests, writes the first reachable mirror, and enforces 300-second update and 600-second install limits. The final run used that fix and completed all Linux packaging and verification.
+
+Independent post-publication checks:
+
+- GitHub release contains exactly 12 assets and `latest.json`.
+- GitHub and CNB manifests both report version `0.1.2` and identical eight-platform signatures and release notes.
+- Every GitHub platform URL uses `github.com/chenarmy/FILEX/releases/download/v0.1.2/`.
+- Every CNB platform URL uses `cnb.cool/chenarmy/FILEX/-/releases/download/v0.1.2/`.
+- The repository working tree was clean after the release commit and tag push.
+
+Packaged installation of `0.1.2` over the previously installed signed `0.1.1` build remains a separate cross-platform acceptance step and is not claimed by this publication record.
+
 ## 2026-11-11 — file context menu, recursive permissions and managed external editing
 
 Expanded the bottom file browser with a keyboard-accessible context menu, native multi-file/folder upload selection, new file and folder creation, recursive owner/group/other permissions, bounded recursive quick delete, and file-open/editing preferences. The fixed 480 px browser-height ceiling was removed; pointer and keyboard resizing now use the available center-column height, and the persisted height may exceed the old limit.
