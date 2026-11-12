@@ -33,7 +33,7 @@ export const defaultSafeSettings: SafeSettings = {
   taskDrawerHeight: 180,
   hostPanelOpen: true,
   fileBrowserOpen: true,
-  followTerminalCwd: false,
+  followTerminalCwd: true,
   focusMode: false,
   detailsPaneOpen: false,
   hostPanelWidth: 260,

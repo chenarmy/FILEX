@@ -17,6 +17,7 @@ import {
   writeUpdatePreferences,
 } from '@/runtime/updatePreferencesRepository';
 import { useUiStore } from '@/stores/ui';
+import { presentCurrentWindowForUpdate } from '@/api/domain/windowApi';
 import type { UpdateStatus } from '@/types/contracts';
 
 export type UpdatePhase = 'idle' | 'checking' | 'available' | 'downloading' | 'installing';
@@ -99,7 +100,7 @@ export const useUpdatesStore = defineStore('updates', () => {
     await request;
   }
 
-  async function check(manual = false, showDialog = true): Promise<boolean> {
+  async function check(manual = false): Promise<boolean> {
     if (phase.value === 'checking' || phase.value === 'downloading' || phase.value === 'installing') {
       return false;
     }
@@ -142,7 +143,8 @@ export const useUpdatesStore = defineStore('updates', () => {
     }
 
     phase.value = 'available';
-    if (showDialog) dialogOpen.value = true;
+    dialogOpen.value = true;
+    await presentCurrentWindowForUpdate();
     return true;
   }
 
@@ -152,10 +154,10 @@ export const useUpdatesStore = defineStore('updates', () => {
 
   function dismiss(): void {
     if (installActive.value) return;
-    dialogOpen.value = false;
+    suppressAvailableVersion(false);
   }
 
-  function skipAvailableVersion(): void {
+  function suppressAvailableVersion(notify: boolean): void {
     const version = availableVersion.value;
     if (!version || installActive.value) return;
     skippedVersion.value = version;
@@ -163,7 +165,11 @@ export const useUpdatesStore = defineStore('updates', () => {
     phase.value = 'idle';
     dialogOpen.value = false;
     errorKey.value = null;
-    ui.notify(t('updates.skipped', { version }));
+    if (notify) ui.notify(t('updates.skipped', { version }));
+  }
+
+  function skipAvailableVersion(): void {
+    suppressAvailableVersion(true);
   }
 
   function applyInstallEvent(event: UpdateInstallEvent): void {

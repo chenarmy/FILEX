@@ -16,10 +16,10 @@ use filex_contracts::{
     DirectorySyncChangeKind, DirectorySyncEntryKind, DirectorySyncPreview,
     DirectorySyncPreviewEntry, FileChecksumComparison, HostKeyChallenge, HostTrustEvaluation,
     MonitorState, NetworkEndpoint, NetworkInterface, NetworkPlatform, NetworkSnapshot,
-    ProcessEntry, ProcessPlatform, ProcessSnapshot, RemoteFileEntry, RemotePermissionScope,
-    RemotePermissionUpdateResult, RemoteState, RemoteTextPreview, RemoteTextSaveResult, RouteEntry,
-    SessionConnectionProgress, SessionState, SessionSummary, SystemMonitorSnapshot,
-    TransferDirection, TransferTask, TunnelKind, TunnelState, TunnelSummary,
+    ProcessEntry, ProcessPlatform, ProcessSnapshot, RemoteDirectoryListing, RemoteFileEntry,
+    RemotePermissionScope, RemotePermissionUpdateResult, RemoteState, RemoteTextPreview,
+    RemoteTextSaveResult, RouteEntry, SessionConnectionProgress, SessionState, SessionSummary,
+    SystemMonitorSnapshot, TransferDirection, TransferTask, TunnelKind, TunnelState, TunnelSummary,
 };
 use filex_core::{HostTrustService, SessionMachine, parse_monitor_probe};
 use filex_ssh::{
@@ -1699,7 +1699,7 @@ impl SessionRuntime {
         &self,
         session_id: &str,
         path: &str,
-    ) -> Result<Vec<RemoteFileEntry>, AppError> {
+    ) -> Result<RemoteDirectoryListing, AppError> {
         if path.is_empty() || path.contains('\0') {
             return Err(invalid_remote_path_error());
         }
@@ -1713,7 +1713,7 @@ impl SessionRuntime {
             .await
             .map_err(|_| ssh_error(&SshError::Sftp))?;
         let entries = sftp
-            .read_dir(canonical_path)
+            .read_dir(canonical_path.clone())
             .await
             .map_err(|_| ssh_error(&SshError::Sftp))?;
         let mut result = entries
@@ -1745,7 +1745,10 @@ impl SessionRuntime {
                 .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
         });
         let _ = sftp.close().await;
-        Ok(result)
+        Ok(RemoteDirectoryListing {
+            path: canonical_path,
+            entries: result,
+        })
     }
 
     pub async fn create_remote_file(

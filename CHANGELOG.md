@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-13
+
+### Added
+
+- Directory-only lazy navigation trees for local and remote file panes, with single-click folder navigation and editable Enter/Escape path fields.
+- Explicit active-terminal input status with persistent block/outline cursor states and stronger split-pane focus indication.
+- Bounded fallback tracking for simple POSIX `cd` commands when a remote shell does not emit OSC 7 working-directory reports.
+
+### Changed
+
+- Every automatically discovered, unsuppressed update now opens above all other FILEX layers and best-effort restores and focuses the desktop window.
+- Closing, cancelling or skipping an update suppresses only that version; a later version automatically clears the old suppression and prompts again.
+
+### Fixed
+
+- Remote file navigation now uses the canonical directory path returned by SFTP instead of retaining aliases such as `.`.
+
 ## [0.1.2] - 2026-11-11
 
 ### Added

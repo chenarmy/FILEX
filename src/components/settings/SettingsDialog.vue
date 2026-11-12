@@ -372,7 +372,7 @@ async function chooseBackupFile(): Promise<void> {
 
 async function checkForUpdatesNow(): Promise<void> {
   if (updates.isBusy || !updates.configured || updateChannelPending.value) return;
-  await updates.check(true, true);
+  await updates.check(true);
 }
 
 function installAvailableUpdate(): void {

@@ -15,6 +15,19 @@ export async function minimizeCurrentWindow(): Promise<boolean> {
   }
 }
 
+export async function presentCurrentWindowForUpdate(): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  try {
+    const currentWindow = getCurrentWindow();
+    await currentWindow.unminimize();
+    await currentWindow.show();
+    await currentWindow.setFocus();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function closeCurrentWindow(): Promise<boolean> {
   if (!isTauriRuntime()) return false;
   try {

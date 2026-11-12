@@ -7,6 +7,7 @@ import { ArrowDown, ArrowUp, Bot, Circle, ClipboardPaste, Copy, Search, Trash2, 
 import '@xterm/xterm/css/xterm.css';
 import { resolveTerminalPalette } from '@/domain/terminalThemes';
 import { clampTerminalMenuPosition, resolveTerminalFontFamily } from '@/domain/terminalInteractions';
+import { resolveCdCommand } from '@/domain/terminalCwd';
 import { useSessionsStore } from '@/stores/sessions';
 import { useSettingsStore } from '@/stores/settings';
 import { useUiStore } from '@/stores/ui';
@@ -89,6 +90,7 @@ let outputOffset = 0;
 let outputDecoder = new TextDecoder(settings.value.terminalEncoding);
 let lastResizeSignature: string | null = null;
 let fontFallbackNotified = false;
+let terminalInputBuffer = '';
 
 const searchOptions = {
   caseSensitive: false,
@@ -331,6 +333,28 @@ function writeDecodedOutput(chunk: Uint8Array): void {
   if (text) terminal?.write(text);
 }
 
+function trackTerminalInput(data: string): void {
+  const sessionId = props.sessionId;
+  if (!sessionId) return;
+  for (const character of data) {
+    if (character === '\r' || character === '\n') {
+      const resolved = resolveCdCommand(terminalInputBuffer, sessions.sessionCwd(sessionId));
+      terminalInputBuffer = '';
+      if (resolved) sessions.setSessionCwd(sessionId, resolved);
+      continue;
+    }
+    if (character === '\x7f') {
+      terminalInputBuffer = terminalInputBuffer.slice(0, -1);
+      continue;
+    }
+    if (character === '\x03' || character === '\x1b') {
+      terminalInputBuffer = '';
+      continue;
+    }
+    if (character >= ' ' && terminalInputBuffer.length < 4_096) terminalInputBuffer += character;
+  }
+}
+
 function scheduleSearchRefresh(): void {
   if (!props.searchOpen || !searchQuery.value.trim()) return;
   if (searchRefreshTimer !== null) window.clearTimeout(searchRefreshTimer);
@@ -423,6 +447,8 @@ onMounted(async () => {
   terminal = new XTerm({
     allowProposedApi: true,
     cursorBlink: true,
+    cursorStyle: 'block',
+    cursorInactiveStyle: 'outline',
     screenReaderMode: true,
     convertEol: false,
     fontFamily: initialFont.fontFamily,
@@ -469,6 +495,7 @@ onMounted(async () => {
   if (terminalHost.value) terminal.open(terminalHost.value);
   const encoder = new TextEncoder();
   terminal.onData((data) => {
+    trackTerminalInput(data);
     if (props.sessionId) void sessions.writeToSession(props.sessionId, encoder.encode(data));
   });
   pasteHandler = (event: ClipboardEvent) => {
@@ -491,12 +518,14 @@ onMounted(async () => {
   if (terminalHost.value) resizeObserver.observe(terminalHost.value);
   replaySession();
   fitTerminal();
+  if (props.focused) terminal.focus();
   void document.fonts?.ready.then(() => applyTerminalFont(true));
 });
 
 watch(
   () => props.sessionId,
   () => {
+    terminalInputBuffer = '';
     if (resizeTimer !== null) {
       window.clearTimeout(resizeTimer);
       resizeTimer = null;
@@ -505,6 +534,13 @@ watch(
     closeContextMenu();
     replaySession();
     refitTerminalAfterLayout(true);
+  },
+);
+
+watch(
+  () => props.focused,
+  (focused) => {
+    if (focused && !props.searchOpen) void nextTick(() => terminal?.focus());
   },
 );
 
@@ -599,6 +635,11 @@ function focusTerminal(): void {
   terminal?.focus();
 }
 
+function activateTerminal(): void {
+  emit('focus');
+  terminal?.focus();
+}
+
 defineExpose({ focusTerminal });
 </script>
 
@@ -677,7 +718,7 @@ defineExpose({ focusTerminal });
       </button>
     </div>
 
-    <div ref="terminalSurface" class="terminal-surface-shell" :style="{ backgroundColor: terminalPalette.background }">
+    <div ref="terminalSurface" class="terminal-surface-shell" :style="{ backgroundColor: terminalPalette.background }" @pointerdown="activateTerminal">
       <div ref="terminalHost" class="terminal-pane-surface xterm-surface" />
       <div
         v-if="contextMenu"
@@ -705,6 +746,9 @@ defineExpose({ focusTerminal });
     </div>
 
     <footer class="terminal-pane-status">
+      <span class="terminal-input-status" :class="{ active: focused }" aria-live="polite">
+        <Circle :size="7" :fill="focused ? 'currentColor' : 'none'" />{{ t(focused ? 'terminal.inputActive' : 'terminal.inputInactive') }}
+      </span>
       <span><Circle :size="8" fill="currentColor" />{{ profile?.environment ?? 'local' }}</span>
       <span>{{ session?.state ?? t('terminal.noSession') }}</span>
       <span>{{ terminalEncodingLabel }}</span>
@@ -725,7 +769,7 @@ defineExpose({ focusTerminal });
 }
 
 .terminal-pane.focused {
-  box-shadow: inset 0 0 0 1px hsl(var(--ring));
+  box-shadow: inset 0 0 0 2px hsl(var(--ring));
 }
 
 .terminal-pane-header,
@@ -739,6 +783,11 @@ defineExpose({ focusTerminal });
   color: hsl(var(--muted-foreground));
   background: hsl(var(--card));
   font-size: 0.6875rem;
+}
+
+.terminal-input-status.active {
+  color: hsl(var(--primary));
+  font-weight: 600;
 }
 
 .terminal-pane-header {

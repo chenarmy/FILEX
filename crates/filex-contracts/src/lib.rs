@@ -637,6 +637,13 @@ pub struct RemoteFileEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDirectoryListing {
+    pub path: String,
+    pub entries: Vec<RemoteFileEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RemotePermissionScope {
     All,

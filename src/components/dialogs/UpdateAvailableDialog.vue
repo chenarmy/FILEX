@@ -103,11 +103,12 @@ function restoreFocus(): void {
         <p v-else-if="updates.phase === 'installing'" class="update-installing" role="status">{{ t('settings.updateInstalling') }}</p>
 
         <div v-if="updates.errorMessage" class="inline-notice error" role="alert">{{ updates.errorMessage }}</div>
+        <p class="update-dismiss-note">{{ t('updates.dismissNote') }}</p>
       </div>
 
       <footer class="dialog-footer update-dialog-footer">
         <div class="update-footer-secondary">
-          <button type="button" class="button update-secondary-button" :disabled="busy" @click="dismiss">{{ t('updates.later') }}</button>
+          <button type="button" class="button update-secondary-button" :disabled="busy" @click="dismiss">{{ t('updates.cancel') }}</button>
           <button type="button" class="button update-secondary-button" :disabled="busy || !updates.availableVersion" @click="updates.skipAvailableVersion">{{ t('updates.skip') }}</button>
         </div>
         <div class="update-footer-primary">
@@ -126,7 +127,7 @@ function restoreFocus(): void {
 
 <style scoped>
 .update-dialog-layer {
-  z-index: 80;
+  z-index: 200;
 }
 
 .update-dialog {
@@ -312,6 +313,13 @@ function restoreFocus(): void {
   background: hsl(var(--primary) / 0.06);
   border: 1px solid hsl(var(--primary) / 0.2);
   border-radius: 5px;
+}
+
+.update-dismiss-note {
+  margin: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.7083rem;
+  line-height: 1.5;
 }
 
 .update-dialog-footer {

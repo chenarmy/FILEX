@@ -25,12 +25,12 @@ use filex_contracts::{
     FileChecksumComparison, HostKeyChallenge, HostTrustEvaluation, HostTrustRecord,
     ImportKnownHostsInput, ImportKnownHostsResult, KnownHostsImportPreview, LocalDirectoryListing,
     LocalFileEntry, LocalTextPreview, LocalTextSaveResult, MaintenanceArtifact, NetworkSnapshot,
-    OperationResult, ProcessSnapshot, QuickConnectInput, RecordHostTrustInput, RemoteFileEntry,
-    RemotePermissionUpdateResult, RemoteState, RemoteTextPreview, RemoteTextSaveResult,
-    RuntimePaths, SafeSettings, SaveCommandSnippetInput, SessionConnectionProgress, SessionSummary,
-    SshConfigImportPreview, SystemMonitorSnapshot, TransferState, TransferTask, TunnelRule,
-    TunnelSummary, UpdateConnectionProfileInput, UpdateRemotePermissionsInput, UpdateStatus,
-    UpdateTunnelRuleInput,
+    OperationResult, ProcessSnapshot, QuickConnectInput, RecordHostTrustInput,
+    RemoteDirectoryListing, RemotePermissionUpdateResult, RemoteState, RemoteTextPreview,
+    RemoteTextSaveResult, RuntimePaths, SafeSettings, SaveCommandSnippetInput,
+    SessionConnectionProgress, SessionSummary, SshConfigImportPreview, SystemMonitorSnapshot,
+    TransferState, TransferTask, TunnelRule, TunnelSummary, UpdateConnectionProfileInput,
+    UpdateRemotePermissionsInput, UpdateStatus, UpdateTunnelRuleInput,
 };
 use filex_core::{
     HostTrustService, ProfileService, SettingsService, TransferService, TunnelRuleService,
@@ -3481,7 +3481,7 @@ async fn list_remote_directory(
     session_id: String,
     path: String,
     sessions: State<'_, SessionRuntime>,
-) -> Result<OperationResult<Vec<RemoteFileEntry>>, ()> {
+) -> Result<OperationResult<RemoteDirectoryListing>, ()> {
     Ok(
         match sessions.list_remote_directory(&session_id, &path).await {
             Ok(entries) => OperationResult::success(entries),

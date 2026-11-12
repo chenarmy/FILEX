@@ -15,6 +15,7 @@ import {
   updateRemotePermissions,
 } from '@/api/domain/sftpApi';
 import { cancelCopyOperation } from '@/api/domain/fileOperationsApi';
+import { directoryEntries, type DirectoryTreeEntry } from '@/domain/directoryNavigation';
 import { useExternalEditorsStore } from '@/stores/externalEditors';
 import type {
   AppError,
@@ -46,29 +47,64 @@ export const useSftpStore = defineStore('sftp', () => {
   const changingMode = ref(false);
   const savingPreview = ref(false);
   const recoveryCopyPath = ref<string | null>(null);
+  const directoryChildren = ref<Record<string, DirectoryTreeEntry[]>>({});
+  const directoryLoadingPaths = ref<string[]>([]);
+  const directoryErrorPaths = ref<string[]>([]);
   let requestGeneration = 0;
   let previewGeneration = 0;
   let saveGeneration = 0;
   let moveGeneration = 0;
   let copyGeneration = 0;
+  const treeGenerations = new Map<string, number>();
 
-  async function load(nextSessionId: string, nextPath = path.value): Promise<void> {
+  function cacheDirectory(listingPath: string, listingEntries: RemoteFileEntry[]): void {
+    directoryChildren.value = {
+      ...directoryChildren.value,
+      [listingPath]: directoryEntries(listingEntries),
+    };
+  }
+
+  async function load(nextSessionId: string, nextPath = path.value): Promise<boolean> {
     const generation = ++requestGeneration;
     loading.value = true;
     error.value = null;
     try {
       const result = await listRemoteDirectory(nextSessionId, nextPath);
-      if (generation !== requestGeneration) return;
+      if (generation !== requestGeneration) return false;
       if (!result.ok) {
         error.value = result.error;
-        return;
+        return false;
       }
       sessionId.value = nextSessionId;
-      path.value = nextPath;
-      entries.value = result.data;
+      path.value = result.data.path;
+      entries.value = result.data.entries;
+      cacheDirectory(result.data.path, result.data.entries);
       selectedPath.value = null;
+      return true;
     } finally {
       if (generation === requestGeneration) loading.value = false;
+    }
+  }
+
+  async function loadTreeDirectory(treePath: string): Promise<void> {
+    const targetSessionId = sessionId.value;
+    if (!targetSessionId || directoryLoadingPaths.value.includes(treePath)) return;
+    const request = (treeGenerations.get(treePath) ?? 0) + 1;
+    treeGenerations.set(treePath, request);
+    directoryLoadingPaths.value = [...directoryLoadingPaths.value, treePath];
+    directoryErrorPaths.value = directoryErrorPaths.value.filter((item) => item !== treePath);
+    try {
+      const result = await listRemoteDirectory(targetSessionId, treePath);
+      if (treeGenerations.get(treePath) !== request || sessionId.value !== targetSessionId) return;
+      if (!result.ok) {
+        directoryErrorPaths.value = [...directoryErrorPaths.value, treePath];
+        return;
+      }
+      cacheDirectory(result.data.path, result.data.entries);
+    } finally {
+      if (treeGenerations.get(treePath) === request) {
+        directoryLoadingPaths.value = directoryLoadingPaths.value.filter((item) => item !== treePath);
+      }
     }
   }
   async function open(entry: RemoteFileEntry): Promise<void> {
@@ -412,6 +448,10 @@ export const useSftpStore = defineStore('sftp', () => {
     copying.value = false;
     changingMode.value = false;
     selectedPath.value = null;
+    directoryChildren.value = {};
+    directoryLoadingPaths.value = [];
+    directoryErrorPaths.value = [];
+    treeGenerations.clear();
   }
 
   function select(entry: RemoteFileEntry): void {
@@ -420,9 +460,10 @@ export const useSftpStore = defineStore('sftp', () => {
 
   return {
     entries, path, sessionId, selectedPath, loading, error,
+    directoryChildren, directoryLoadingPaths, directoryErrorPaths,
     preview, previewPath, previewLoading, previewError, externalOpening, deleting, creatingDirectory, creatingFile, renaming, moving, copying,
     changingMode, savingPreview, recoveryCopyPath,
-    load, open, parent, clear, select, previewFile, closePreview,
+    load, loadTreeDirectory, open, parent, clear, select, previewFile, closePreview,
     remove, removeRecursive, createDirectory, createFile, rename, move, copy, cancelCopy, changeMode, changePermissions, savePreview,
     openPreviewExternally,
   };

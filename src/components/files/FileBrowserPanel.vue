@@ -48,7 +48,9 @@ import VirtualList from '@/components/ui/VirtualList.vue';
 import PermissionDialog from '@/components/dialogs/PermissionDialog.vue';
 import EditorPanel from '@/components/editor/EditorPanel.vue';
 import FileContextMenu from '@/components/files/FileContextMenu.vue';
+import DirectoryTree from '@/components/files/DirectoryTree.vue';
 import { ownerLabel } from '@/domain/permissions';
+import { directoryAncestors, directoryRoot } from '@/domain/directoryNavigation';
 import {
   completedTransferAffectsLocalListing,
   completedTransferAffectsRemoteListing,
@@ -116,6 +118,8 @@ const followTerminal = computed({
 });
 const terminalCwd = computed(() => sessions.sessionCwd(sessions.activeSessionId));
 const followHelpOpen = ref(false);
+const pathDrafts = reactive<Record<'local' | 'remote', string>>({ local: '', remote: '.' });
+const expandedTreePaths = reactive<Record<'local' | 'remote', string[]>>({ local: [], remote: ['/'] });
 
 // ---- listing panes -------------------------------------------------------
 
@@ -157,6 +161,60 @@ const browserPanes = computed<BrowserPane[]>(() => {
   }
   return panes;
 });
+
+function expandTreePath(pane: 'local' | 'remote', path: string): void {
+  const next = new Set(expandedTreePaths[pane]);
+  directoryAncestors(path).forEach((ancestor) => next.add(ancestor));
+  expandedTreePaths[pane] = [...next];
+}
+
+async function loadRemotePath(sessionId: string, path: string): Promise<boolean> {
+  const loaded = await sftp.load(sessionId, path);
+  if (loaded && !sessions.sessionCwd(sessionId) && sftp.path.startsWith('/')) {
+    sessions.setSessionCwd(sessionId, sftp.path);
+  }
+  return loaded;
+}
+
+async function navigatePanePath(pane: 'local' | 'remote', requestedPath = pathDrafts[pane]): Promise<void> {
+  const target = requestedPath.trim();
+  if (!target || target.length > 4_096 || target.includes('\0')) return;
+  const loaded = pane === 'local'
+    ? await localFiles.load(target)
+    : sessions.activeSessionId
+      ? await loadRemotePath(sessions.activeSessionId, target)
+      : false;
+  if (!loaded) return;
+  const resolved = pane === 'local' ? localFiles.listing?.path : sftp.path;
+  if (resolved) expandTreePath(pane, resolved);
+}
+
+function resetPathDraft(pane: 'local' | 'remote'): void {
+  pathDrafts[pane] = pane === 'local' ? localFiles.listing?.path ?? '' : sftp.path;
+}
+
+async function toggleTreePath(pane: 'local' | 'remote', treePath: string): Promise<void> {
+  if (expandedTreePaths[pane].includes(treePath)) {
+    expandedTreePaths[pane] = expandedTreePaths[pane].filter((path) => path !== treePath);
+    return;
+  }
+  expandedTreePaths[pane] = [...expandedTreePaths[pane], treePath];
+  const children = pane === 'local' ? localFiles.directoryChildren : sftp.directoryChildren;
+  if (Object.prototype.hasOwnProperty.call(children, treePath)) return;
+  if (pane === 'local') await localFiles.loadTreeDirectory(treePath);
+  else await sftp.loadTreeDirectory(treePath);
+}
+
+watch(
+  () => [localFiles.listing?.path ?? '', sftp.path] as const,
+  ([localPath, remotePath]) => {
+    pathDrafts.local = localPath;
+    pathDrafts.remote = remotePath;
+    if (localPath) expandTreePath('local', localPath);
+    if (remotePath && remotePath !== '.') expandTreePath('remote', remotePath);
+  },
+  { immediate: true },
+);
 
 // Inline-dialog state is declared before the immediate watchers below so their
 // first synchronous run cannot hit a temporal dead zone.
@@ -223,7 +281,7 @@ watch(
     }
     if (sessionId && state === 'connected' && panelOpen.value) {
       if (sftp.sessionId !== sessionId) sftp.clear();
-      void sftp.load(sessionId, terminalCwd.value && followTerminal.value ? terminalCwd.value : '.');
+      void loadRemotePath(sessionId, terminalCwd.value && followTerminal.value ? terminalCwd.value : '.');
     } else if (!sessionId || state !== 'connected') {
       sftp.clear();
       closeInlineDialogs();
@@ -254,7 +312,7 @@ watch(
     const session = sessions.activeSession;
     if (!session || session.id !== sessionId || session.state !== 'connected') return;
     if (sftp.sessionId === sessionId && sftp.path === cwd) return;
-    void sftp.load(sessionId, cwd);
+    void loadRemotePath(sessionId, cwd);
   },
 );
 
@@ -1420,83 +1478,104 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
       >
         <header class="file-browser-pane-heading">
           <strong>{{ t(pane.label) }}</strong>
-          <div class="path-breadcrumb mono">
+          <form class="path-breadcrumb mono" @submit.prevent="navigatePanePath(pane.id)">
             <button type="button" class="icon-button" :disabled="pane.id === 'remote' ? !sftp.sessionId : !localFiles.listing?.parentPath" :aria-label="t('inspector.parentDirectory')" @click.stop="pane.id === 'local' ? localFiles.parent() : sftp.parent()"><ChevronUp :size="11" /></button>
             <ChevronRight :size="11" />
-            <span :title="pane.path">{{ pane.path }}</span>
-          </div>
+            <input
+              v-model="pathDrafts[pane.id]"
+              type="text"
+              maxlength="4096"
+              spellcheck="false"
+              :aria-label="t('files.pathInputLabel')"
+              :title="t('files.pathInputHint')"
+              @keydown.esc.prevent="resetPathDraft(pane.id)"
+            >
+          </form>
         </header>
-        <div
-          :ref="pane.id === 'remote' ? bindRemoteDropElement : undefined"
-          class="file-list file-table"
-          :class="{ 'file-list-drop-target': (pane.id === 'remote' && nativeDropActive) || (pane.id === 'local' && localDropActive) }"
-          @dragover="allowRemoteFileDrop($event, pane.id)"
-          @dragleave="leaveRemoteFileDrop($event, pane.id)"
-          @drop="dropRemoteFileOnLocal($event, pane.id)"
-          @contextmenu.prevent="openContextMenu(null, pane.id, $event)"
-        >
-          <div class="file-table-header mono" aria-hidden="true">
-            <span>{{ t('files.columnName') }}</span>
-            <span>{{ t('files.columnSize') }}</span>
-            <span>{{ t('files.columnType') }}</span>
-            <span>{{ t('files.columnModified') }}</span>
-            <span>{{ t('files.columnPermissions') }}</span>
-            <span>{{ t('files.columnOwner') }}</span>
-          </div>
-          <div v-if="pane.loading" class="task-empty">{{ t('inspector.loadingFiles') }}</div>
-          <div v-else-if="pane.error" class="inline-notice error"><ShieldQuestion :size="14" /><span>{{ t(pane.error.messageKey as Parameters<typeof t>[0]) }}</span></div>
-          <div v-else-if="pane.entries.length === 0" class="task-empty">{{ t('inspector.emptyDirectory') }}</div>
-          <template v-else>
-            <p v-if="pane.truncated" class="dialog-note preview-truncated">{{ t('inspector.directoryTruncated') }}</p>
-            <VirtualList v-if="pane.entries.length > VIRTUALIZE_THRESHOLD" :items="pane.entries" :row-height="26" class="file-table-body">
-              <template #default="{ item }">
+        <div class="file-browser-pane-content">
+          <DirectoryTree
+            :root-path="directoryRoot(pane.path || '/')"
+            :active-path="pane.path"
+            :label="t('files.directoryTree')"
+            :children-by-path="pane.id === 'local' ? localFiles.directoryChildren : sftp.directoryChildren"
+            :expanded-paths="expandedTreePaths[pane.id]"
+            :loading-paths="pane.id === 'local' ? localFiles.directoryLoadingPaths : sftp.directoryLoadingPaths"
+            :error-paths="pane.id === 'local' ? localFiles.directoryErrorPaths : sftp.directoryErrorPaths"
+            @navigate="navigatePanePath(pane.id, $event)"
+            @toggle="toggleTreePath(pane.id, $event)"
+          />
+          <div
+            :ref="pane.id === 'remote' ? bindRemoteDropElement : undefined"
+            class="file-list file-table"
+            :class="{ 'file-list-drop-target': (pane.id === 'remote' && nativeDropActive) || (pane.id === 'local' && localDropActive) }"
+            @dragover="allowRemoteFileDrop($event, pane.id)"
+            @dragleave="leaveRemoteFileDrop($event, pane.id)"
+            @drop="dropRemoteFileOnLocal($event, pane.id)"
+            @contextmenu.prevent="openContextMenu(null, pane.id, $event)"
+          >
+            <div class="file-table-header mono" aria-hidden="true">
+              <span>{{ t('files.columnName') }}</span>
+              <span>{{ t('files.columnSize') }}</span>
+              <span>{{ t('files.columnType') }}</span>
+              <span>{{ t('files.columnModified') }}</span>
+              <span>{{ t('files.columnPermissions') }}</span>
+              <span>{{ t('files.columnOwner') }}</span>
+            </div>
+            <div v-if="pane.loading" class="task-empty">{{ t('inspector.loadingFiles') }}</div>
+            <div v-else-if="pane.error" class="inline-notice error"><ShieldQuestion :size="14" /><span>{{ t(pane.error.messageKey as Parameters<typeof t>[0]) }}</span></div>
+            <div v-else-if="pane.entries.length === 0" class="task-empty">{{ t('inspector.emptyDirectory') }}</div>
+            <template v-else>
+              <p v-if="pane.truncated" class="dialog-note preview-truncated">{{ t('inspector.directoryTruncated') }}</p>
+              <VirtualList v-if="pane.entries.length > VIRTUALIZE_THRESHOLD" :items="pane.entries" :row-height="26" class="file-table-body">
+                <template #default="{ item }">
+                  <button
+                    type="button"
+                    class="file-row file-table-row"
+                    :class="{ selected: item.path === pane.selectedPath }"
+                    :draggable="pane.id === 'remote' && !item.isSymlink"
+                    @dragstart="beginRemoteFileDrag(item, pane.id, $event)"
+                    @click="selectPaneEntry(item, pane.id)"
+                    @dblclick="openPaneEntry(item, pane.id)"
+                    @contextmenu.prevent.stop="openContextMenu(item, pane.id, $event)"
+                    @keydown.enter.prevent="openPaneEntry(item, pane.id)"
+                    @keydown.shift.f10.prevent="openContextMenuFromKeyboard(item, pane.id, $event)"
+                  >
+                    <span class="file-cell file-cell-name"><Folder v-if="item.isDirectory" :size="13" /><File v-else :size="13" /><span class="mono" :title="item.name">{{ item.name }}</span></span>
+                    <span class="file-cell mono">{{ formatSize(item.size) }}</span>
+                    <span class="file-cell">{{ entryTypeLabel(item) }}</span>
+                    <span class="file-cell mono">{{ formatTimestamp(item.modifiedAtMs) }}</span>
+                    <span class="file-cell mono file-permissions" :title="formatPermissionMode(item.permissionsMode)">{{ formatPermissionMode(item.permissionsMode) }}</span>
+                    <span class="file-cell mono">{{ ownerLabel(item) }}</span>
+                  </button>
+                </template>
+              </VirtualList>
+              <div v-else class="file-table-body">
                 <button
+                  v-for="entry in pane.entries"
+                  :key="entry.path"
                   type="button"
                   class="file-row file-table-row"
-                  :class="{ selected: item.path === pane.selectedPath }"
-                  :draggable="pane.id === 'remote' && !item.isSymlink"
-                  @dragstart="beginRemoteFileDrag(item, pane.id, $event)"
-                  @click="selectPaneEntry(item, pane.id)"
-                  @dblclick="openPaneEntry(item, pane.id)"
-                  @contextmenu.prevent.stop="openContextMenu(item, pane.id, $event)"
-                  @keydown.enter.prevent="openPaneEntry(item, pane.id)"
-                  @keydown.shift.f10.prevent="openContextMenuFromKeyboard(item, pane.id, $event)"
+                  :class="{ selected: entry.path === pane.selectedPath }"
+                  :draggable="pane.id === 'remote' && !entry.isSymlink"
+                  @dragstart="beginRemoteFileDrag(entry, pane.id, $event)"
+                  @click="selectPaneEntry(entry, pane.id)"
+                  @dblclick="openPaneEntry(entry, pane.id)"
+                  @contextmenu.prevent.stop="openContextMenu(entry, pane.id, $event)"
+                  @keydown.enter.prevent="openPaneEntry(entry, pane.id)"
+                  @keydown.shift.f10.prevent="openContextMenuFromKeyboard(entry, pane.id, $event)"
                 >
-                  <span class="file-cell file-cell-name"><Folder v-if="item.isDirectory" :size="13" /><File v-else :size="13" /><span class="mono" :title="item.name">{{ item.name }}</span></span>
-                  <span class="file-cell mono">{{ formatSize(item.size) }}</span>
-                  <span class="file-cell">{{ entryTypeLabel(item) }}</span>
-                  <span class="file-cell mono">{{ formatTimestamp(item.modifiedAtMs) }}</span>
-                  <span class="file-cell mono file-permissions" :title="formatPermissionMode(item.permissionsMode)">{{ formatPermissionMode(item.permissionsMode) }}</span>
-                  <span class="file-cell mono">{{ ownerLabel(item) }}</span>
+                  <span class="file-cell file-cell-name"><Folder v-if="entry.isDirectory" :size="13" /><File v-else :size="13" /><span class="mono" :title="entry.name">{{ entry.name }}</span></span>
+                  <span class="file-cell mono">{{ formatSize(entry.size) }}</span>
+                  <span class="file-cell">{{ entryTypeLabel(entry) }}</span>
+                  <span class="file-cell mono">{{ formatTimestamp(entry.modifiedAtMs) }}</span>
+                  <span class="file-cell mono file-permissions" :title="formatPermissionMode(entry.permissionsMode)">{{ formatPermissionMode(entry.permissionsMode) }}</span>
+                  <span class="file-cell mono">{{ ownerLabel(entry) }}</span>
                 </button>
-              </template>
-            </VirtualList>
-            <div v-else class="file-table-body">
-              <button
-                v-for="entry in pane.entries"
-                :key="entry.path"
-                type="button"
-                class="file-row file-table-row"
-                :class="{ selected: entry.path === pane.selectedPath }"
-                :draggable="pane.id === 'remote' && !entry.isSymlink"
-                @dragstart="beginRemoteFileDrag(entry, pane.id, $event)"
-                @click="selectPaneEntry(entry, pane.id)"
-                @dblclick="openPaneEntry(entry, pane.id)"
-                @contextmenu.prevent.stop="openContextMenu(entry, pane.id, $event)"
-                @keydown.enter.prevent="openPaneEntry(entry, pane.id)"
-                @keydown.shift.f10.prevent="openContextMenuFromKeyboard(entry, pane.id, $event)"
-              >
-                <span class="file-cell file-cell-name"><Folder v-if="entry.isDirectory" :size="13" /><File v-else :size="13" /><span class="mono" :title="entry.name">{{ entry.name }}</span></span>
-                <span class="file-cell mono">{{ formatSize(entry.size) }}</span>
-                <span class="file-cell">{{ entryTypeLabel(entry) }}</span>
-                <span class="file-cell mono">{{ formatTimestamp(entry.modifiedAtMs) }}</span>
-                <span class="file-cell mono file-permissions" :title="formatPermissionMode(entry.permissionsMode)">{{ formatPermissionMode(entry.permissionsMode) }}</span>
-                <span class="file-cell mono">{{ ownerLabel(entry) }}</span>
-              </button>
-            </div>
-          </template>
-          <div v-if="pane.id === 'remote' && nativeDropActive" class="file-drop-hint">{{ t('inspector.dropUploadHint') }}</div>
-          <div v-if="pane.id === 'local' && localDropActive" class="file-drop-hint">{{ t('inspector.dropDownloadHint') }}</div>
+              </div>
+            </template>
+            <div v-if="pane.id === 'remote' && nativeDropActive" class="file-drop-hint">{{ t('inspector.dropUploadHint') }}</div>
+            <div v-if="pane.id === 'local' && localDropActive" class="file-drop-hint">{{ t('inspector.dropDownloadHint') }}</div>
+          </div>
         </div>
       </section>
     </div>

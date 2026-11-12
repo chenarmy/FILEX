@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { failure, isTauriRuntime, normalizeUnknownError } from '@/api/common';
 import type {
   OperationResult,
-  RemoteFileEntry,
+  RemoteDirectoryListing,
   RemotePermissionUpdateResult,
   RemoteTextPreview,
   RemoteTextSaveResult,
@@ -12,7 +12,7 @@ import type {
 export async function listRemoteDirectory(
   sessionId: string,
   path: string,
-): Promise<OperationResult<RemoteFileEntry[]>> {
+): Promise<OperationResult<RemoteDirectoryListing>> {
   if (!isTauriRuntime()) {
     return failure({
       code: 'SFTP_DESKTOP_ONLY',
@@ -22,7 +22,7 @@ export async function listRemoteDirectory(
     });
   }
   try {
-    return await invoke<OperationResult<RemoteFileEntry[]>>('list_remote_directory', { sessionId, path });
+    return await invoke<OperationResult<RemoteDirectoryListing>>('list_remote_directory', { sessionId, path });
   } catch (error: unknown) {
     return failure(normalizeUnknownError(error, 'SFTP_LIST_FAILED'));
   }

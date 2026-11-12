@@ -79,7 +79,8 @@ Separators render as 1 px but expose a 7 px hit target. Hover and drag use the p
 ### Signed update discovery
 
 - FILEX checks the configured signed update feed after startup, on a bounded 30-minute interval and when returning to the foreground if the last successful check is older than the interval.
-- The first discovery in an application session opens a compact, dismissible update dialog showing current and available versions, bounded release notes, download progress and explicit Later, Skip this version and Download and install actions. Later background discoveries expose the same dialog through a persistent update icon instead of interrupting active work.
+- Every automatic discovery of a version that has not been suppressed opens a compact update dialog above all other in-app layers, showing current and available versions, bounded release notes, download progress and explicit Cancel, Skip this version and Download and install actions. Desktop builds best-effort restore and focus the app window; they do not leave it permanently always-on-top.
+- Close, Escape, outside-click, Cancel and Skip this version all suppress only the displayed normalized version. The dialog states that a later release will prompt again. Manual checks can still inspect a suppressed version.
 - A skipped version remains hidden for automatic discovery until a different version is published or the user manually checks. Manual checks deliberately ignore the skip preference so the user can revisit a release.
 - Background network/configuration failures remain silent and retryable. Manual check and install failures use the existing localized notification and structured-error surfaces.
 - Installation requires a reviewed version, a fresh signed-feed check and an explicit install action. Downloads can be cancelled before the installer starts; no code path silently installs or restarts.
@@ -159,6 +160,7 @@ The Settings/Security trust ledger shows current and historical fingerprints wit
 - Tab label: environment indicator, connection name, optional active command marker, state icon and close button.
 - Split layouts: single, vertical, horizontal, and grid only after the base terminal is stable.
 - A disconnected pane retains scrollback and shows an inline reconnect strip rather than replacing the terminal.
+- The focused pane uses a persistent block cursor, a primary focus outline and a textual "input active" status. An unfocused pane retains an outline cursor and a "click to input" status so split-pane input ownership is never communicated by color alone.
 - Search and command history are overlays that do not steal the entire workspace.
 - Settings → Terminal exposes a curated terminal palette browser with a live sample of prompt, text, cursor, selection and ANSI colors. Selecting a palette updates only the settings draft and preview; Cancel or closing the dialog discards it. “Apply and save” is the only action that commits the palette to open terminals and local persistence.
 - The command input bar sits directly under the terminal surface. Enter sends the line to the active PTY, Shift+Enter inserts a newline, and the bounded history (in-memory only, capped, clearable) is navigated with ArrowUp/ArrowDown. It is disabled and visibly labelled when no terminal is connected.
@@ -170,11 +172,11 @@ The toolbar prioritizes reconnect/disconnect, new split, Files, Monitor and Tunn
 
 ### 4.6 Files browser
 
-The primary surface is the bottom dual-pane browser inside the center column: a local pane and a remote pane side by side, with a Files | Commands sub-tab strip, path breadcrumb, refresh, upload/download, new folder, follow-terminal chip and a transfer footer that shows the running task count and opens the task drawer. The horizontal separator has a 160 px minimum for the browser but no fixed 480 px ceiling; its effective maximum follows the available center-column height so the browser may occupy the workspace without overflowing the shell.
+The primary surface is the bottom dual-pane browser inside the center column: a local pane and a remote pane side by side, with a Files | Commands sub-tab strip, editable path field, refresh, upload/download, new folder, follow-terminal chip and a transfer footer that shows the running task count and opens the task drawer. Each pane has a compact directory-only tree beside its file table. Tree nodes lazy-load, omit files and symbolic links, and navigate on a single click. The horizontal separator has a 160 px minimum for the browser but no fixed 480 px ceiling; its effective maximum follows the available center-column height so the browser may occupy the workspace without overflowing the shell.
 
 List columns: name, size, type, modified, permissions and owner (numeric uid/gid when the server provides it); responsive collapse begins with owner and permissions. Symlinks are visually distinct and display targets in details. Rows expose a permission-mode action that opens an explicit octal review dialog before any chmod mutation.
 
-Header: channel state, path breadcrumb, up, refresh, new folder and upload.
+Header: channel state, editable path, up, refresh, new folder and upload. Enter navigates to a validated directory; Escape restores the current path. A failed navigation keeps the last successful listing and shows the structured error inline.
 
 The inspector supports:
 

@@ -11,23 +11,23 @@ export function useUpdateScheduling(): void {
   let initialTimer: number | null = null;
   let periodicTimer: number | null = null;
 
-  function checkInBackground(showDialog: boolean): void {
-    void updates.check(false, showDialog);
+  function checkInBackground(): void {
+    void updates.check(false);
   }
 
   function handleVisibilityChange(): void {
     if (document.visibilityState !== 'visible') return;
-    if (isUpdateCheckDue(updates.lastCheckAt, Date.now())) checkInBackground(false);
+    if (isUpdateCheckDue(updates.lastCheckAt, Date.now())) checkInBackground();
   }
 
   onMounted(() => {
     document.addEventListener('visibilitychange', handleVisibilityChange);
     void updates.initialize();
     initialTimer = window.setTimeout(() => {
-      checkInBackground(true);
+      checkInBackground();
     }, INITIAL_UPDATE_CHECK_DELAY_MS);
     periodicTimer = window.setInterval(() => {
-      checkInBackground(false);
+      checkInBackground();
     }, UPDATE_CHECK_INTERVAL_MS);
   });
 

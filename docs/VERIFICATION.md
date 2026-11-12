@@ -1,5 +1,24 @@
 # FILEX verification evidence
 
+## 2026-11-13 — v0.1.3 directory navigation, terminal focus and update prompting
+
+Added directory-only lazy trees for local and remote file panes, canonical remote listing paths, editable path fields, explicit terminal input focus/cursor states and bounded simple-POSIX-`cd` fallback tracking. Automatic signed-update checks now open the highest in-app modal for every unsuppressed version and best-effort restore/show/focus the desktop window. Close, Escape, outside-click, Cancel and Skip persist only the displayed version; a later version clears the suppression and prompts again.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Version consistency | `pnpm version:check` | Passed at `0.1.3` |
+| TypeScript | `pnpm typecheck` | Passed |
+| Lint | `pnpm lint` | Passed with zero warnings |
+| Unit tests | `pnpm test` | 16 files, 56 tests passed |
+| Production build | `pnpm build` | Passed; existing large-chunk advisory only |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust compile | `cargo check --workspace` | Passed |
+| Rust tests | `cargo test --workspace` | 39 tests passed plus doc tests |
+| Rust Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
+| Browser E2E | `pnpm exec playwright test e2e/workbench.spec.ts` | 19/19 passed |
+
+The update E2E inspected the modal at 1440 × 900 dark theme and 960 × 640 light theme with enlarged text, verified focus trapping, bounded layout, progress rendering, Cancel suppression and persisted skipped-version state. The live SSH/WebView2 test remains host-gated and was not claimed because no CDP endpoint was available at `127.0.0.1:9222`.
+
 ## 2026-11-12 — v0.1.2 signed GitHub and CNB release published
 
 Published FILEX `v0.1.2` from tag commit `997bdd4eb2f168a21e2fdcd1a34e2b54d237cf35`. The tag-triggered [Release workflow](https://github.com/chenarmy/FILEX/actions/runs/43058030675) completed every job successfully:

@@ -293,6 +293,11 @@ export interface RemoteFileEntry {
   gid?: number | null;
 }
 
+export interface RemoteDirectoryListing {
+  path: string;
+  entries: RemoteFileEntry[];
+}
+
 export type RemotePermissionScope = 'all' | 'files' | 'directories';
 
 export interface UpdateRemotePermissionsInput {

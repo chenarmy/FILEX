@@ -968,11 +968,13 @@ test('surfaces an automatic signed update and preserves a skipped version', asyn
   await expect(dialog.getByRole('button', { name: '下载并安装' })).toBeFocused();
   await expect(dialog.getByText('FILEX 0.1.1 已发布，当前版本为 0.1.0。')).toBeVisible();
   await expect(dialog.getByText('Session-scoped process, network and route inspection.')).toBeVisible();
+  await expect(dialog.getByText('取消、关闭或跳过后将不再提示此版本；后续新版本仍会自动提示。')).toBeVisible();
   await page.screenshot({ path: 'test-results/update-available-dark-1440.png' });
 
-  await dialog.getByRole('button', { name: '稍后' }).click();
+  await dialog.getByRole('button', { name: '取消' }).click();
   await expect(dialog).toHaveCount(0);
-  await expect(updateButton).toBeFocused();
+  await expect(updateButton).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('filex.update-preferences.v1'))).toContain('"skippedVersion":"0.1.1"');
 
   await page.setViewportSize({ width: 960, height: 640 });
   await page.evaluate(() => {

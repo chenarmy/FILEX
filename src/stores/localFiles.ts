@@ -10,6 +10,7 @@ import {
   renameLocalEntry,
 } from '@/api/domain/localFilesApi';
 import { cancelCopyOperation } from '@/api/domain/fileOperationsApi';
+import { directoryEntries, type DirectoryTreeEntry } from '@/domain/directoryNavigation';
 import type { AppError, LocalDirectoryListing, LocalFileEntry } from '@/types/contracts';
 
 export const useLocalFilesStore = defineStore('local-files', () => {
@@ -18,24 +19,58 @@ export const useLocalFilesStore = defineStore('local-files', () => {
   const error = ref<AppError | null>(null);
   const selectedPath = ref<string | null>(null);
   const mutating = ref(false);
+  const directoryChildren = ref<Record<string, DirectoryTreeEntry[]>>({});
+  const directoryLoadingPaths = ref<string[]>([]);
+  const directoryErrorPaths = ref<string[]>([]);
   let generation = 0;
   let mutationGeneration = 0;
+  const treeGenerations = new Map<string, number>();
 
-  async function load(path?: string): Promise<void> {
+  function cacheDirectory(nextListing: LocalDirectoryListing): void {
+    directoryChildren.value = {
+      ...directoryChildren.value,
+      [nextListing.path]: directoryEntries(nextListing.entries),
+    };
+  }
+
+  async function load(path?: string): Promise<boolean> {
     const request = ++generation;
     loading.value = true;
     error.value = null;
     try {
       const result = await listLocalDirectory(path);
-      if (request !== generation) return;
+      if (request !== generation) return false;
       if (!result.ok) {
         error.value = result.error;
-        return;
+        return false;
       }
       listing.value = result.data;
+      cacheDirectory(result.data);
       selectedPath.value = null;
+      return true;
     } finally {
       if (request === generation) loading.value = false;
+    }
+  }
+
+  async function loadTreeDirectory(path: string): Promise<void> {
+    if (directoryLoadingPaths.value.includes(path)) return;
+    const request = (treeGenerations.get(path) ?? 0) + 1;
+    treeGenerations.set(path, request);
+    directoryLoadingPaths.value = [...directoryLoadingPaths.value, path];
+    directoryErrorPaths.value = directoryErrorPaths.value.filter((item) => item !== path);
+    try {
+      const result = await listLocalDirectory(path);
+      if (treeGenerations.get(path) !== request) return;
+      if (!result.ok) {
+        directoryErrorPaths.value = [...directoryErrorPaths.value, path];
+        return;
+      }
+      cacheDirectory(result.data);
+    } finally {
+      if (treeGenerations.get(path) === request) {
+        directoryLoadingPaths.value = directoryLoadingPaths.value.filter((item) => item !== path);
+      }
     }
   }
 
@@ -196,10 +231,15 @@ export const useLocalFilesStore = defineStore('local-files', () => {
     mutating.value = false;
     error.value = null;
     selectedPath.value = null;
+    directoryChildren.value = {};
+    directoryLoadingPaths.value = [];
+    directoryErrorPaths.value = [];
+    treeGenerations.clear();
   }
 
   return {
     listing, loading, error, selectedPath, mutating,
-    load, select, open, parent, createDirectory, createFile, rename, move, copy, cancelCopy, remove, clear,
+    directoryChildren, directoryLoadingPaths, directoryErrorPaths,
+    load, loadTreeDirectory, select, open, parent, createDirectory, createFile, rename, move, copy, cancelCopy, remove, clear,
   };
 });

@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   checkForUpdates: vi.fn(),
   getUpdateStatus: vi.fn(),
   installUpdate: vi.fn(),
+  presentCurrentWindowForUpdate: vi.fn(),
 }));
 
 vi.mock('@/api/domain/maintenanceApi', () => ({
@@ -14,6 +15,10 @@ vi.mock('@/api/domain/maintenanceApi', () => ({
   checkForUpdates: mocks.checkForUpdates,
   getUpdateStatus: mocks.getUpdateStatus,
   installUpdate: mocks.installUpdate,
+}));
+
+vi.mock('@/api/domain/windowApi', () => ({
+  presentCurrentWindowForUpdate: mocks.presentCurrentWindowForUpdate,
 }));
 
 import { useUiStore } from '@/stores/ui';
@@ -48,45 +53,66 @@ describe('update store', () => {
     vi.clearAllMocks();
     mocks.getUpdateStatus.mockResolvedValue(success(baseStatus));
     mocks.cancelUpdateDownload.mockResolvedValue(success(undefined));
+    mocks.presentCurrentWindowForUpdate.mockResolvedValue(true);
   });
 
   it('checks in the background, opens the first prompt and persists the successful check time', async () => {
     mocks.checkForUpdates.mockResolvedValue(success(available('0.1.2')));
     const store = useUpdatesStore();
 
-    await expect(store.check(false, true)).resolves.toBe(true);
+    await expect(store.check(false)).resolves.toBe(true);
     expect(store.phase).toBe('available');
     expect(store.dialogOpen).toBe(true);
     expect(store.hasUpdateAvailable).toBe(true);
     expect(store.lastCheckAt).not.toBeNull();
+    expect(mocks.presentCurrentWindowForUpdate).toHaveBeenCalledOnce();
     expect(localStorage.getItem('filex.update-preferences.v1')).toContain('"lastCheckAt"');
   });
 
-  it('updates the persistent indicator without opening a dialog for later periodic discoveries', async () => {
+  it('opens the top-level dialog for every unsuppressed periodic discovery', async () => {
     mocks.checkForUpdates.mockResolvedValue(success(available('0.1.2')));
     const store = useUpdatesStore();
 
-    await expect(store.check(false, false)).resolves.toBe(true);
-    expect(store.dialogOpen).toBe(false);
-    expect(store.hasUpdateAvailable).toBe(true);
-    store.openDialog();
+    await expect(store.check(false)).resolves.toBe(true);
     expect(store.dialogOpen).toBe(true);
+    expect(store.hasUpdateAvailable).toBe(true);
   });
 
   it('hides a skipped version from automatic discovery but keeps manual checks available', async () => {
     mocks.checkForUpdates.mockResolvedValue(success(available('0.1.2')));
     const store = useUpdatesStore();
-    await store.check(false, true);
+    await store.check(false);
 
     store.skipAvailableVersion();
     expect(store.dialogOpen).toBe(false);
     expect(store.hasUpdateAvailable).toBe(false);
     expect(store.skippedVersion).toBe('0.1.2');
 
-    await expect(store.check(false, true)).resolves.toBe(true);
+    await expect(store.check(false)).resolves.toBe(true);
     expect(store.dialogOpen).toBe(false);
 
-    await expect(store.check(true, true)).resolves.toBe(true);
+    await expect(store.check(true)).resolves.toBe(true);
+    expect(store.dialogOpen).toBe(true);
+  });
+
+  it('treats close and cancel as suppression for only the displayed version', async () => {
+    mocks.checkForUpdates
+      .mockResolvedValueOnce(success(available('0.1.2')))
+      .mockResolvedValueOnce(success(available('0.1.2')))
+      .mockResolvedValueOnce(success(available('0.1.3')));
+    const store = useUpdatesStore();
+
+    await store.check(false);
+    store.dismiss();
+    expect(store.skippedVersion).toBe('0.1.2');
+    expect(store.dialogOpen).toBe(false);
+
+    await store.check(false);
+    expect(store.dialogOpen).toBe(false);
+
+    await store.check(false);
+    expect(store.skippedVersion).toBeNull();
+    expect(store.availableVersion).toBe('0.1.3');
     expect(store.dialogOpen).toBe(true);
   });
 
@@ -95,10 +121,10 @@ describe('update store', () => {
       .mockResolvedValueOnce(success(available('0.1.2')))
       .mockResolvedValueOnce(success(available('0.1.3')));
     const store = useUpdatesStore();
-    await store.check(false, true);
+    await store.check(false);
     store.skipAvailableVersion();
 
-    await store.check(false, true);
+    await store.check(false);
     expect(store.availableVersion).toBe('0.1.3');
     expect(store.skippedVersion).toBeNull();
     expect(store.dialogOpen).toBe(true);
@@ -119,7 +145,7 @@ describe('update store', () => {
       },
     });
 
-    await expect(store.check(false, true)).resolves.toBe(false);
+    await expect(store.check(false)).resolves.toBe(false);
     expect(store.lastCheckAt).toBeNull();
     expect(store.errorKey).toBe('errors.updateCheckFailed');
     expect(notify).not.toHaveBeenCalled();
@@ -134,7 +160,7 @@ describe('update store', () => {
       return Promise.resolve(success(undefined));
     });
     const store = useUpdatesStore();
-    await store.check(false, true);
+    await store.check(false);
 
     await expect(store.install()).resolves.toBe(true);
     expect(store.phase).toBe('installing');
@@ -148,7 +174,7 @@ describe('update store', () => {
       finishInstall = resolve;
     }));
     const store = useUpdatesStore();
-    await store.check(false, true);
+    await store.check(false);
 
     const installation = store.install();
     expect(store.phase).toBe('downloading');
