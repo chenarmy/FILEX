@@ -250,6 +250,7 @@ Scope:
 - Interactive Docker dialog (`DockerDialog`): bounded inspection of Docker daemon status, containers, and images, live log tailing, and confirmed container lifecycle actions (`start`, `stop`, `restart`, `pause`, `unpause`, `remove`).
 - Curated DevOps diagnostics dialog (`OpsDetailsDialog`): bounded read-only views for Listening Ports, Systemd Services, Disk & Inode Usage, and System/Kernel Logs.
 - Process list right-click context actions (`MonitorDetailsDialog`): right-click row menu for confirmed POSIX signals (`SIGTERM`, `SIGKILL`, `SIGHUP`, `SIGSTOP`, `SIGCONT`), Windows `Stop-Process`, and PID/name copy.
+- Terminal selection & initial directory tree polish (`0.1.6`): left-drag text selection no longer auto-opens the context menu or leaves click reticles over selected ranges, `Ctrl+Shift+C`/`Ctrl+Shift+V` and selection-aware `Ctrl+C` work cleanly, the terminal quick-ops footer renders unclipped (`flex: 0 0 auto`), and initial remote/local directory navigation trees automatically populate missing ancestor directories (`missingAncestorDirectories` + `syncTreePath`).
 
 ## Phase 6 — AI assistant
 

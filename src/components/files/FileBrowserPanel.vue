@@ -49,7 +49,7 @@ import FileContextMenu from '@/components/files/FileContextMenu.vue';
 import DirectoryTree from '@/components/files/DirectoryTree.vue';
 import FileEntryIcon from '@/components/files/FileEntryIcon.vue';
 import { ownerLabel } from '@/domain/permissions';
-import { directoryAncestors, directoryRoot } from '@/domain/directoryNavigation';
+import { directoryAncestors, directoryRoot, missingAncestorDirectories } from '@/domain/directoryNavigation';
 import {
   completedTransferAffectsLocalListing,
   completedTransferAffectsRemoteListing,
@@ -167,6 +167,31 @@ function expandTreePath(pane: 'local' | 'remote', path: string): void {
   expandedTreePaths[pane] = [...next];
 }
 
+async function syncTreePath(pane: 'local' | 'remote', path: string): Promise<void> {
+  if (!path) return;
+  if (pane === 'remote' && (!sftp.sessionId || path === '.')) return;
+  expandTreePath(pane, path);
+  const missing = pane === 'local'
+    ? missingAncestorDirectories(
+      path,
+      localFiles.directoryChildren,
+      localFiles.directoryLoadingPaths,
+      localFiles.directoryErrorPaths,
+    )
+    : missingAncestorDirectories(
+      path,
+      sftp.directoryChildren,
+      sftp.directoryLoadingPaths,
+      sftp.directoryErrorPaths,
+    );
+  if (missing.length === 0) return;
+  await Promise.all(
+    missing.map((ancestor) => (pane === 'local'
+      ? localFiles.loadTreeDirectory(ancestor)
+      : sftp.loadTreeDirectory(ancestor))),
+  );
+}
+
 async function loadRemotePath(sessionId: string, path: string): Promise<boolean> {
   const loaded = await sftp.load(sessionId, path);
   if (loaded && !sessions.sessionCwd(sessionId) && sftp.path.startsWith('/')) {
@@ -185,7 +210,7 @@ async function navigatePanePath(pane: 'local' | 'remote', requestedPath = pathDr
       : false;
   if (!loaded) return;
   const resolved = pane === 'local' ? localFiles.listing?.path : sftp.path;
-  if (resolved) expandTreePath(pane, resolved);
+  if (resolved) void syncTreePath(pane, resolved);
 }
 
 function resetPathDraft(pane: 'local' | 'remote'): void {
@@ -205,12 +230,12 @@ async function toggleTreePath(pane: 'local' | 'remote', treePath: string): Promi
 }
 
 watch(
-  () => [localFiles.listing?.path ?? '', sftp.path] as const,
-  ([localPath, remotePath]) => {
+  () => [localFiles.listing?.path ?? '', sftp.path, sftp.sessionId] as const,
+  ([localPath, remotePath, remoteSessionId]) => {
     pathDrafts.local = localPath;
     pathDrafts.remote = remotePath;
-    if (localPath) expandTreePath('local', localPath);
-    if (remotePath && remotePath !== '.') expandTreePath('remote', remotePath);
+    if (localPath) void syncTreePath('local', localPath);
+    if (remoteSessionId && remotePath && remotePath !== '.') void syncTreePath('remote', remotePath);
   },
   { immediate: true },
 );
@@ -251,8 +276,8 @@ const fileMenu = ref<{
 const fileMenuTrigger = ref<HTMLElement | null>(null);
 
 watch(
-  () => [sessions.activeSessionId, sessions.activeSession?.state] as const,
-  ([sessionId, state], previous) => {
+  () => [sessions.activeSessionId, sessions.activeSession?.state, panelOpen.value] as const,
+  ([sessionId, state, open], previous) => {
     const previousSessionId = previous?.[0];
     if (previousSessionId && previousSessionId !== sessionId) {
       void externalEditors.stopForSession(previousSessionId);
@@ -278,11 +303,18 @@ watch(
       copyDialogOpen.value = false;
       copySourceEntry.value = null;
     }
-    if (sessionId && state === 'connected' && panelOpen.value) {
-      if (sftp.sessionId !== sessionId) sftp.clear();
-      void loadRemotePath(sessionId, terminalCwd.value && followTerminal.value ? terminalCwd.value : '.');
+    if (sessionId && state === 'connected' && open) {
+      const sessionChanged = sftp.sessionId !== sessionId;
+      if (sessionChanged) {
+        sftp.clear();
+        expandedTreePaths.remote = ['/'];
+      }
+      if (sessionChanged || previous?.[0] !== sessionId || previous?.[1] !== 'connected') {
+        void loadRemotePath(sessionId, terminalCwd.value && followTerminal.value ? terminalCwd.value : '.');
+      }
     } else if (!sessionId || state !== 'connected') {
       sftp.clear();
+      expandedTreePaths.remote = ['/'];
       closeInlineDialogs();
       activePane.value = 'remote';
     }

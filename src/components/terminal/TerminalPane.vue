@@ -98,6 +98,7 @@ let resizeObserver: ResizeObserver | null = null;
 let resizeTimer: number | null = null;
 let searchRefreshTimer: number | null = null;
 let pasteHandler: ((event: ClipboardEvent) => void) | null = null;
+let pointerDownHandler: ((event: PointerEvent) => void) | null = null;
 let pointerUpHandler: ((event: PointerEvent) => void) | null = null;
 let contextMenuHandler: ((event: MouseEvent) => void) | null = null;
 let disposeSelectionListener: (() => void) | null = null;
@@ -325,7 +326,7 @@ function clearTerminalDisplay(): void {
   terminal?.focus();
 }
 
-function updateClickedCellFromEvent(event: MouseEvent | PointerEvent): void {
+function updateClickedCellFromEvent(event: MouseEvent | PointerEvent, showReticle = true): void {
   const surface = terminalSurface.value;
   const screen = terminalHost.value?.querySelector<HTMLElement>('.xterm-screen');
   if (!surface || !screen || columns.value <= 0 || rows.value <= 0) return;
@@ -347,18 +348,33 @@ function updateClickedCellFromEvent(event: MouseEvent | PointerEvent): void {
     width: Math.max(4, cellWidth),
     height: Math.max(10, cellHeight),
   };
+  if (reticleTimer !== null) {
+    window.clearTimeout(reticleTimer);
+    reticleTimer = null;
+  }
+  if (!showReticle) {
+    reticleVisible.value = false;
+    return;
+  }
   reticleVisible.value = true;
-  if (reticleTimer !== null) window.clearTimeout(reticleTimer);
   reticleTimer = window.setTimeout(() => {
     reticleVisible.value = false;
     reticleTimer = null;
   }, 1600);
 }
 
+function handleTerminalPointerDown(event: PointerEvent): void {
+  if (event.button !== 0) return;
+  reticleVisible.value = false;
+  updateClickedCellFromEvent(event, false);
+}
+
 function handleTerminalPointerUp(event: PointerEvent): void {
   if (event.button !== 0) return;
-  updateClickedCellFromEvent(event);
-  window.setTimeout(() => openContextMenuAt(event, false), 0);
+  window.setTimeout(() => {
+    const hasSelection = Boolean(terminal?.hasSelection());
+    updateClickedCellFromEvent(event, !hasSelection);
+  }, 0);
 }
 
 function handleTerminalContextMenu(event: MouseEvent): void {
@@ -597,9 +613,32 @@ onMounted(async () => {
       if (accepted) terminal?.paste(text);
     });
   };
+  terminal.attachCustomKeyEventHandler((event) => {
+    if (event.type !== 'keydown') return true;
+    const key = event.key.toLowerCase();
+    const accel = event.ctrlKey || event.metaKey;
+    if (accel && event.shiftKey && key === 'c') {
+      const selected = terminal?.getSelection() ?? '';
+      if (selected) void copyText(selected);
+      return false;
+    }
+    if (accel && event.shiftKey && key === 'v') {
+      void pasteFromClipboard();
+      return false;
+    }
+    if (event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey && key === 'c' && terminal?.hasSelection()) {
+      const selected = terminal.getSelection();
+      if (selected) void copyText(selected);
+      terminal.clearSelection();
+      return false;
+    }
+    return true;
+  });
   terminal.element?.addEventListener('paste', pasteHandler, true);
+  pointerDownHandler = handleTerminalPointerDown;
   pointerUpHandler = handleTerminalPointerUp;
   contextMenuHandler = handleTerminalContextMenu;
+  terminal.element?.addEventListener('pointerdown', pointerDownHandler);
   terminal.element?.addEventListener('pointerup', pointerUpHandler);
   terminal.element?.addEventListener('contextmenu', contextMenuHandler);
   document.addEventListener('pointerdown', handleDocumentPointerDown, true);
@@ -708,6 +747,7 @@ onBeforeUnmount(() => {
   systemThemeMedia?.removeEventListener('change', handleSystemThemeChange);
   resizeObserver?.disconnect();
   if (pasteHandler) terminal?.element?.removeEventListener('paste', pasteHandler, true);
+  if (pointerDownHandler) terminal?.element?.removeEventListener('pointerdown', pointerDownHandler);
   if (pointerUpHandler) terminal?.element?.removeEventListener('pointerup', pointerUpHandler);
   if (contextMenuHandler) terminal?.element?.removeEventListener('contextmenu', contextMenuHandler);
   document.removeEventListener('pointerdown', handleDocumentPointerDown, true);
@@ -898,8 +938,7 @@ defineExpose({ focusTerminal });
   box-shadow: inset 0 0 0 2px hsl(var(--ring));
 }
 
-.terminal-pane-header,
-.terminal-pane-status {
+.terminal-pane-header {
   display: flex;
   min-width: 0;
   align-items: center;
@@ -909,28 +948,13 @@ defineExpose({ focusTerminal });
   color: hsl(var(--muted-foreground));
   background: hsl(var(--card));
   font-size: 0.6875rem;
-}
-
-.terminal-input-status.active {
-  color: hsl(var(--primary));
-  font-weight: 600;
-}
-
-.terminal-pane-header {
   flex: 0 0 26px;
   height: 26px;
   border-bottom: 1px solid hsl(var(--border));
 }
 
-.terminal-pane-status {
-  flex: 0 0 20px;
-  height: 20px;
-  border-top: 1px solid hsl(var(--border));
-}
-
 .terminal-pane-heading,
-.terminal-pane-actions,
-.terminal-pane-status span {
+.terminal-pane-actions {
   display: flex;
   min-width: 0;
   align-items: center;
@@ -1050,6 +1074,8 @@ defineExpose({ focusTerminal });
 .terminal-pane-surface :deep(.xterm) {
   height: 100%;
   cursor: text;
+  font-kerning: none !important;
+  font-variant-ligatures: none !important;
 }
 
 .terminal-pane-surface :deep(.xterm-rows) {

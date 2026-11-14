@@ -1309,3 +1309,152 @@ test('opens process context menu with signal actions and inspects Docker and Dev
   await page.screenshot({ path: 'test-results/ops-modal-light-960-font20.png' });
   await opsDialog.getByRole('button', { name: '关闭运维面板' }).click();
 });
+
+test('selects terminal text without auto-opening context menu and populates initial remote directory tree', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.evaluate(() => {
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__?.config.globalProperties.$pinia;
+    const sessions = pinia?._s.get('sessions') as {
+      summaries: Array<Record<string, unknown>>;
+      activeSessionId: string | null;
+      outputBuffers: Record<string, Uint8Array[]>;
+      outputBufferStarts: Record<string, number>;
+      outputRevision: number;
+      isQuickProfile: (id?: string | null) => boolean;
+      resizeSession: () => Promise<void>;
+    } | undefined;
+    const sftp = pinia?._s.get('sftp') as {
+      sessionId: string | null;
+      path: string;
+      entries: Array<Record<string, unknown>>;
+      directoryChildren: Record<string, Array<{ name: string; path: string }>>;
+      directoryLoadingPaths: string[];
+      directoryErrorPaths: string[];
+      load: (sessionId: string, path: string) => Promise<boolean>;
+      loadTreeDirectory: (treePath: string) => Promise<void>;
+      clear: () => void;
+    } | undefined;
+    const settings = pinia?._s.get('settings') as {
+      value: Record<string, unknown>;
+      apply?: () => void;
+    } | undefined;
+    if (!sessions || !sftp || !settings) throw new Error('Stores unavailable');
+
+    Object.assign(settings.value, {
+      theme: 'light',
+      terminalTheme: 'filex-light',
+      locale: 'zh-CN',
+      fileBrowserOpen: true,
+      focusMode: false,
+      dualPaneSftp: false,
+    });
+    settings.apply?.call(settings);
+
+    const treeEntries: Record<string, Array<{ name: string; path: string }>> = {
+      '/': [
+        { name: 'etc', path: '/etc' },
+        { name: 'root', path: '/root' },
+        { name: 'var', path: '/var' },
+      ],
+      '/root': [
+        { name: '.cache', path: '/root/.cache' },
+        { name: '.docker', path: '/root/.docker' },
+      ],
+    };
+    sftp.load = (sessionId: string, requestedPath: string) => {
+      const resolved = requestedPath === '.' ? '/root' : requestedPath;
+      sftp.sessionId = sessionId;
+      sftp.path = resolved;
+      sftp.entries = (treeEntries[resolved] ?? []).map((item) => ({
+        name: item.name,
+        path: item.path,
+        isDirectory: true,
+        isSymlink: false,
+        size: null,
+        modifiedAtMs: Date.now(),
+        permissionsMode: 0o755,
+        uid: 0,
+        gid: 0,
+      }));
+      sftp.directoryChildren = {
+        ...sftp.directoryChildren,
+        [resolved]: treeEntries[resolved] ?? [],
+      };
+      return Promise.resolve(true);
+    };
+    sftp.loadTreeDirectory = (treePath: string) => {
+      sftp.directoryChildren = {
+        ...sftp.directoryChildren,
+        [treePath]: treeEntries[treePath] ?? [],
+      };
+      return Promise.resolve();
+    };
+
+    const sessionId = 'session-tree-and-select';
+    sessions.isQuickProfile = () => false;
+    sessions.resizeSession = () => Promise.resolve();
+    sessions.summaries = [{
+      id: sessionId,
+      generation: 1,
+      profileId: 'profile-tree-and-select',
+      state: 'connected',
+      host: '10.0.0.25',
+      port: 22,
+      username: 'root',
+      lastError: null,
+    }];
+    sessions.activeSessionId = sessionId;
+
+    const ansiTop = [
+      '\x1b[7m  PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND          \x1b[0m\r\n',
+      ' 1550 root      20   0 1236448  59120   1704 S   0.3   0.1  16:23.35 containerd-shim\r\n',
+      ' 1698 root      20   0  118648   9152   3200 S   0.0   0.0   0:05.29 AliYunDun\r\n',
+    ].join('');
+    sessions.outputBuffers[sessionId] = [new TextEncoder().encode(ansiTop)];
+    sessions.outputBufferStarts[sessionId] = 0;
+    sessions.outputRevision += 1;
+  });
+
+  // Initial remote connection to `.` canonicalizing to `/root` populates `/` children automatically.
+  const directoryTree = page.locator('.directory-tree[aria-label="目录导航"]');
+  await expect(directoryTree.locator('.directory-tree-label', { hasText: /^etc$/ })).toBeVisible();
+  await expect(directoryTree.locator('.directory-tree-label', { hasText: /^root$/ })).toBeVisible();
+  await expect(directoryTree.locator('.directory-tree-label', { hasText: /^var$/ })).toBeVisible();
+
+  // Plain left-click shows clicked-cell indicator without opening the context menu.
+  const screenBox = await page.locator('.terminal-pane-surface .xterm-screen').boundingBox();
+  expect(screenBox).not.toBeNull();
+  await page.mouse.click(screenBox!.x + 40, screenBox!.y + 22);
+  await expect(page.getByRole('menu', { name: '终端窗格' })).toHaveCount(0);
+  await expect(page.locator('.terminal-click-reticle')).toBeVisible();
+
+  // Drag-selecting text in the terminal highlights selection without auto-opening a popup menu or leaving a reticle box.
+  const rows = page.locator('.terminal-pane-surface .xterm-rows > div');
+  await expect(rows.nth(1)).toContainText('containerd-shim');
+  const startX = screenBox!.x + 120;
+  const startY = screenBox!.y + 22;
+  const endX = screenBox!.x + 420;
+  const endY = screenBox!.y + 40;
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.mouse.move(endX, endY, { steps: 6 });
+  await page.mouse.up();
+
+  await expect(page.getByRole('menu', { name: '终端窗格' })).toHaveCount(0);
+  await expect(page.locator('.terminal-click-reticle')).toHaveCount(0);
+  await expect(page.locator('.terminal-pane-status')).toContainText('已选');
+  await page.screenshot({ path: 'test-results/terminal-selection-and-tree-1440.png' });
+
+  // Right-click while text is selected opens the full terminal context menu.
+  await page.locator('.terminal-pane-surface').click({ button: 'right', position: { x: 220, y: 36 } });
+  const menu = page.getByRole('menu', { name: '终端窗格' });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: '复制选中内容' })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: '复制并输入' })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: '粘贴' })).toBeVisible();
+});

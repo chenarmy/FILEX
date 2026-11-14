@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-14
+
+### Fixed
+
+- Removed auto-opening the terminal selection context menu on left mouse button release (`pointerup`) and suppressed `.terminal-click-reticle` when dragging a text selection, keeping right-click as the explicit context menu trigger and adding `Ctrl+Shift+C` / `Ctrl+Shift+V` / selection-aware `Ctrl+C` shortcuts alongside uniform `.xterm` font-kerning and ligature suppression.
+- Removed a stale `height: 20px` scoped CSS rule on `.terminal-pane-status` in `TerminalPane.vue` and marked the footer `flex: 0 0 auto;` in `workbench.css` so the quick-operations toolbar rows render completely without vertical clipping.
+- Populated and expanded missing ancestor directories in `DirectoryTree` automatically via `missingAncestorDirectories` and `syncTreePath` when a session first connects (e.g., canonicalizing `.` to `/root` now loads `/` children underneath `/`) or opens the file panel after connecting, and reset stale remote tree expansion on session change or disconnect.
+
 ## [0.1.5] - 2026-11-14
 
 ### Added

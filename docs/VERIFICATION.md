@@ -1,5 +1,25 @@
 # FILEX verification evidence
 
+## 2026-11-14 — v0.1.6 release preparation
+
+- Scope: fixed terminal drag-selection UX (stopped auto-opening the context menu on left `pointerup`, suppressed click reticle on active selections, added `Ctrl+Shift+C`/`Ctrl+Shift+V` and selection-aware `Ctrl+C`, aligned `.xterm` ligature/kerning rules, and removed stale `20 px` footer height clipping on `.terminal-pane-status`), fixed empty initial remote/local `DirectoryTree` ancestors via `missingAncestorDirectories` and `syncTreePath`, added Vitest + Playwright regression coverage, and synchronized workspace manifests and `Cargo.lock` to `0.1.6`.
+- Visual review: inspected `test-results/terminal-selection-and-tree-1440.png` at 1440 × 900 in light theme, confirming unobstructed terminal text selection, crisp cursor visibility, unclipped quick-ops buttons, and populated `/` -> `/root` directory tree entries on first connect.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Version sync | `pnpm version:check` | Passed (`0.1.6`) |
+| Release notes | `node scripts/release-notes.mjs v0.1.6` | Passed |
+| ESLint | `pnpm lint` | Passed (0 warnings) |
+| TypeScript | `pnpm typecheck` | Passed |
+| Frontend unit tests | `pnpm test` | Passed, 17 files and 78 tests |
+| Production bundle | `pnpm build` | Passed (existing Vite >500 kB chunk-size warning retained) |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust locked check | `cargo check --workspace --locked` | Passed |
+| Rust Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
+| Rust workspace tests | `cargo test --workspace --locked` | Passed, 37 tests (`filex-core`: 10, `filex-credentials`: 2, `filex-desktop-lib`: 15, `filex-ssh`: 4, `filex-storage`: 6; `filex-contracts`: 0; `filex-desktop`: 0) |
+| Workbench Playwright E2E | `pnpm exec playwright test e2e/workbench.spec.ts` | Passed, 21 tests |
+| Diff hygiene | `git diff --check` | Passed |
+
 ## 2026-11-14 — v0.1.5 release preparation
 
 - Scope: completed Phase 5.6 terminal formatting/CSP fidelity (`dangerousDisableAssetCspModification: ["style-src"]`, static `.xterm-rows` formatting fallback, `COLORTERM=truecolor` / `LANG=C.UTF-8` PTY env, clicked-cell cursor/selection indicators, unselected right-click Paste/Select All), removed `CommandInputBar`, collapsed the monitoring sidebar (`hostPanelOpen: false`) into an expanded footer strip with clickable popups (`MonitorDetailsDialog` including Overview & Disks plus Process right-click signal actions, `DockerDialog`, `OpsDetailsDialog`), updated `e2e/workbench.spec.ts` / `e2e/live-ssh.spec.ts`, and synchronized workspace manifests and `Cargo.lock` to `0.1.5`.

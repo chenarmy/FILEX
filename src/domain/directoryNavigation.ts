@@ -42,6 +42,19 @@ export function directoryAncestors(path: string): string[] {
   return [value];
 }
 
+export function missingAncestorDirectories(
+  path: string,
+  childrenByPath: Record<string, DirectoryTreeEntry[]>,
+  loadingPaths: readonly string[] = [],
+  errorPaths: readonly string[] = [],
+): string[] {
+  return directoryAncestors(path).filter((ancestor) => (
+    !Object.prototype.hasOwnProperty.call(childrenByPath, ancestor)
+    && !loadingPaths.includes(ancestor)
+    && !errorPaths.includes(ancestor)
+  ));
+}
+
 export function directoryName(path: string): string {
   const normalized = path.replace(/[\\/]+$/, '');
   if (!normalized) return '/';
