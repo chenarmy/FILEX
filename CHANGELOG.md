@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-14
+
+### Added
+
+- Interactive Docker management modal (`DockerDialog`) accessible from the terminal footer quick-ops strip, showing Docker Engine availability, running/exited containers with resource badges, local images, container log tailing, search filtering, and confirmed container lifecycle actions (`start`, `stop`, `restart`, `pause`, `unpause`, `remove`).
+- Curated DevOps diagnostics modal (`OpsDetailsDialog`) with bounded read-only views for Host Overview, Listening Ports, Systemd Services, Disk & Inode Usage, and System/Kernel Logs, plus keyword filtering and one-click output copying.
+- Right-click context menu on rows in the Process monitor modal (`MonitorDetailsDialog`) for sending confirmed POSIX signals (`SIGTERM`, `SIGKILL`, `SIGHUP`, `SIGSTOP`, `SIGCONT`), Windows `Stop-Process`, and copying PID or process name, alongside a new Overview & Disk Mounts tab inside `MonitorDetailsDialog`.
+- Unselected right-click Paste (`clipboard.readText()` with multiline paste guard) and Select All actions in the terminal context menu, plus live cursor row/column coordinates, clicked-cell visual feedback reticle, and active selection character counter in the footer.
+
+### Changed
+
+- Removed the bottom `CommandInputBar` composer and collapsed the default right-hand host monitoring sidebar (`hostPanelOpen: false`), replacing both with an enlarged (`>= 38 px`) Arco Design footer strip hosting session metadata and one-click monitoring, Docker, and DevOps popup triggers.
+- Quoted multi-word default monospace font stacks and raised xterm contrast ratios and cursor/selection palette contrast across dark and light terminal themes.
+
+### Fixed
+
+- Preserved Tauri v2 asset CSP `style-src` compatibility (`dangerousDisableAssetCspModification: ["style-src"]`), added static `.xterm-rows` formatting fallback (`white-space: pre` + monospace metrics), and set `COLORTERM=truecolor` / `LANG=C.UTF-8` (best-effort) on SSH PTY sessions so interactive tools such as `top` render with aligned columns, colors, cursor, and visible selection highlights.
+- Prevented `useMonitorPolling` from clearing pre-collected or sibling-tab process snapshots when switching views or mounting `MonitorDetailsDialog` on non-overview tabs.
+
 ## [0.1.4] - 2026-11-14
 
 ### Added

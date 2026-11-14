@@ -1,7 +1,7 @@
 import { computed, ref } from 'vue';
 import { defineStore } from 'pinia';
 import { collectProcessSnapshot, terminateRemoteProcess } from '@/api/domain/processesApi';
-import type { AppError, ProcessSnapshot } from '@/types/contracts';
+import type { AppError, ProcessSignal, ProcessSnapshot } from '@/types/contracts';
 
 export const useProcessesStore = defineStore('processes', () => {
   const snapshot = ref<ProcessSnapshot | null>(null);
@@ -38,7 +38,7 @@ export const useProcessesStore = defineStore('processes', () => {
     }
   }
 
-  async function terminate(sessionId: string, pid: number): Promise<boolean> {
+  async function terminate(sessionId: string, pid: number, signal: ProcessSignal = 'SIGTERM'): Promise<boolean> {
     const snapshotId = snapshot.value?.snapshotId;
     if (snapshotSessionId !== sessionId || !snapshotId || terminatingPid.value !== null || loading.value) return false;
     const request = ++generation;
@@ -46,7 +46,7 @@ export const useProcessesStore = defineStore('processes', () => {
     error.value = null;
     let accepted = false;
     try {
-      const result = await terminateRemoteProcess(sessionId, snapshotId, pid);
+      const result = await terminateRemoteProcess(sessionId, snapshotId, pid, signal);
       if (request !== generation) return false;
       if (result.ok) accepted = true;
       else {

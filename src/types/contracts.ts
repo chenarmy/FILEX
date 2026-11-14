@@ -643,3 +643,73 @@ export interface TerminalLogStatus {
   bytes: number;
   error?: AppError;
 }
+
+export type ProcessSignal = 'SIGTERM' | 'SIGKILL' | 'SIGHUP' | 'SIGSTOP' | 'SIGCONT';
+
+export type MonitorDetailsView = 'overview' | 'processes' | 'network' | 'routes';
+
+export type DockerAvailability =
+  | 'available'
+  | 'not_installed'
+  | 'permission_denied'
+  | 'daemon_stopped'
+  | 'unsupported';
+
+export type DockerContainerAction = 'start' | 'stop' | 'restart' | 'pause' | 'unpause' | 'remove';
+
+export interface DockerContainerEntry {
+  id: string;
+  name: string;
+  image: string;
+  state: string;
+  status: string;
+  ports: string;
+  createdAt: string;
+  cpuPercent?: string | null;
+  memoryUsage?: string | null;
+  pids?: string | null;
+}
+
+export interface DockerImageEntry {
+  id: string;
+  repository: string;
+  tag: string;
+  size: string;
+  createdSince: string;
+}
+
+export interface DockerSnapshot {
+  availability: DockerAvailability;
+  collectedAtMs: number;
+  serverVersion?: string | null;
+  containers: DockerContainerEntry[];
+  images: DockerImageEntry[];
+  truncated: boolean;
+  detailNote?: string | null;
+}
+
+export interface DockerLogsSnapshot {
+  containerId: string;
+  lines: string[];
+  truncated: boolean;
+}
+
+export type OpsCategory = 'overview' | 'ports' | 'services' | 'disks' | 'logs';
+
+export interface OpsCommandSection {
+  id: string;
+  titleKey: string;
+  commandLabel: string;
+  lines: string[];
+  truncated: boolean;
+}
+
+export interface OpsSnapshot {
+  state: MonitorState;
+  collectedAtMs: number;
+  category: OpsCategory;
+  hostname?: string | null;
+  kernel?: string | null;
+  osRelease?: string | null;
+  sections: OpsCommandSection[];
+}

@@ -385,6 +385,20 @@ External-provider requests are opt-in and identify the categories leaving the de
 
 Remote file content, selected local file text, command output, server banners and copied text are marked as untrusted context so prompt-injection text cannot alter tool policy, confirmation requirements or system instructions.
 
+### 20.5 Phase 5.6 Remote Ops & Docker Facade Contract
+
+```
+TerminalQuickOpsBar / Dialogs (MonitorDetailsDialog, DockerDialog, OpsDetailsDialog)
+  -> Pinia stores (monitor, processes, network, docker, ops)
+  -> Domain API facades (processesApi, dockerApi, opsApi)
+  -> Tauri commands (terminate_remote_process with ProcessSignal, collect_docker_snapshot, run_docker_container_action, collect_docker_logs, collect_ops_snapshot)
+  -> SessionRuntime bounded SSH execution + strict input/ID validation (filex-contracts DTOs + structured AppError codes)
+```
+
+- `terminate_remote_process` accepts an optional strictly-typed `ProcessSignal` (`SIGTERM` default, `SIGKILL`, `SIGHUP`, `SIGSTOP`, `SIGCONT`), validated in Rust and re-verified against the cached `ProcessSnapshot` `(lstart, comm)` / Windows start ticks before signaling.
+- `DockerSnapshot` and `run_docker_container_action` strictly allowlist container IDs/names (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`), image IDs, and bounded action verbs (`start`, `stop`, `restart`, `pause`, `unpause`, `remove`) and cap log/probe output sizes and SSH execution timeouts cleanly without shell-interpolating user input.
+- `OpsDetailsDialog` executes curated, read-only bounded probes (`ports`, `services`, `disks`, `logs`) via `collect_ops_snapshot` and returns structured availability/permission states (`live`, `unsupported`, `permission_denied`).
+
 ### 20.4 Tests
 
 - Redaction fixtures for passwords, keys, tokens, URLs, multiline output and hidden-input markers.

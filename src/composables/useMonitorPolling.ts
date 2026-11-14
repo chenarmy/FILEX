@@ -9,6 +9,8 @@ interface MonitorPollingOptions {
   enabled: () => boolean;
   /** Also collect the process list (used by views that show processes). */
   withProcesses: () => boolean;
+  /** Keep already-collected snapshots in memory when temporarily paused (e.g. switching dialog tabs). */
+  preserveDataOnPause?: boolean;
 }
 
 /**
@@ -23,6 +25,9 @@ export function useMonitorPolling(options: MonitorPollingOptions): void {
   const monitor = useMonitorStore();
   const processes = useProcessesStore();
   const appForeground = ref(document.visibilityState === 'visible' && document.hasFocus());
+  let initialized = false;
+  let previousSessionId: string | null | undefined;
+  let previousSessionState: string | undefined;
 
   function updateAppForeground(): void {
     appForeground.value = document.visibilityState === 'visible' && document.hasFocus();
@@ -44,11 +49,22 @@ export function useMonitorPolling(options: MonitorPollingOptions): void {
       () => options.enabled(),
     ] as const,
     ([sessionId, state, enabled], _previous, onCleanup) => {
-      monitor.clear();
-      processes.clear();
-      onCleanup(() => {
+      const sessionChanged = initialized && (previousSessionId !== sessionId || previousSessionState !== state);
+      initialized = true;
+      previousSessionId = sessionId;
+      previousSessionState = state;
+      const shouldPreserve = options.preserveDataOnPause === true && Boolean(sessionId) && state === 'connected';
+      if (!shouldPreserve || sessionChanged) {
         monitor.clear();
-        processes.clear();
+        if (options.withProcesses() || sessionChanged) {
+          processes.clear();
+        }
+      }
+      onCleanup(() => {
+        if (!options.preserveDataOnPause) {
+          monitor.clear();
+          processes.clear();
+        }
       });
       if (sessionId && state === 'connected' && enabled && appForeground.value) {
         void monitor.collect(sessionId);

@@ -9,17 +9,25 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use crate::remote_ops::{
+    DOCKER_LOGS_OUTPUT_BYTES, DOCKER_PROBE_OUTPUT_BYTES, DOCKER_SNAPSHOT_PROBE,
+    OPS_PROBE_OUTPUT_BYTES, docker_action_command, docker_action_error, docker_logs_command,
+    docker_probe_error, ops_probe_command, parse_docker_logs, parse_docker_snapshot,
+    parse_ops_snapshot, posix_signal_flag,
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use encoding_rs::Encoding;
 use filex_contracts::{
     AppError, AuthenticationMethod, ConflictPolicy, ConnectionProfile, CreateLocalTunnelInput,
     DirectorySyncChangeKind, DirectorySyncEntryKind, DirectorySyncPreview,
-    DirectorySyncPreviewEntry, FileChecksumComparison, HostKeyChallenge, HostTrustEvaluation,
-    MonitorState, NetworkEndpoint, NetworkInterface, NetworkPlatform, NetworkSnapshot,
-    ProcessEntry, ProcessPlatform, ProcessSnapshot, RemoteDirectoryListing, RemoteFileEntry,
-    RemotePermissionScope, RemotePermissionUpdateResult, RemoteState, RemoteTextPreview,
-    RemoteTextSaveResult, RouteEntry, SessionConnectionProgress, SessionState, SessionSummary,
-    SystemMonitorSnapshot, TransferDirection, TransferTask, TunnelKind, TunnelState, TunnelSummary,
+    DirectorySyncPreviewEntry, DockerAvailability, DockerContainerAction, DockerLogsSnapshot,
+    DockerSnapshot, FileChecksumComparison, HostKeyChallenge, HostTrustEvaluation, MonitorState,
+    NetworkEndpoint, NetworkInterface, NetworkPlatform, NetworkSnapshot, OpsCategory, OpsSnapshot,
+    ProcessEntry, ProcessPlatform, ProcessSignal, ProcessSnapshot, RemoteDirectoryListing,
+    RemoteFileEntry, RemotePermissionScope, RemotePermissionUpdateResult, RemoteState,
+    RemoteTextPreview, RemoteTextSaveResult, RouteEntry, SessionConnectionProgress, SessionState,
+    SessionSummary, SystemMonitorSnapshot, TransferDirection, TransferTask, TunnelKind,
+    TunnelState, TunnelSummary,
 };
 use filex_core::{HostTrustService, SessionMachine, parse_monitor_probe};
 use filex_ssh::{
@@ -3147,6 +3155,104 @@ impl SessionRuntime {
         parse_linux_network_output(&text, now_ms()?)
     }
 
+    pub async fn collect_docker_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<DockerSnapshot, AppError> {
+        let session = self.session_handle(session_id).await?;
+        let output = session
+            .execute_bounded(
+                DOCKER_SNAPSHOT_PROBE,
+                DOCKER_PROBE_OUTPUT_BYTES,
+                Duration::from_secs(12),
+            )
+            .await
+            .map_err(|error| ssh_error(&error))?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        if !text.lines().any(|line| line.starts_with("DOCKER="))
+            && output.exit_status.is_some_and(|status| status != 0)
+        {
+            return Ok(DockerSnapshot {
+                availability: DockerAvailability::Unsupported,
+                collected_at_ms: now_ms()?,
+                server_version: None,
+                containers: Vec::new(),
+                images: Vec::new(),
+                truncated: false,
+                detail_note: None,
+            });
+        }
+        parse_docker_snapshot(&text, now_ms()?)
+    }
+
+    pub async fn collect_docker_logs(
+        &self,
+        session_id: &str,
+        container_id: &str,
+        tail_lines: Option<u32>,
+    ) -> Result<DockerLogsSnapshot, AppError> {
+        let command = docker_logs_command(container_id, tail_lines)?;
+        let session = self.session_handle(session_id).await?;
+        let output = session
+            .execute_bounded(&command, DOCKER_LOGS_OUTPUT_BYTES, Duration::from_secs(10))
+            .await
+            .map_err(|error| ssh_error(&error))?;
+        if output.exit_status.is_some_and(|status| status != 0) {
+            return Err(docker_probe_error());
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        Ok(parse_docker_logs(container_id.trim().to_owned(), &text))
+    }
+
+    pub async fn run_docker_container_action(
+        &self,
+        session_id: &str,
+        container_id: &str,
+        action: DockerContainerAction,
+    ) -> Result<(), AppError> {
+        let command = docker_action_command(container_id, action)?;
+        let session = self.session_handle(session_id).await?;
+        let output = session
+            .execute_bounded(&command, 16 * 1024, Duration::from_secs(20))
+            .await
+            .map_err(|error| ssh_error(&error))?;
+        if output.exit_status.is_some_and(|status| status != 0) {
+            return Err(docker_action_error());
+        }
+        Ok(())
+    }
+
+    pub async fn collect_ops_snapshot(
+        &self,
+        session_id: &str,
+        category: OpsCategory,
+    ) -> Result<OpsSnapshot, AppError> {
+        let session = self.session_handle(session_id).await?;
+        let output = session
+            .execute_bounded(
+                ops_probe_command(category),
+                OPS_PROBE_OUTPUT_BYTES,
+                Duration::from_secs(10),
+            )
+            .await
+            .map_err(|error| ssh_error(&error))?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        if !text.lines().any(|line| line.trim() == "OPS_PLATFORM=POSIX")
+            && output.exit_status.is_some_and(|status| status != 0)
+        {
+            return Ok(OpsSnapshot {
+                state: MonitorState::Unsupported,
+                collected_at_ms: now_ms()?,
+                category,
+                hostname: None,
+                kernel: None,
+                os_release: None,
+                sections: Vec::new(),
+            });
+        }
+        parse_ops_snapshot(category, &text, now_ms()?)
+    }
+
     pub async fn compare_file_checksums(
         &self,
         operation_id: &str,
@@ -3565,6 +3671,7 @@ impl SessionRuntime {
         session_id: &str,
         snapshot_id: &str,
         pid: u32,
+        signal: ProcessSignal,
     ) -> Result<(), AppError> {
         if pid <= 1 {
             return Err(process_target_invalid_error());
@@ -3601,13 +3708,15 @@ impl SessionRuntime {
                 && !start_marker_hex.is_empty()
                 && !name_marker_hex.is_empty() =>
             {
-                posix_terminate_command(pid, start_marker_hex, name_marker_hex)
+                posix_terminate_command(pid, start_marker_hex, name_marker_hex, signal)
             }
             (ProcessPlatform::Windows, ProcessIdentity::Windows { start_time_ticks })
-                if *start_time_ticks > 0 =>
+                if *start_time_ticks > 0
+                    && matches!(signal, ProcessSignal::Sigterm | ProcessSignal::Sigkill) =>
             {
                 windows_terminate_command(pid, *start_time_ticks)
             }
+            (ProcessPlatform::Windows, _) => return Err(process_target_invalid_error()),
             _ => return Err(process_snapshot_stale_error()),
         };
         self.invalidate_process_snapshot(session_id)?;
@@ -5467,7 +5576,13 @@ fn powershell_script_command(script: &str) -> String {
     )
 }
 
-fn posix_terminate_command(pid: u32, start_marker_hex: &str, name_marker_hex: &str) -> String {
+fn posix_terminate_command(
+    pid: u32,
+    start_marker_hex: &str,
+    name_marker_hex: &str,
+    signal: ProcessSignal,
+) -> String {
+    let signal_flag = posix_signal_flag(signal);
     format!(
         r#"LC_ALL=C; export LC_ALL
 current_start_hex=$(ps -p {pid} -o lstart= 2>/dev/null | tr -d '\012\015' | od -An -tx1 | tr -d ' \012')
@@ -5476,7 +5591,7 @@ current_name=${{current_name##*/}}
 current_name_hex=$(printf '%s' "$current_name" | cut -c 1-128 | od -An -tx1 | tr -d ' \012')
 if [ -z "$current_start_hex" ] || [ -z "$current_name_hex" ]; then printf 'PROCESS_TARGET_MISSING\n'; exit 44; fi
 if [ "$current_start_hex" != "{start_marker_hex}" ] || [ "$current_name_hex" != "{name_marker_hex}" ]; then printf 'PROCESS_IDENTITY_CHANGED\n'; exit 44; fi
-kill -TERM {pid} 2>/dev/null || exit 45
+kill -{signal_flag} {pid} 2>/dev/null || exit 45
 printf 'PROCESS_SIGNAL_SENT\n'"#
     )
 }

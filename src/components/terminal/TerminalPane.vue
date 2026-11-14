@@ -3,11 +3,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
-import { ArrowDown, ArrowUp, Bot, Circle, ClipboardPaste, Copy, Search, Trash2, X } from 'lucide-vue-next';
+import { ArrowDown, ArrowUp, Bot, CheckSquare, ClipboardPaste, Copy, Search, Trash2, X } from 'lucide-vue-next';
 import '@xterm/xterm/css/xterm.css';
-import { resolveTerminalPalette } from '@/domain/terminalThemes';
+import { resolveTerminalPalette, resolveTerminalThemeAppearance } from '@/domain/terminalThemes';
 import { clampTerminalMenuPosition, resolveTerminalFontFamily } from '@/domain/terminalInteractions';
 import { resolveCdCommand } from '@/domain/terminalCwd';
+import TerminalQuickOpsBar from '@/components/terminal/TerminalQuickOpsBar.vue';
 import { useSessionsStore } from '@/stores/sessions';
 import { useSettingsStore } from '@/stores/settings';
 import { useUiStore } from '@/stores/ui';
@@ -43,8 +44,19 @@ const searchQuery = ref('');
 const matchCount = ref(0);
 const currentMatch = ref<number | null>(null);
 const selectionAvailable = ref(false);
+const selectedChars = ref(0);
 const columns = ref(120);
 const rows = ref(32);
+const activeFontFamily = ref(settings.value.terminalFontFamily);
+const clickedCell = ref<{
+  col: number;
+  row: number;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+} | null>(null);
+const reticleVisible = ref(false);
 const contextMenu = ref<{
   x: number;
   y: number;
@@ -54,6 +66,13 @@ const contextMenu = ref<{
 const systemColorScheme = ref<'dark' | 'light'>(
   window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark',
 );
+const terminalAppearance = computed(() => resolveTerminalThemeAppearance(
+  settings.value.terminalTheme,
+  settings.value.theme,
+  systemColorScheme.value,
+));
+const minimumContrastRatio = computed(() => (terminalAppearance.value === 'light' ? 4.5 : 1));
+const connected = computed(() => session.value?.state === 'connected');
 const terminalPalette = computed(() => {
   return resolveTerminalPalette(
     settings.value.terminalTheme,
@@ -86,6 +105,7 @@ let disposeSearchResults: (() => void) | null = null;
 let disposeOscCwd: { dispose(): void } | null = null;
 let disposeResizeListener: (() => void) | null = null;
 let systemThemeMedia: MediaQueryList | null = null;
+let reticleTimer: number | null = null;
 let outputOffset = 0;
 let outputDecoder = new TextDecoder(settings.value.terminalEncoding);
 let lastResizeSignature: string | null = null;
@@ -264,16 +284,80 @@ function searchSelection(): void {
   void nextTick(() => refreshMatch(searchQuery.value, 'next', true));
 }
 
-function clearTerminalDisplay(): void {
-  terminal?.clear();
-  terminal?.clearSelection();
-  selectionAvailable.value = false;
+async function pasteFromClipboard(): Promise<void> {
+  closeContextMenu();
+  if (!terminal) return;
+  let text = '';
+  try {
+    if (!navigator.clipboard?.readText) throw new Error('Clipboard read unavailable');
+    text = await navigator.clipboard.readText();
+  } catch {
+    ui.notify(t('terminal.pasteUnavailable'));
+    terminal.focus();
+    return;
+  }
+  if (!text) {
+    ui.notify(t('terminal.pasteUnavailable'));
+    terminal.focus();
+    return;
+  }
+  if (await confirmTerminalInput(text)) {
+    terminal.paste(text);
+  }
+  terminal.focus();
+}
+
+function selectAllTerminal(): void {
+  terminal?.selectAll();
+  const selection = terminal?.getSelection() ?? '';
+  selectionAvailable.value = Boolean(selection.trim());
+  selectedChars.value = selection.length;
   closeContextMenu();
   terminal?.focus();
 }
 
+function clearTerminalDisplay(): void {
+  terminal?.clear();
+  terminal?.clearSelection();
+  selectionAvailable.value = false;
+  selectedChars.value = 0;
+  closeContextMenu();
+  terminal?.focus();
+}
+
+function updateClickedCellFromEvent(event: MouseEvent | PointerEvent): void {
+  const surface = terminalSurface.value;
+  const screen = terminalHost.value?.querySelector<HTMLElement>('.xterm-screen');
+  if (!surface || !screen || columns.value <= 0 || rows.value <= 0) return;
+  const surfaceRect = surface.getBoundingClientRect();
+  const screenRect = screen.getBoundingClientRect();
+  if (screenRect.width <= 0 || screenRect.height <= 0) return;
+  const cellWidth = screenRect.width / columns.value;
+  const cellHeight = screenRect.height / rows.value;
+  const relX = event.clientX - screenRect.left;
+  const relY = event.clientY - screenRect.top;
+  if (relX < 0 || relY < 0 || relX > screenRect.width || relY > screenRect.height) return;
+  const colIndex = Math.max(0, Math.min(columns.value - 1, Math.floor(relX / cellWidth)));
+  const rowIndex = Math.max(0, Math.min(rows.value - 1, Math.floor(relY / cellHeight)));
+  clickedCell.value = {
+    col: colIndex + 1,
+    row: rowIndex + 1,
+    left: screenRect.left - surfaceRect.left + colIndex * cellWidth,
+    top: screenRect.top - surfaceRect.top + rowIndex * cellHeight,
+    width: Math.max(4, cellWidth),
+    height: Math.max(10, cellHeight),
+  };
+  reticleVisible.value = true;
+  if (reticleTimer !== null) window.clearTimeout(reticleTimer);
+  reticleTimer = window.setTimeout(() => {
+    reticleVisible.value = false;
+    reticleTimer = null;
+  }, 1600);
+}
+
 function handleTerminalPointerUp(event: PointerEvent): void {
   if (event.button !== 0) return;
+  updateClickedCellFromEvent(event);
   window.setTimeout(() => openContextMenuAt(event, false), 0);
 }
 
@@ -420,6 +504,7 @@ function applyTerminalFont(notifyFallback = false): void {
     settings.value.terminalFontFamily,
     settings.value.terminalFontSize,
   );
+  activeFontFamily.value = resolution.fontFamily;
   terminal.options.fontFamily = resolution.fontFamily;
   terminal.options.fontSize = settings.value.terminalFontSize;
   if (resolution.fellBack && notifyFallback && !fontFallbackNotified) {
@@ -444,11 +529,14 @@ onMounted(async () => {
     settings.value.terminalFontFamily,
     settings.value.terminalFontSize,
   );
+  activeFontFamily.value = initialFont.fontFamily;
   terminal = new XTerm({
     allowProposedApi: true,
     cursorBlink: true,
     cursorStyle: 'block',
+    cursorWidth: 2,
     cursorInactiveStyle: 'outline',
+    minimumContrastRatio: minimumContrastRatio.value,
     screenReaderMode: true,
     convertEol: false,
     fontFamily: initialFont.fontFamily,
@@ -467,7 +555,9 @@ onMounted(async () => {
   });
   disposeResizeListener = () => resizeListener.dispose();
   const selectionListener = terminal.onSelectionChange(() => {
-    selectionAvailable.value = Boolean(terminal?.getSelection().trim());
+    const selection = terminal?.getSelection() ?? '';
+    selectionAvailable.value = Boolean(selection.trim());
+    selectedChars.value = selection.length;
   });
   disposeSelectionListener = () => selectionListener.dispose();
   const searchResultsListener = searchAddon.onDidChangeResults((result) => {
@@ -554,8 +644,10 @@ watch(
   () => replaySession(),
 );
 
-watch(terminalPalette, (palette) => {
-  if (terminal) terminal.options.theme = palette;
+watch([terminalPalette, minimumContrastRatio], ([palette, ratio]) => {
+  if (!terminal) return;
+  terminal.options.theme = palette;
+  terminal.options.minimumContrastRatio = ratio;
 });
 
 watch(
@@ -612,6 +704,7 @@ watch(
 onBeforeUnmount(() => {
   if (resizeTimer !== null) window.clearTimeout(resizeTimer);
   if (searchRefreshTimer !== null) window.clearTimeout(searchRefreshTimer);
+  if (reticleTimer !== null) window.clearTimeout(reticleTimer);
   systemThemeMedia?.removeEventListener('change', handleSystemThemeChange);
   resizeObserver?.disconnect();
   if (pasteHandler) terminal?.element?.removeEventListener('paste', pasteHandler, true);
@@ -718,8 +811,33 @@ defineExpose({ focusTerminal });
       </button>
     </div>
 
-    <div ref="terminalSurface" class="terminal-surface-shell" :style="{ backgroundColor: terminalPalette.background }" @pointerdown="activateTerminal">
+    <div
+      ref="terminalSurface"
+      class="terminal-surface-shell"
+      :style="{
+        backgroundColor: terminalPalette.background,
+        '--xterm-font': activeFontFamily,
+        '--xterm-size': `${settings.terminalFontSize}px`,
+        '--xterm-fg': terminalPalette.foreground,
+        '--xterm-bg': terminalPalette.background,
+        '--xterm-cursor': terminalPalette.cursor,
+        '--xterm-cursor-accent': terminalPalette.cursorAccent,
+        '--xterm-selection': terminalPalette.selectionBackground,
+      }"
+      @pointerdown="activateTerminal"
+    >
       <div ref="terminalHost" class="terminal-pane-surface xterm-surface" />
+      <div
+        v-if="reticleVisible && clickedCell"
+        class="terminal-click-reticle"
+        aria-hidden="true"
+        :style="{
+          left: `${clickedCell.left}px`,
+          top: `${clickedCell.top}px`,
+          width: `${clickedCell.width}px`,
+          height: `${clickedCell.height}px`,
+        }"
+      />
       <div
         v-if="contextMenu"
         ref="terminalMenu"
@@ -736,8 +854,14 @@ defineExpose({ focusTerminal });
         <button v-if="contextMenu.selection" type="button" role="menuitem" @click="copyAndInputSelection">
           <ClipboardPaste :size="13" />{{ t('terminal.copyAndInput') }}
         </button>
+        <button v-if="contextMenu.includeClear" type="button" role="menuitem" @click="pasteFromClipboard">
+          <ClipboardPaste :size="13" />{{ t('terminal.pasteFromClipboard') }}
+        </button>
         <button v-if="contextMenu.selection" type="button" role="menuitem" @click="searchSelection">
           <Search :size="13" />{{ t('terminal.searchSelection') }}
+        </button>
+        <button v-if="contextMenu.includeClear" type="button" role="menuitem" @click="selectAllTerminal">
+          <CheckSquare :size="13" />{{ t('terminal.selectAll') }}
         </button>
         <button v-if="contextMenu.includeClear" type="button" role="menuitem" class="terminal-clear-action" @click="clearTerminalDisplay">
           <Trash2 :size="13" />{{ t('terminal.clearDisplay') }}
@@ -745,15 +869,17 @@ defineExpose({ focusTerminal });
       </div>
     </div>
 
-    <footer class="terminal-pane-status">
-      <span class="terminal-input-status" :class="{ active: focused }" aria-live="polite">
-        <Circle :size="7" :fill="focused ? 'currentColor' : 'none'" />{{ t(focused ? 'terminal.inputActive' : 'terminal.inputInactive') }}
-      </span>
-      <span><Circle :size="8" fill="currentColor" />{{ profile?.environment ?? 'local' }}</span>
-      <span>{{ session?.state ?? t('terminal.noSession') }}</span>
-      <span>{{ terminalEncodingLabel }}</span>
-      <span>{{ columns }} × {{ rows }}</span>
-    </footer>
+    <TerminalQuickOpsBar
+      :focused="focused"
+      :connected="connected"
+      :environment="profile?.environment ?? 'local'"
+      :session-state-label="session?.state ?? t('terminal.noSession')"
+      :encoding-label="terminalEncodingLabel"
+      :columns="columns"
+      :rows="rows"
+      :cursor-cell="clickedCell ? { col: clickedCell.col, row: clickedCell.row } : null"
+      :selected-chars="selectedChars"
+    />
   </section>
 </template>
 
@@ -923,15 +1049,63 @@ defineExpose({ focusTerminal });
 
 .terminal-pane-surface :deep(.xterm) {
   height: 100%;
+  cursor: text;
+}
+
+.terminal-pane-surface :deep(.xterm-rows) {
+  color: var(--xterm-fg, inherit);
+  font-family: var(--xterm-font, var(--font-mono)) !important;
+  font-size: var(--xterm-size, 13px) !important;
+  font-kerning: none !important;
+  font-variant-ligatures: none !important;
+  white-space: pre !important;
+}
+
+.terminal-pane-surface :deep(.xterm-rows > div) {
+  white-space: pre !important;
+}
+
+.terminal-pane-surface :deep(.xterm-rows span) {
+  display: inline-block;
+  height: 100%;
+  vertical-align: top;
+  white-space: pre !important;
+}
+
+.terminal-pane-surface :deep(.xterm-cursor.xterm-cursor-block) {
+  background-color: var(--xterm-cursor, #165dff);
+  color: var(--xterm-cursor-accent, #ffffff);
+}
+
+.terminal-pane-surface :deep(.xterm-cursor.xterm-cursor-outline) {
+  outline: 1.5px solid var(--xterm-cursor, #165dff);
+  outline-offset: -1.5px;
+}
+
+.terminal-pane-surface :deep(.xterm-selection div) {
+  position: absolute;
+  pointer-events: none;
+  background-color: var(--xterm-selection, rgb(22 93 255 / 0.28));
+  border-radius: 1px;
 }
 
 .terminal-pane-surface :deep(.xterm-viewport) {
   scrollbar-color: hsl(var(--muted-foreground) / 0.35) transparent;
 }
 
+.terminal-click-reticle {
+  position: absolute;
+  z-index: 4;
+  border: 1.5px solid hsl(var(--primary));
+  background: hsl(var(--primary) / 0.14);
+  border-radius: 2px;
+  pointer-events: none;
+  box-shadow: 0 0 0 2px hsl(var(--primary) / 0.16);
+}
+
 .terminal-context-menu {
   position: absolute;
-  z-index: 8;
+  z-index: 20;
   display: flex;
   width: 204px;
   flex-direction: column;
@@ -971,12 +1145,5 @@ defineExpose({ focusTerminal });
   border-top: 1px solid hsl(var(--border));
   border-radius: 0 0 3px 3px;
   color: hsl(var(--destructive));
-}
-
-.terminal-pane-status {
-  justify-content: flex-start;
-  gap: 12px;
-  border-top: 1px solid hsl(var(--border));
-  font-size: 0.6667rem;
 }
 </style>

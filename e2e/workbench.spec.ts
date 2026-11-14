@@ -105,10 +105,15 @@ test('suppresses the WebView native context menu', async ({ page }) => {
 
 test('exposes the local terminal context menu', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(page.locator('.command-input-bar')).toHaveCount(0);
+  await expect(page.locator('.host-panel')).toHaveCount(0);
+  await expect(page.locator('.terminal-quick-ops')).toBeVisible();
   await page.locator('.terminal-pane-surface').click({ button: 'right', position: { x: 80, y: 70 } });
   const menu = page.getByRole('menu', { name: '终端窗格' });
   await expect(menu).toBeVisible();
-  await expect(menu.getByRole('menuitem', { name: '清空终端显示' })).toBeFocused();
+  await expect(menu.getByRole('menuitem', { name: '粘贴' })).toBeFocused();
+  await expect(menu.getByRole('menuitem', { name: '全选' })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: '清空终端显示' })).toBeVisible();
   await page.screenshot({ path: 'test-results/terminal-context-menu-1440.png' });
   await menu.getByRole('menuitem', { name: '清空终端显示' }).click();
   await expect(menu).toHaveCount(0);
@@ -691,8 +696,9 @@ test('inspects complete session-scoped process, network, interface and route vie
     sessions.activeSessionId = 'session-alpha';
   });
 
-  const hostPanel = page.locator('.host-panel');
-  await expect(hostPanel).toBeVisible();
+  await expect(page.locator('.host-panel')).toHaveCount(0);
+  const quickOps = page.locator('.terminal-quick-ops');
+  await expect(quickOps).toBeVisible();
   await page.evaluate(() => {
     const root = document.querySelector('#app') as HTMLElement & {
       __vue_app__?: {
@@ -747,7 +753,7 @@ test('inspects complete session-scoped process, network, interface and route vie
     };
   });
 
-  await hostPanel.getByRole('button', { name: '网络', exact: true }).click();
+  await quickOps.getByRole('button', { name: '网络', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: '主机监控详情' });
   await expect(dialog).toBeVisible();
   await page.evaluate(() => {
@@ -1047,4 +1053,259 @@ test('surfaces an automatic signed update and preserves a skipped version', asyn
   await expect(dialog).toHaveCount(0);
   await expect(updateButton).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => localStorage.getItem('filex.update-preferences.v1'))).toContain('"skippedVersion":"0.1.1"');
+});
+
+test('opens process context menu with signal actions and inspects Docker and DevOps modals', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => Boolean(
+    (document.querySelector('#app') as HTMLElement & { __vue_app__?: unknown }).__vue_app__,
+  ));
+
+  await page.evaluate(() => {
+    const root = document.querySelector('#app') as HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const pinia = root.__vue_app__?.config.globalProperties.$pinia;
+    const settings = pinia?._s.get('settings') as ({ value?: Record<string, unknown>; apply?: () => void } | undefined);
+    const connections = pinia?._s.get('connections') as ({ profiles?: Array<Record<string, unknown>> } | undefined);
+    const sessions = pinia?._s.get('sessions') as ({
+      summaries?: Array<Record<string, unknown>>;
+      activeSessionId?: string | null;
+    } | undefined);
+    const monitor = pinia?._s.get('monitor');
+    const processes = pinia?._s.get('processes');
+    const docker = pinia?._s.get('docker');
+    const ops = pinia?._s.get('ops');
+    if (!settings || !connections || !sessions || !monitor || !processes || !docker || !ops) {
+      throw new Error('Pinia stores were not initialized');
+    }
+
+    Object.assign(settings.value ?? {}, { theme: 'dark', locale: 'zh-CN', uiFontSize: 14 });
+    settings.apply?.call(settings);
+
+    const profile = {
+      id: 'profile-prod',
+      name: 'prod-docker',
+      host: '10.0.0.18',
+      port: 22,
+      username: 'ops',
+      authMethod: 'agent',
+      keyPath: null,
+      proxy: null,
+      jumpHost: null,
+      environment: 'production',
+      colorTag: 'blue',
+      tags: ['docker'],
+      defaultRemotePath: '/srv/app',
+    };
+    connections.profiles = [profile];
+    sessions.summaries = [{
+      id: 'session-ops',
+      profileId: 'profile-prod',
+      title: 'prod-docker',
+      host: '10.0.0.18',
+      port: 22,
+      username: 'ops',
+      state: 'connected',
+      remoteCwd: '/srv/app',
+      fingerprint: 'SHA256:mock',
+      lastError: null,
+    }];
+    sessions.activeSessionId = 'session-ops';
+
+    monitor.collect = () => Promise.resolve();
+    monitor.snapshot = {
+      state: 'live',
+      collectedAtMs: Date.now(),
+      hostname: 'prod-docker-01',
+      osName: 'Ubuntu 24.04 LTS',
+      uptimeSeconds: 185_400,
+      loadOne: 0.42,
+      loadFive: 0.39,
+      loadFifteen: 0.35,
+      cpuPercent: 34,
+      memoryTotalKib: 8_388_608,
+      memoryAvailableKib: 5_242_880,
+      swapTotalKib: 2_097_152,
+      swapUsedKib: 131_072,
+      mounts: [{ path: '/', totalKib: 104_857_600, availableKib: 62_914_560 }],
+      networkReceiveBytesPerSecond: 12_400,
+      networkTransmitBytesPerSecond: 4_800,
+    };
+    monitor.history = [
+      { atMs: Date.now() - 2000, receive: 8000, transmit: 3200 },
+      { atMs: Date.now(), receive: 12400, transmit: 4800 },
+    ];
+
+    processes.collect = () => Promise.resolve();
+    processes.snapshot = {
+      state: 'live',
+      platform: 'posix',
+      collectedAtMs: Date.now(),
+      snapshotId: 'snap-ops-1',
+      processes: [
+        {
+          pid: 1248,
+          name: 'node-worker',
+          user: 'ops',
+          cpuPercent: 18.4,
+          cpuTimeSeconds: 92.1,
+          memoryBytes: 268_435_456,
+          state: 'S',
+          startedAtMs: Date.now() - 600_000,
+          canTerminate: true,
+        },
+        {
+          pid: 1,
+          name: 'systemd',
+          user: 'root',
+          cpuPercent: 0.1,
+          cpuTimeSeconds: 14.0,
+          memoryBytes: 12_582_912,
+          state: 'S',
+          startedAtMs: Date.now() - 185_400_000,
+          canTerminate: false,
+        },
+      ],
+      truncated: false,
+    };
+
+    docker.collect = () => Promise.resolve();
+    docker.fetchLogs = () => Promise.resolve();
+    docker.performAction = () => Promise.resolve(true);
+    docker.snapshot = {
+      availability: 'available',
+      collectedAtMs: Date.now(),
+      serverVersion: '26.1.4',
+      containers: [
+        {
+          id: 'a1b2c3d4e5f6',
+          name: 'filex-gateway',
+          image: 'nginx:1.27-alpine',
+          state: 'running',
+          status: 'Up 3 days (healthy)',
+          ports: '0.0.0.0:443->443/tcp',
+          createdAt: '2026-11-11 08:00:00',
+          cpuPercent: '0.84%',
+          memoryUsage: '38.2MiB / 2GiB',
+          pids: '6',
+        },
+        {
+          id: 'f6e5d4c3b2a1',
+          name: 'worker-batch',
+          image: 'redis:7.4',
+          state: 'exited',
+          status: 'Exited (0) 2 hours ago',
+          ports: '',
+          createdAt: '2026-11-12 09:30:00',
+          cpuPercent: null,
+          memoryUsage: null,
+          pids: null,
+        },
+      ],
+      images: [
+        {
+          id: 'sha256:9f8e7d6c',
+          repository: 'nginx',
+          tag: '1.27-alpine',
+          size: '42.6MB',
+          createdSince: '2 weeks ago',
+        },
+      ],
+      truncated: false,
+      detailNote: null,
+    };
+    docker.logs = {
+      containerId: 'a1b2c3d4e5f6',
+      lines: ['2026/11/14 11:30:00 [notice] nginx ready on :443'],
+      truncated: false,
+    };
+
+    ops.collect = () => Promise.resolve();
+    ops.snapshots = {
+      ports: {
+        state: 'live',
+        collectedAtMs: Date.now(),
+        category: 'ports',
+        hostname: 'prod-docker-01',
+        kernel: '6.8.0-45-generic',
+        osRelease: 'Ubuntu 24.04 LTS',
+        sections: [
+          {
+            id: 'listening',
+            titleKey: 'opsDialog.sectionListeningPorts',
+            commandLabel: 'ss -tulpen',
+            lines: ['tcp LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=901,fd=6))'],
+            truncated: false,
+          },
+        ],
+      },
+    };
+  });
+
+  const quickOps = page.locator('.terminal-quick-ops');
+  await expect(quickOps).toBeVisible();
+
+  await quickOps.getByRole('button', { name: '进程', exact: true }).click();
+  const monitorDialog = page.getByRole('dialog', { name: '主机监控详情' });
+  await expect(monitorDialog).toBeVisible();
+
+  const processRow = monitorDialog.locator('tbody tr', { hasText: 'node-worker' });
+  await processRow.click({ button: 'right' });
+  const processMenu = page.getByRole('menu', { name: '进程操作菜单' });
+  await expect(processMenu).toBeVisible();
+  await expect(processMenu.getByRole('menuitem', { name: '强制结束 (SIGKILL)' })).toBeVisible();
+  await expect(processMenu.getByRole('menuitem', { name: '结束进程 (SIGTERM)' })).toBeVisible();
+  await expect(processMenu.getByRole('menuitem', { name: '重载配置 (SIGHUP)' })).toBeVisible();
+  await processMenu.getByRole('menuitem', { name: '强制结束 (SIGKILL)' }).click();
+
+  const confirmDialog = page.getByRole('alertdialog');
+  await expect(confirmDialog).toBeVisible();
+  await expect(confirmDialog).toContainText('10.0.0.18:22');
+  await expect(confirmDialog).toContainText('SIGKILL');
+  await confirmDialog.getByRole('button', { name: '取消' }).last().click();
+  await monitorDialog.getByRole('button', { name: '关闭监控详情' }).click();
+
+  await quickOps.getByRole('button', { name: 'Docker', exact: true }).click();
+  const dockerDialog = page.getByRole('dialog', { name: 'Docker 管理' });
+  await expect(dockerDialog).toBeVisible();
+  await expect(dockerDialog.getByText('filex-gateway')).toBeVisible();
+  await expect(dockerDialog.getByText('Engine 26.1.4')).toBeVisible();
+  await page.screenshot({ path: 'test-results/docker-modal-dark-1440.png' });
+
+  await dockerDialog.locator('tbody tr', { hasText: 'filex-gateway' }).getByRole('button', { name: '日志', exact: true }).click();
+  await expect(dockerDialog.getByText('nginx ready on :443')).toBeVisible();
+  await dockerDialog.getByRole('button', { name: '关闭 Docker 窗口' }).click();
+
+  await page.setViewportSize({ width: 960, height: 640 });
+  await page.evaluate(() => {
+    const root = document.querySelector('#app') as HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const settings = root.__vue_app__?.config.globalProperties.$pinia?._s.get('settings') as ({
+      value?: Record<string, unknown>;
+      apply?: () => void;
+    } | undefined);
+    if (settings) {
+      Object.assign(settings.value ?? {}, { theme: 'light', locale: 'zh-CN', uiFontSize: 20 });
+      settings.apply?.call(settings);
+    }
+  });
+
+  await quickOps.getByRole('button', { name: '监听端口', exact: true }).click();
+  const opsDialog = page.getByRole('dialog', { name: '开发运维命令面板' });
+  await expect(opsDialog).toBeVisible();
+  await expect(opsDialog.getByText('ss -tulpen')).toBeVisible();
+  const opsBox = await opsDialog.boundingBox();
+  expect(opsBox).not.toBeNull();
+  expect(opsBox!.x).toBeGreaterThanOrEqual(0);
+  expect(opsBox!.x + opsBox!.width).toBeLessThanOrEqual(960);
+  expect(opsBox!.y + opsBox!.height).toBeLessThanOrEqual(640);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: 'test-results/ops-modal-light-960-font20.png' });
+  await opsDialog.getByRole('button', { name: '关闭运维面板' }).click();
 });

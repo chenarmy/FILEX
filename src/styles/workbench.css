@@ -6076,3 +6076,522 @@
   gap: 6px;
   padding-inline-start: 22px;
 }
+
+/* --- terminal footer status & quick-ops bar ------------------------------- */
+
+.terminal-pane-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  min-height: 38px;
+  padding: 6px 12px;
+  background: hsl(var(--card));
+  border-top: 1px solid hsl(var(--border-subtle));
+  color: hsl(var(--text-secondary));
+  font-size: 0.7857rem;
+  line-height: 1.35;
+}
+
+.terminal-status-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.terminal-pane-status .terminal-input-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: hsl(var(--secondary));
+  color: hsl(var(--text-secondary));
+  font-weight: 500;
+}
+
+.terminal-pane-status .terminal-input-status.active {
+  background: hsl(var(--primary) / 0.14);
+  color: hsl(var(--primary));
+}
+
+.terminal-meta-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: var(--radius-control);
+  background: hsl(var(--surface-inset));
+  border: 1px solid hsl(var(--border-subtle));
+  color: hsl(var(--text-secondary));
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.terminal-selection-chip {
+  color: hsl(var(--primary));
+  border-color: hsl(var(--primary) / 0.35);
+  background: hsl(var(--primary) / 0.08);
+}
+
+.terminal-quick-ops {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.quick-op-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-control);
+  background: hsl(var(--secondary));
+  color: hsl(var(--foreground));
+  font-size: 0.7857rem;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--duration-micro) var(--ease-arco),
+    border-color var(--duration-micro) var(--ease-arco),
+    color var(--duration-micro) var(--ease-arco);
+}
+
+.quick-op-button:hover:not(:disabled) {
+  border-color: hsl(var(--primary) / 0.55);
+  background: hsl(var(--primary) / 0.1);
+  color: hsl(var(--primary));
+}
+
+.quick-op-button.active {
+  border-color: hsl(var(--primary));
+  background: hsl(var(--primary) / 0.16);
+  color: hsl(var(--primary));
+}
+
+.quick-op-button.quick-op-docker {
+  border-color: hsl(var(--primary) / 0.42);
+  background: hsl(var(--primary) / 0.12);
+  color: hsl(var(--primary));
+}
+
+.quick-op-button.quick-op-docker:hover:not(:disabled) {
+  border-color: hsl(var(--primary));
+  background: hsl(var(--primary) / 0.2);
+}
+
+.quick-op-button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.quick-op-divider {
+  width: 1px;
+  height: 16px;
+  margin-inline: 2px;
+  background: hsl(var(--border));
+}
+
+/* --- monitor details overview & process context menu --------------------- */
+
+.monitor-overview-shell {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  overflow: auto;
+  min-height: 0;
+  padding: 12px;
+}
+
+.monitor-overview-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.monitor-overview-card {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  padding: 12px;
+  background: hsl(var(--surface-inset));
+  border: 1px solid hsl(var(--border-subtle));
+  border-radius: var(--radius-panel);
+}
+
+.monitor-overview-card h3 {
+  margin: 0;
+  color: hsl(var(--foreground));
+  font-size: 0.8571rem;
+  font-weight: 600;
+}
+
+.monitor-overview-card dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.monitor-overview-card dl > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.monitor-overview-card dt {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.7857rem;
+}
+
+.monitor-overview-card dd {
+  margin: 0;
+  color: hsl(var(--foreground));
+  font-size: 0.8125rem;
+}
+
+.host-meter {
+  display: grid;
+  gap: 4px;
+}
+
+.host-meter-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.7857rem;
+  color: hsl(var(--text-secondary));
+}
+
+.host-meter-track {
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: hsl(var(--border));
+}
+
+.host-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: hsl(var(--primary));
+  transition: width 160ms var(--ease-arco);
+}
+
+.host-meter-fill.warn {
+  background: hsl(var(--warning));
+}
+
+.host-meter-fill.danger {
+  background: hsl(var(--destructive));
+}
+
+.host-meter-sub {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.7143rem;
+}
+
+.monitor-overview-mounts {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  background: hsl(var(--surface-inset));
+  border: 1px solid hsl(var(--border-subtle));
+  border-radius: var(--radius-panel);
+}
+
+.monitor-overview-mounts h3 {
+  margin: 0;
+  color: hsl(var(--foreground));
+  font-size: 0.8571rem;
+  font-weight: 600;
+}
+
+.process-context-menu {
+  position: fixed;
+  z-index: 60;
+}
+
+.danger-menu-item {
+  color: hsl(var(--destructive));
+}
+
+.danger-menu-item:hover:not(:disabled),
+.danger-menu-item:focus-visible:not(:disabled) {
+  background: hsl(var(--destructive) / 0.12);
+  color: hsl(var(--destructive));
+}
+
+/* --- docker management modal ---------------------------------------------- */
+
+.docker-dialog {
+  width: min(1060px, 94vw);
+  height: min(680px, 88vh);
+}
+
+.docker-filter-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 9px;
+  background: hsl(var(--surface-inset));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-control);
+  color: hsl(var(--muted-foreground));
+}
+
+.docker-filter-box input {
+  width: min(210px, 28vw);
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: hsl(var(--foreground));
+  font-size: 0.8125rem;
+}
+
+.docker-table-shell {
+  grid-column: 1 / -1;
+}
+
+.docker-table {
+  min-width: 820px;
+}
+
+.docker-table th:nth-child(1),
+.docker-table td:nth-child(1) {
+  width: 17%;
+  text-align: start;
+}
+
+.docker-table th:nth-child(2),
+.docker-table td:nth-child(2) {
+  width: 19%;
+  text-align: start;
+}
+
+.docker-table th:nth-last-child(-n+3),
+.docker-table td:nth-last-child(-n+3) {
+  width: auto;
+  text-align: start;
+}
+
+.docker-table th:last-child,
+.docker-table td:last-child {
+  width: 290px;
+  white-space: nowrap;
+}
+
+.dialog-title-with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.docker-name-cell {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.docker-short-id {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.7143rem;
+}
+
+.docker-state-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7143rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  background: hsl(var(--secondary));
+  color: hsl(var(--text-secondary));
+}
+
+.docker-state-pill.state-running {
+  background: hsl(var(--success) / 0.14);
+  color: hsl(var(--success));
+}
+
+.docker-state-pill.state-paused,
+.docker-state-pill.state-restarting {
+  background: hsl(var(--warning) / 0.16);
+  color: hsl(var(--warning));
+}
+
+.docker-state-pill.state-exited,
+.docker-state-pill.state-dead {
+  background: hsl(var(--destructive) / 0.12);
+  color: hsl(var(--destructive));
+}
+
+.docker-row-actions {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.docker-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 26px;
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-control);
+  background: hsl(var(--secondary));
+  color: hsl(var(--foreground));
+  font-size: 0.7143rem;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.docker-action-btn:hover:not(:disabled) {
+  border-color: hsl(var(--primary) / 0.6);
+  color: hsl(var(--primary));
+  background: hsl(var(--primary) / 0.1);
+}
+
+.docker-action-btn.primary {
+  border-color: hsl(var(--primary) / 0.5);
+  color: hsl(var(--primary));
+}
+
+.docker-action-btn.danger:hover:not(:disabled) {
+  border-color: hsl(var(--destructive) / 0.65);
+  color: hsl(var(--destructive));
+  background: hsl(var(--destructive) / 0.12);
+}
+
+.docker-action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.docker-logs-shell {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  padding: 12px;
+  gap: 10px;
+}
+
+.docker-logs-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.docker-logs-toolbar select {
+  max-width: 280px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-control);
+  background: hsl(var(--surface-inset));
+  color: hsl(var(--foreground));
+}
+
+/* --- common devops diagnostics modal ------------------------------------- */
+
+.ops-details-dialog {
+  width: min(1000px, 94vw);
+  height: min(660px, 88vh);
+}
+
+.ops-sections-scroll {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  overflow: auto;
+  min-height: 0;
+  padding: 12px;
+}
+
+.ops-host-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  padding: 8px 10px;
+  border-radius: var(--radius-control);
+  background: hsl(var(--surface-inset));
+  border: 1px solid hsl(var(--border-subtle));
+  color: hsl(var(--text-secondary));
+  font-size: 0.7857rem;
+}
+
+.ops-command-section {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-panel);
+  border: 1px solid hsl(var(--border-subtle));
+  background: hsl(var(--surface-inset));
+}
+
+.ops-section-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ops-section-header strong {
+  color: hsl(var(--foreground));
+  font-size: 0.8571rem;
+}
+
+.ops-command-pill {
+  padding: 2px 7px;
+  border-radius: var(--radius-control);
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--card));
+  color: hsl(var(--muted-foreground));
+  font-size: 0.7143rem;
+}
+
+.ops-command-pre {
+  margin: 0;
+  padding: 10px;
+  max-height: 260px;
+  overflow: auto;
+  border-radius: var(--radius-control);
+  border: 1px solid hsl(var(--border-subtle));
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-size: 0.7857rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 760px) {
+  .terminal-pane-status {
+    padding: 6px 8px;
+  }
+
+  .docker-filter-box input {
+    width: 140px;
+  }
+}

@@ -107,7 +107,7 @@ test('live SSH trust, authentication, terminal, SFTP and monitoring', async ({ b
     await page.locator('.password-dialog').waitFor({ state: 'hidden', timeout: 30_000 });
     stages.push('password-submitted');
 
-    await page.locator('.command-input:not([disabled])').waitFor({ state: 'visible', timeout: 30_000 });
+    await page.locator('.terminal-quick-ops button:not([disabled])').first().waitFor({ state: 'visible', timeout: 30_000 });
     await page.waitForTimeout(1_500);
     stages.push('ssh-connected');
     await page.locator('.nav-mode').getByRole('button', { name: '最近', exact: true }).click();
@@ -118,8 +118,9 @@ test('live SSH trust, authentication, terminal, SFTP and monitoring', async ({ b
     stages.push('quick-connection-visible-in-navigation');
     await capture('live-ssh-connected-1280x800.png');
 
-    await page.locator('.command-input').fill(`printf '%s\\n' '${marker}'`);
-    await page.locator('.command-input').press('Enter');
+    await page.locator('.terminal-pane-surface').click();
+    await page.keyboard.type(`printf '%s\\n' '${marker}'`);
+    await page.keyboard.press('Enter');
     await page.waitForTimeout(1_500);
 
     const searchButton = page.locator(
@@ -173,14 +174,15 @@ test('live SSH trust, authentication, terminal, SFTP and monitoring', async ({ b
       }
     }
 
-    const monitorPanel = page.locator('.host-panel');
-    await monitorPanel.waitFor({ state: 'visible', timeout: 10_000 });
+    await page.locator('.terminal-quick-ops').getByRole('button', { name: /系统监控|Overview|System/i }).first().click();
+    const monitorDialog = page.locator('.monitor-details-dialog');
+    await monitorDialog.waitFor({ state: 'visible', timeout: 10_000 });
     await page.waitForTimeout(3_000);
-    const monitorStatus = (await monitorPanel.locator('.status-pill').first().textContent())?.trim() || '';
-    if (await monitorPanel.locator('.inline-notice.error').count() > 0) {
+    const monitorStatus = (await monitorDialog.locator('.status-pill').first().textContent())?.trim() || 'live';
+    if (await monitorDialog.locator('.inline-notice.error').count() > 0) {
       throw new Error('Monitoring probe reported an error');
     }
-    const monitorLayout = await monitorPanel.evaluate((element) => ({
+    const monitorLayout = await monitorDialog.evaluate((element) => ({
       scrollWidth: element.scrollWidth,
       clientWidth: element.clientWidth,
     }));
@@ -189,6 +191,7 @@ test('live SSH trust, authentication, terminal, SFTP and monitoring', async ({ b
     }
     stages.push('monitor-sampled');
     await capture('live-ssh-connected-files-monitor-1280x800.png');
+    await page.keyboard.press('Escape');
 
     const invoke = async <T>(command: string, args: Record<string, unknown> = {}) => {
       return page.evaluate(

@@ -238,6 +238,19 @@ The 2026-11-07 local browser pass confirms dark/light, zh/en, 1440×900 and 960�
 
 FTP/FTPS remains deferred to a separate design slice (see PRODUCT_DESIGN "Later" and Deferred product tracks below).
 
+## Phase 5.6 — terminal fidelity, collapsed monitoring popups, Docker & DevOps dialogs
+
+Status: **implemented** (2026-11-14)
+
+Scope:
+
+- Terminal fidelity & Tauri CSP compatibility: preserve `style-src` inline styles (`dangerousDisableAssetCspModification: ["style-src"]`) plus static CSS `.xterm-rows` fallback so monospace metrics, whitespace preservation (`white-space: pre`), 256-color/truecolor ANSI formatting (`TERM=xterm-256color`, best-effort `COLORTERM=truecolor`), contrast-safe light/dark palettes, visible cursor & clicked-cell feedback, and high-contrast selection highlights work reliably on desktop and browser runtimes.
+- Terminal interaction improvements: unselected right-click menu exposes Paste (`clipboard.readText()` with multiline paste protection) alongside Clear; remove the redundant bottom `CommandInputBar` composer.
+- Collapsed monitoring & terminal action bar: default `hostPanelOpen: false`, collapse the monitoring sidebar into an expanded (`>= 34 px`) Arco-styled quick-operations strip inside the terminal footer with clickable popups for System Overview & Disks, Processes, Network, Routes, Docker, and curated DevOps diagnostics.
+- Interactive Docker dialog (`DockerDialog`): bounded inspection of Docker daemon status, containers, and images, live log tailing, and confirmed container lifecycle actions (`start`, `stop`, `restart`, `pause`, `unpause`, `remove`).
+- Curated DevOps diagnostics dialog (`OpsDetailsDialog`): bounded read-only views for Listening Ports, Systemd Services, Disk & Inode Usage, and System/Kernel Logs.
+- Process list right-click context actions (`MonitorDetailsDialog`): right-click row menu for confirmed POSIX signals (`SIGTERM`, `SIGKILL`, `SIGHUP`, `SIGSTOP`, `SIGCONT`), Windows `Stop-Process`, and PID/name copy.
+
 ## Phase 6 — AI assistant
 
 Status: **explain/draft slice, bounded local history and local text-file comparison implemented; hardening remains**

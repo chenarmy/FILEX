@@ -1,6 +1,7 @@
 mod external_editor;
 mod known_hosts;
 mod profile_export;
+mod remote_ops;
 mod session_runtime;
 mod terminal_logging;
 
@@ -21,11 +22,12 @@ use external_editor::ExternalEditorRuntime;
 use filex_contracts::{
     AppError, AuthenticationMethod, CommandSnippet, ConnectionProfile, ConnectionState,
     CreateConnectionProfileInput, CreateLocalTunnelInput, CreateTransferInput,
-    CreateTunnelRuleInput, CredentialStoreStatus, DirectorySyncPreview, EnvironmentKind,
-    FileChecksumComparison, HostKeyChallenge, HostTrustEvaluation, HostTrustRecord,
-    ImportKnownHostsInput, ImportKnownHostsResult, KnownHostsImportPreview, LocalDirectoryListing,
-    LocalFileEntry, LocalTextPreview, LocalTextSaveResult, MaintenanceArtifact, NetworkSnapshot,
-    OperationResult, ProcessSnapshot, QuickConnectInput, RecordHostTrustInput,
+    CreateTunnelRuleInput, CredentialStoreStatus, DirectorySyncPreview, DockerContainerAction,
+    DockerLogsSnapshot, DockerSnapshot, EnvironmentKind, FileChecksumComparison, HostKeyChallenge,
+    HostTrustEvaluation, HostTrustRecord, ImportKnownHostsInput, ImportKnownHostsResult,
+    KnownHostsImportPreview, LocalDirectoryListing, LocalFileEntry, LocalTextPreview,
+    LocalTextSaveResult, MaintenanceArtifact, NetworkSnapshot, OperationResult, OpsCategory,
+    OpsSnapshot, ProcessSignal, ProcessSnapshot, QuickConnectInput, RecordHostTrustInput,
     RemoteDirectoryListing, RemotePermissionUpdateResult, RemoteState, RemoteTextPreview,
     RemoteTextSaveResult, RuntimePaths, SafeSettings, SaveCommandSnippetInput,
     SessionConnectionProgress, SessionSummary, SshConfigImportPreview, SystemMonitorSnapshot,
@@ -4898,14 +4900,76 @@ async fn terminate_remote_process(
     session_id: String,
     snapshot_id: String,
     pid: u32,
+    signal: Option<ProcessSignal>,
     sessions: State<'_, SessionRuntime>,
 ) -> Result<OperationResult<()>, ()> {
     Ok(
         match sessions
-            .terminate_remote_process(&session_id, &snapshot_id, pid)
+            .terminate_remote_process(&session_id, &snapshot_id, pid, signal.unwrap_or_default())
             .await
         {
             Ok(()) => OperationResult::success(()),
+            Err(error) => OperationResult::failure(error),
+        },
+    )
+}
+
+#[tauri::command]
+async fn collect_docker_snapshot(
+    session_id: String,
+    sessions: State<'_, SessionRuntime>,
+) -> Result<OperationResult<DockerSnapshot>, ()> {
+    Ok(match sessions.collect_docker_snapshot(&session_id).await {
+        Ok(snapshot) => OperationResult::success(snapshot),
+        Err(error) => OperationResult::failure(error),
+    })
+}
+
+#[tauri::command]
+async fn collect_docker_logs(
+    session_id: String,
+    container_id: String,
+    tail_lines: Option<u32>,
+    sessions: State<'_, SessionRuntime>,
+) -> Result<OperationResult<DockerLogsSnapshot>, ()> {
+    Ok(
+        match sessions
+            .collect_docker_logs(&session_id, &container_id, tail_lines)
+            .await
+        {
+            Ok(logs) => OperationResult::success(logs),
+            Err(error) => OperationResult::failure(error),
+        },
+    )
+}
+
+#[tauri::command]
+async fn run_docker_container_action(
+    session_id: String,
+    container_id: String,
+    action: DockerContainerAction,
+    sessions: State<'_, SessionRuntime>,
+) -> Result<OperationResult<()>, ()> {
+    Ok(
+        match sessions
+            .run_docker_container_action(&session_id, &container_id, action)
+            .await
+        {
+            Ok(()) => OperationResult::success(()),
+            Err(error) => OperationResult::failure(error),
+        },
+    )
+}
+
+#[tauri::command]
+async fn collect_ops_snapshot(
+    session_id: String,
+    category: OpsCategory,
+    sessions: State<'_, SessionRuntime>,
+) -> Result<OperationResult<OpsSnapshot>, ()> {
+    Ok(
+        match sessions.collect_ops_snapshot(&session_id, category).await {
+            Ok(snapshot) => OperationResult::success(snapshot),
             Err(error) => OperationResult::failure(error),
         },
     )
@@ -5495,6 +5559,10 @@ pub fn run() {
             collect_process_snapshot,
             collect_network_snapshot,
             terminate_remote_process,
+            collect_docker_snapshot,
+            collect_docker_logs,
+            run_docker_container_action,
+            collect_ops_snapshot,
             compare_file_checksums,
             cancel_file_checksum,
             preview_directory_sync,

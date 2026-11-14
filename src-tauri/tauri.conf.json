@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "FILEX",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "identifier": "dev.filex.workbench",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -11,7 +11,10 @@
   },
   "app": {
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost; worker-src 'self' blob:"
+      "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost; worker-src 'self' blob:",
+      "dangerousDisableAssetCspModification": [
+        "style-src"
+      ]
     },
     "windows": [
       {

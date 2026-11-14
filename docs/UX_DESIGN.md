@@ -363,6 +363,9 @@ Status roles:
 - The palette browser lists theme name, light/dark classification and a compact ANSI swatch. Its sample preview shows representative normal and bright terminal colors; selection state does not rely on color alone.
 - Settings owns palette selection. Terminal panes consume the committed safe setting through a typed palette resolver and never contain per-theme color decisions.
 - Paths, hosts, ports, fingerprints, algorithms and command text use monospace.
+- Terminal surfaces enforce fixed-pitch cell rendering (`white-space: pre`, ligatures/kerning disabled), high-contrast selection highlights, unmistakable cursor and clicked-cell indicator feedback even under full-screen cursor-hiding TUIs (`top`, `htop`, pagers), and an unselected right-click menu offering Paste alongside Clear.
+- The terminal footer strip expands from `20 px` to a compact `>= 34 px` single-or-wrapping Arco bar separating connection/cursor telemetry on the left from quick popup triggers on the right (System & Disks, Processes, Network, Routes, Docker, Listening Ports, Services, System Logs), while the left monitoring sidebar remains collapsed to preserve horizontal terminal columns.
+- Process rows inside the monitoring dialog support right-click context menus (`SIGTERM`, `SIGKILL`, `SIGHUP`, pause/resume, copy PID/name) with target-rich confirmation before dispatching any signal.
 
 ## 7. Common component behavior
 

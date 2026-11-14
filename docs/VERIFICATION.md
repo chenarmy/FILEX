@@ -1,5 +1,25 @@
 # FILEX verification evidence
 
+## 2026-11-14 — v0.1.5 release preparation
+
+- Scope: completed Phase 5.6 terminal formatting/CSP fidelity (`dangerousDisableAssetCspModification: ["style-src"]`, static `.xterm-rows` formatting fallback, `COLORTERM=truecolor` / `LANG=C.UTF-8` PTY env, clicked-cell cursor/selection indicators, unselected right-click Paste/Select All), removed `CommandInputBar`, collapsed the monitoring sidebar (`hostPanelOpen: false`) into an expanded footer strip with clickable popups (`MonitorDetailsDialog` including Overview & Disks plus Process right-click signal actions, `DockerDialog`, `OpsDetailsDialog`), updated `e2e/workbench.spec.ts` / `e2e/live-ssh.spec.ts`, and synchronized workspace manifests and `Cargo.lock` to `0.1.5`.
+- Visual review: inspected `docker-modal-dark-1440.png`, `ops-modal-light-960-font20.png`, `terminal-context-menu-1440.png`, and `monitor-details-process-1440.png` across 1440 × 900 dark and 960 × 640 light (`uiFontSize: 20`) viewports with zero horizontal/viewport overflow.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Version sync | `pnpm version:check` | Passed (`0.1.5`) |
+| Release notes | `node scripts/release-notes.mjs v0.1.5` | Passed |
+| ESLint | `pnpm lint` | Passed (0 warnings) |
+| TypeScript | `pnpm typecheck` | Passed |
+| Frontend unit tests | `pnpm test` | Passed, 17 files and 77 tests (`3.74s`) |
+| Production bundle | `pnpm build` | Passed (`11.38s`; existing Vite >500 kB chunk-size warning retained) |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust locked check | `cargo check --workspace` | Passed |
+| Rust Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
+| Rust workspace tests | `cargo test --workspace --locked` | Passed, 37 tests (`filex-core`: 10, `filex-credentials`: 2, `filex-desktop-lib`: 15, `filex-ssh`: 4, `filex-storage`: 6; `filex-contracts`: 0; `filex-desktop`: 0) |
+| Workbench Playwright E2E | `pnpm exec playwright test e2e/workbench.spec.ts` | Passed, 20 tests (`30.9s`); `e2e/live-ssh.spec.ts` updated & typechecked, excluded in standalone Chromium (requires live WebView2 CDP on `127.0.0.1:9222`) |
+| Diff hygiene | `git diff --check` | Passed |
+
 ## 2026-11-14 — v0.1.4 release preparation
 
 - Scope: synchronized workspace manifests and `Cargo.lock` to `0.1.4`, updated `CHANGELOG.md` release notes, and verified all pending pre-release changes (`follow-terminal` default selection, file-entry icon visual hierarchy, and the Arco Design workbench visual system refresh).

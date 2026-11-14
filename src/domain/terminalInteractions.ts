@@ -1,4 +1,4 @@
-export const DEFAULT_TERMINAL_FONT_FAMILY = 'JetBrains Mono, Consolas, monospace';
+export const DEFAULT_TERMINAL_FONT_FAMILY = "'JetBrains Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace";
 export const ALT_DOUBLE_TAP_WINDOW_MS = 420;
 
 export type AltTapState = {

@@ -72,9 +72,17 @@ describe('safe settings repository', () => {
       focusMode: true,
       followTerminalCwd: true,
       detailsPaneOpen: false,
-      hostPanelOpen: true,
+      hostPanelOpen: false,
       fileBrowserOpen: true,
     });
+  });
+
+  it('defaults hostPanelOpen to false while honoring an explicit true setting', () => {
+    expect(defaultSafeSettings.hostPanelOpen).toBe(false);
+    localStorage.setItem('filex.safe-settings.v1', JSON.stringify({
+      hostPanelOpen: true,
+    }));
+    expect(readSafeSettings().hostPanelOpen).toBe(true);
   });
 
   it('defaults missing follow-terminal settings on while preserving an explicit opt-out', () => {

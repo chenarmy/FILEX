@@ -176,7 +176,7 @@ fn default_monitor_interval_seconds() -> u16 {
 }
 
 fn default_host_panel_open() -> bool {
-    true
+    false
 }
 
 fn default_file_browser_open() -> bool {
@@ -1041,4 +1041,121 @@ pub struct TunnelSummary {
     pub target_port: Option<u16>,
     pub state: TunnelState,
     pub last_error: Option<AppError>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum ProcessSignal {
+    #[default]
+    Sigterm,
+    Sigkill,
+    Sighup,
+    Sigstop,
+    Sigcont,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DockerAvailability {
+    Available,
+    NotInstalled,
+    PermissionDenied,
+    DaemonStopped,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DockerContainerAction {
+    Start,
+    Stop,
+    Restart,
+    Pause,
+    Unpause,
+    Remove,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerContainerEntry {
+    pub id: String,
+    pub name: String,
+    pub image: String,
+    pub state: String,
+    pub status: String,
+    pub ports: String,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_usage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pids: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerImageEntry {
+    pub id: String,
+    pub repository: String,
+    pub tag: String,
+    pub size: String,
+    pub created_since: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerSnapshot {
+    pub availability: DockerAvailability,
+    pub collected_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
+    pub containers: Vec<DockerContainerEntry>,
+    pub images: Vec<DockerImageEntry>,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerLogsSnapshot {
+    pub container_id: String,
+    pub lines: Vec<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpsCategory {
+    Overview,
+    Ports,
+    Services,
+    Disks,
+    Logs,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpsCommandSection {
+    pub id: String,
+    pub title_key: String,
+    pub command_label: String,
+    pub lines: Vec<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpsSnapshot {
+    pub state: MonitorState,
+    pub collected_at_ms: u64,
+    pub category: OpsCategory,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_release: Option<String>,
+    pub sections: Vec<OpsCommandSection>,
 }

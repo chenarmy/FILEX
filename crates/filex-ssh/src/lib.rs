@@ -333,6 +333,9 @@ impl ConnectedSshSession {
         channel
             .request_pty(true, "xterm-256color", columns, rows, 0, 0, &[])
             .await?;
+        // Best-effort color/UTF-8 locale hints; restricted OpenSSH AcceptEnv hosts may ignore SetEnv.
+        let _ = channel.set_env(false, "COLORTERM", "truecolor").await;
+        let _ = channel.set_env(false, "LANG", "C.UTF-8").await;
         channel.request_shell(true).await?;
         let (read_half, write_half) = channel.split();
         Ok((

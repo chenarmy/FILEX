@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
   Activity,
   Bot,
@@ -32,9 +32,10 @@ import {
 } from '@/api/domain/windowApi';
 import ConnectionsPane from '@/components/connections/ConnectionsPane.vue';
 import TerminalWorkspace from '@/components/terminal/TerminalWorkspace.vue';
-import CommandInputBar from '@/components/terminal/CommandInputBar.vue';
 import FileBrowserPanel from '@/components/files/FileBrowserPanel.vue';
-import HostPanel from '@/components/monitor/HostPanel.vue';
+import MonitorDetailsDialog from '@/components/monitor/MonitorDetailsDialog.vue';
+import DockerDialog from '@/components/docker/DockerDialog.vue';
+import OpsDetailsDialog from '@/components/ops/OpsDetailsDialog.vue';
 import InspectorPane from '@/components/inspector/InspectorPane.vue';
 import CommandPalette from '@/components/dialogs/CommandPalette.vue';
 import AssistantPanel from '@/components/assistant/AssistantPanel.vue';
@@ -42,6 +43,11 @@ import TaskDrawer from '@/components/tasks/TaskDrawer.vue';
 import StatusBar from '@/components/layout/StatusBar.vue';
 import { t } from '@/i18n';
 import { useConnectionsStore } from '@/stores/connections';
+import { useDockerStore } from '@/stores/docker';
+import { useMonitorStore } from '@/stores/monitor';
+import { useNetworkStore } from '@/stores/network';
+import { useOpsStore } from '@/stores/ops';
+import { useProcessesStore } from '@/stores/processes';
 import { useSettingsStore } from '@/stores/settings';
 import { useSessionsStore } from '@/stores/sessions';
 import { useUiStore } from '@/stores/ui';
@@ -54,10 +60,30 @@ import {
 } from '@/utils/keyboardShortcuts';
 
 const connections = useConnectionsStore();
+const docker = useDockerStore();
+const monitor = useMonitorStore();
+const network = useNetworkStore();
+const ops = useOpsStore();
+const processes = useProcessesStore();
 const settings = useSettingsStore();
 const ui = useUiStore();
 const sessions = useSessionsStore();
 const updates = useUpdatesStore();
+
+watch(
+  () => sessions.activeSessionId,
+  () => {
+    ui.closeMonitorDetails();
+    ui.closeDockerDialog();
+    ui.closeOpsDialog();
+    monitor.clear();
+    processes.clear();
+    network.clear();
+    docker.clear();
+    ops.clear();
+  },
+  { flush: 'sync' },
+);
 const desktopWindowControls = desktopWindowControlsAvailable();
 const windowMaximized = ref(false);
 let windowControlsDisposed = false;
@@ -79,9 +105,7 @@ const inspectorPane = ref<{ focusInspector: () => void } | null>(null);
 
 const focusMode = computed(() => settings.value.focusMode);
 const hasActiveSession = computed(() => sessions.activeSession !== null);
-const hostPanelVisible = computed(() => settings.value.hostPanelOpen && !focusMode.value && hasActiveSession.value);
 const fileBrowserVisible = computed(() => settings.value.fileBrowserOpen && !focusMode.value);
-const commandBarVisible = computed(() => !focusMode.value && hasActiveSession.value);
 const detailsPaneVisible = computed(() => !focusMode.value && settings.value.detailsPaneOpen);
 
 const commandPaletteCommands = computed<CommandPaletteCommand[]>(() => {
@@ -193,7 +217,9 @@ function runShortcutAction(action: KeyboardShortcutAction): void {
 
 function runCommand(commandId: CommandPaletteCommandId): void {
   if (commandId === 'showMonitor') {
-    settings.value.hostPanelOpen = true;
+    if (sessions.activeSession?.state === 'connected') {
+      ui.openMonitorDetails('overview');
+    }
     return;
   }
   if (commandId === 'disconnectActiveSession') {
@@ -441,12 +467,12 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="icon-button"
-          :class="{ active: hostPanelVisible }"
-          :aria-pressed="hostPanelVisible"
+          :class="{ active: ui.monitorDetailsView !== null }"
+          :aria-pressed="ui.monitorDetailsView !== null"
           :aria-label="t('terminal.monitor')"
           :title="t('terminal.monitor')"
-          :disabled="!hasActiveSession"
-          @click="settings.value.hostPanelOpen = !settings.value.hostPanelOpen"
+          :disabled="sessions.activeSession?.state !== 'connected'"
+          @click="ui.openMonitorDetails('overview')"
         >
           <Activity :size="15" />
         </button>
@@ -556,18 +582,6 @@ onBeforeUnmount(() => {
         @pointerdown="beginPaneResize('connections', $event)"
         @keydown="resizePaneByKeyboard('connections', $event)"
       />
-      <template v-if="hostPanelVisible">
-        <HostPanel />
-        <button
-          class="pane-resizer"
-          type="button"
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Resize host panel"
-          @pointerdown="beginPaneResize('host', $event)"
-          @keydown="resizePaneByKeyboard('host', $event)"
-        />
-      </template>
       <div class="center-column">
         <div class="session-tabs-bar">
           <div id="session-tabs-slot" class="session-tabs-slot" />
@@ -582,7 +596,6 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <TerminalWorkspace ref="terminalWorkspace" />
-        <CommandInputBar v-if="commandBarVisible" />
         <template v-if="fileBrowserVisible">
           <button
             class="pane-resizer horizontal"
@@ -622,6 +635,20 @@ onBeforeUnmount(() => {
       :commands="commandPaletteCommands"
       @select="runCommand"
       @close="ui.closeCommandPalette"
+    />
+    <MonitorDetailsDialog
+      v-if="ui.monitorDetailsView"
+      :initial-view="ui.monitorDetailsView"
+      @close="ui.closeMonitorDetails"
+    />
+    <DockerDialog
+      v-if="ui.dockerDialogOpen"
+      @close="ui.closeDockerDialog"
+    />
+    <OpsDetailsDialog
+      v-if="ui.opsDialogCategory"
+      :initial-category="ui.opsDialogCategory"
+      @close="ui.closeOpsDialog"
     />
     <div class="sr-only" role="status" aria-live="polite">
       {{ connections.activeProfile ? `Selected ${connections.activeProfile.name}` : '' }}

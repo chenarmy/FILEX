@@ -89,7 +89,7 @@ pub fn default_safe_settings() -> SafeSettings {
         inspector_pane_width: 286,
         assistant_pane_width: 360,
         task_drawer_height: 156,
-        host_panel_open: true,
+        host_panel_open: false,
         file_browser_open: true,
         follow_terminal_cwd: true,
         focus_mode: false,

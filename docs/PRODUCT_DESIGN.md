@@ -368,6 +368,10 @@ The first implementation slice is not complete until a user can:
 7. Receive structured, localized errors for DNS, timeout, changed key, auth rejection and remote close.
 8. Verify through tests that credentials and terminal password input do not enter logs or serialized settings.
 
+- Interactive SSH terminal sessions preserve true monospace grid formatting (`white-space: pre`), ANSI/256-color/truecolor attributes (`TERM=xterm-256color`, best-effort `COLORTERM=truecolor`), high-contrast text selection, visible cursor and clicked-cell location cues, and contextual Paste alongside Copy and Clear.
+- The bottom floating command composer is removed in favor of direct PTY interaction and a taller (`>= 34 px`) structured terminal action/status strip.
+- Host telemetry (`MonitorDetailsDialog`: System overview & disks, Processes with confirmed right-click signal actions, Network interfaces/endpoints, and Routes), interactive Docker container/image inspection & lifecycle actions (`DockerDialog`), and curated read-only DevOps diagnostic views (`OpsDetailsDialog`: Listening ports, Systemd services, Disk/inode usage, and Recent system/kernel logs) open as focused modal dialogs from the terminal action strip, with the permanent host monitoring sidebar collapsed by default.
+
 ## 13. Open decisions before implementation
 
 - Which SSH engine provides the best cross-platform PTY, Agent, jump-host, SFTP, forwarding, cipher-policy and maintenance profile? Resolve with a written spike rather than assumption.

@@ -1,6 +1,6 @@
 import { ref } from 'vue';
 import { defineStore } from 'pinia';
-import type { TransferDirection } from '@/types/contracts';
+import type { MonitorDetailsView, OpsCategory, TransferDirection } from '@/types/contracts';
 
 export type SettingsSection =
   | 'appearance'
@@ -29,6 +29,9 @@ export const useUiStore = defineStore('ui', () => {
   const tunnelDialogRuleId = ref<string | null>(null);
   const assistantOpen = ref(false);
   const commandPaletteOpen = ref(false);
+  const monitorDetailsView = ref<MonitorDetailsView | null>(null);
+  const dockerDialogOpen = ref(false);
+  const opsDialogCategory = ref<OpsCategory | null>(null);
   const assistantTerminalSelection = ref<{ host: string; text: string; truncated: boolean } | null>(null);
   const toast = ref<string | null>(null);
   const confirmation = ref<{
@@ -60,6 +63,30 @@ export const useUiStore = defineStore('ui', () => {
 
   function closeCommandPalette(): void {
     commandPaletteOpen.value = false;
+  }
+
+  function openMonitorDetails(view: MonitorDetailsView = 'overview'): void {
+    monitorDetailsView.value = view;
+  }
+
+  function closeMonitorDetails(): void {
+    monitorDetailsView.value = null;
+  }
+
+  function openDockerDialog(): void {
+    dockerDialogOpen.value = true;
+  }
+
+  function closeDockerDialog(): void {
+    dockerDialogOpen.value = false;
+  }
+
+  function openOpsDialog(category: OpsCategory = 'ports'): void {
+    opsDialogCategory.value = category;
+  }
+
+  function closeOpsDialog(): void {
+    opsDialogCategory.value = null;
   }
 
   function closeSettings(): void {
@@ -166,6 +193,9 @@ export const useUiStore = defineStore('ui', () => {
     tunnelDialogRuleId,
     assistantOpen,
     commandPaletteOpen,
+    monitorDetailsView,
+    dockerDialogOpen,
+    opsDialogCategory,
     assistantTerminalSelection,
     toast,
     confirmation,
@@ -173,6 +203,12 @@ export const useUiStore = defineStore('ui', () => {
     openSettings,
     openCommandPalette,
     closeCommandPalette,
+    openMonitorDetails,
+    closeMonitorDetails,
+    openDockerDialog,
+    closeDockerDialog,
+    openOpsDialog,
+    closeOpsDialog,
     closeSettings,
     openQuickConnect,
     closeQuickConnect,
