@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import { ChevronRight, Folder, LoaderCircle, TriangleAlert } from 'lucide-vue-next';
+import { ChevronRight, LoaderCircle, TriangleAlert } from 'lucide-vue-next';
+import FileEntryIcon from '@/components/files/FileEntryIcon.vue';
 import type { DirectoryTreeEntry } from '@/domain/directoryNavigation';
 
 const props = defineProps<{
@@ -50,7 +51,7 @@ const children = computed(() => props.childrenByPath[props.node.path] ?? []);
         :title="node.path"
         @click="emit('navigate', node.path)"
       >
-        <Folder :size="12" />
+        <FileEntryIcon :name="node.name" :is-directory="true" :expanded="expanded" :size="13" />
         <span>{{ node.name }}</span>
       </button>
     </div>

@@ -837,13 +837,23 @@ defineExpose({ focusTerminal });
 }
 
 .pane-reconnect {
-  height: 21px;
-  padding-inline: 7px;
+  height: 22px;
+  padding-inline: 9px;
   border: 1px solid hsl(var(--border));
-  border-radius: 3px;
+  border-radius: var(--radius);
   color: hsl(var(--foreground));
   background: hsl(var(--secondary));
-  font-size: 0.75rem;
+  font-size: 0.7857rem;
+  font-weight: 500;
+  transition:
+    background-color var(--duration-micro) var(--ease-arco),
+    border-color var(--duration-micro) var(--ease-arco),
+    color var(--duration-micro) var(--ease-arco);
+}
+
+.pane-reconnect:hover:not(:disabled) {
+  background: hsl(var(--accent));
+  border-color: hsl(var(--input-hover));
 }
 
 .pane-reconnect:disabled {
@@ -856,8 +866,8 @@ defineExpose({ focusTerminal });
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 4px;
-  padding: 3px 6px;
+  gap: 5px;
+  padding: 4px 8px;
   border-bottom: 1px solid hsl(var(--border));
   color: hsl(var(--muted-foreground));
   background: hsl(var(--card));
@@ -866,17 +876,21 @@ defineExpose({ focusTerminal });
 .terminal-search input {
   width: min(320px, 48%);
   min-width: 48px;
-  height: 23px;
-  padding-inline: 6px;
+  height: 24px;
+  padding-inline: 8px;
   border: 1px solid hsl(var(--input));
-  border-radius: 3px;
+  border-radius: var(--radius);
   color: hsl(var(--foreground));
-  background: hsl(var(--background));
-  font-size: 0.8333rem;
+  background: hsl(var(--surface-inset));
+  font-size: 0.8571rem;
+  transition: border-color var(--duration-micro) var(--ease-arco), box-shadow var(--duration-micro) var(--ease-arco);
 }
 
 .terminal-search input:focus-visible {
-  outline: 1px solid hsl(var(--ring));
+  outline: 0;
+  background: hsl(var(--card));
+  border-color: hsl(var(--ring));
+  box-shadow: 0 0 0 2px hsl(var(--ring) / 0.2);
 }
 
 .terminal-search-position {
@@ -919,28 +933,30 @@ defineExpose({ focusTerminal });
   position: absolute;
   z-index: 8;
   display: flex;
-  width: 196px;
+  width: 204px;
   flex-direction: column;
-  padding: 4px;
+  gap: 1px;
+  padding: 5px;
   border: 1px solid hsl(var(--border));
-  border-radius: 5px;
+  border-radius: var(--radius-popover);
   color: hsl(var(--popover-foreground));
   background: hsl(var(--popover));
-  box-shadow: 0 8px 22px hsl(0 0% 0% / 0.34);
+  box-shadow: var(--shadow-popover);
 }
 
 .terminal-context-menu button {
   display: flex;
   min-height: 28px;
   align-items: center;
-  gap: 7px;
-  padding: 4px 7px;
+  gap: 8px;
+  padding: 4px 8px;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius);
   color: inherit;
   background: transparent;
-  font-size: 0.8333rem;
+  font-size: 0.8571rem;
   text-align: start;
+  transition: background-color var(--duration-micro) var(--ease-arco), color var(--duration-micro) var(--ease-arco);
 }
 
 .terminal-context-menu button:hover,

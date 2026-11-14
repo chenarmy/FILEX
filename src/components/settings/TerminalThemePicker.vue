@@ -228,12 +228,12 @@ onBeforeUnmount(() => {
 <style scoped>
 .terminal-theme-picker {
   display: grid;
-  gap: 8px;
+  gap: 10px;
   margin-block: 8px 4px;
-  padding: 9px;
-  border: 1px solid hsl(var(--border));
-  border-radius: 4px;
-  background: hsl(var(--muted) / 0.18);
+  padding: 12px;
+  border: 1px solid hsl(var(--border-subtle));
+  border-radius: var(--radius-panel);
+  background: hsl(var(--surface-inset));
 }
 
 .theme-picker-heading {
@@ -252,19 +252,21 @@ onBeforeUnmount(() => {
 }
 
 .theme-picker-heading strong {
-  font-size: 0.75rem;
+  font-size: 0.8571rem;
+  font-weight: 600;
 }
 
 .theme-picker-heading small,
 .theme-preview-footer {
   color: hsl(var(--muted-foreground));
-  font-size: 0.6667rem;
+  font-size: 0.75rem;
 }
 
 .theme-current-name {
   overflow: hidden;
   color: hsl(var(--primary));
-  font-size: 0.6667rem;
+  font-size: 0.75rem;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -273,15 +275,15 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: minmax(178px, 0.78fr) minmax(250px, 1.22fr);
   min-height: 250px;
-  gap: 8px;
+  gap: 10px;
 }
 
 .theme-option-list {
   min-width: 0;
   height: 250px;
   overflow: auto;
-  border: 1px solid hsl(var(--border));
-  border-radius: 3px;
+  border: 1px solid hsl(var(--border-subtle));
+  border-radius: var(--radius-control);
   background: hsl(var(--background));
   scrollbar-width: thin;
 }
@@ -291,16 +293,18 @@ onBeforeUnmount(() => {
   grid-template-columns: minmax(0, 1fr) auto;
   width: 100%;
   min-width: 0;
-  min-height: 35px;
+  min-height: 38px;
   align-items: center;
   gap: 8px;
-  padding: 4px 7px;
+  padding: 6px 10px;
   border: 0;
-  border-bottom: 1px solid hsl(var(--border) / 0.72);
+  border-bottom: 1px solid hsl(var(--border-subtle));
   border-radius: 0;
   color: hsl(var(--foreground));
   background: transparent;
   text-align: start;
+  transition: background var(--duration-micro) var(--ease-arco),
+    color var(--duration-micro) var(--ease-arco);
 }
 
 .theme-option:last-child {
@@ -308,19 +312,19 @@ onBeforeUnmount(() => {
 }
 
 .theme-option:hover {
-  background: hsl(var(--accent) / 0.7);
+  background: hsl(var(--fill-subtle));
 }
 
 .theme-option.selected {
   color: hsl(var(--primary));
-  background: hsl(var(--primary) / 0.11);
-  box-shadow: inset 2px 0 hsl(var(--primary));
+  background: hsl(var(--primary) / 0.12);
+  box-shadow: inset 3px 0 hsl(var(--primary));
 }
 
 .theme-option:focus-visible {
   position: relative;
   z-index: 1;
-  outline: 1px solid hsl(var(--ring));
+  outline: 1px solid hsl(var(--primary));
   outline-offset: -1px;
 }
 
@@ -332,18 +336,19 @@ onBeforeUnmount(() => {
 
 .theme-option-name {
   overflow: hidden;
-  font-size: 0.75rem;
+  font-size: 0.8571rem;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .theme-swatches {
   display: flex;
-  gap: 2px;
+  gap: 3px;
 }
 
 .theme-swatches i {
-  width: 9px;
+  width: 10px;
   height: 4px;
   border-radius: 1px;
 }
@@ -356,7 +361,7 @@ onBeforeUnmount(() => {
 }
 
 .theme-option-meta small {
-  font-size: 0.5833rem;
+  font-size: 0.7143rem;
   white-space: nowrap;
 }
 
@@ -370,8 +375,8 @@ onBeforeUnmount(() => {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border: 1px solid hsl(var(--border));
-  border-radius: 3px;
+  border: 1px solid hsl(var(--border-subtle));
+  border-radius: var(--radius-control);
   background: hsl(var(--background));
 }
 

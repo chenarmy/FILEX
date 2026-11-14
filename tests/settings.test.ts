@@ -10,6 +10,7 @@ describe('safe settings repository', () => {
     expect(defaultSafeSettings.uiFontFamily).toBe(defaultUiFontFamily);
     expect(defaultSafeSettings.uiFontFamily).toContain('HarmonyOS Sans SC');
     expect(defaultSafeSettings.assistantPaneWidth).toBe(360);
+    expect(defaultSafeSettings.followTerminalCwd).toBe(true);
   });
 
   it('migrates the legacy default font without overriding custom families', () => {
@@ -69,11 +70,23 @@ describe('safe settings repository', () => {
       fileBrowserHeight: 160,
       assistantPaneWidth: 300,
       focusMode: true,
-      followTerminalCwd: false,
+      followTerminalCwd: true,
       detailsPaneOpen: false,
       hostPanelOpen: true,
       fileBrowserOpen: true,
     });
+  });
+
+  it('defaults missing follow-terminal settings on while preserving an explicit opt-out', () => {
+    localStorage.setItem('filex.safe-settings.v1', JSON.stringify({
+      theme: 'dark',
+    }));
+    expect(readSafeSettings().followTerminalCwd).toBe(true);
+
+    localStorage.setItem('filex.safe-settings.v1', JSON.stringify({
+      followTerminalCwd: false,
+    }));
+    expect(readSafeSettings().followTerminalCwd).toBe(false);
   });
 
   it('persists only the safe settings structure', () => {

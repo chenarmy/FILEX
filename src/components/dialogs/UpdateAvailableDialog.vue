@@ -152,13 +152,13 @@ function restoreFocus(): void {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 6px;
+  padding: 2px 8px;
   color: hsl(var(--success));
-  background: hsl(var(--success) / 0.08);
-  border: 1px solid hsl(var(--success) / 0.24);
+  background: hsl(var(--success) / 0.1);
+  border: 1px solid hsl(var(--success) / 0.28);
   border-radius: 999px;
-  font-size: 0.6667rem;
-  font-weight: 650;
+  font-size: 0.7143rem;
+  font-weight: 600;
   letter-spacing: 0.02em;
 }
 
@@ -168,47 +168,48 @@ function restoreFocus(): void {
   gap: 16px;
   min-height: 0;
   overflow: auto;
-  padding: 18px;
+  padding: 18px 20px;
   scrollbar-gutter: stable;
 }
 
 .update-version-summary {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr);
+  grid-template-columns: 38px minmax(0, 1fr);
   gap: 12px;
   align-items: center;
-  padding: 14px;
-  background: hsl(var(--primary) / 0.055);
+  padding: 14px 16px;
+  background: hsl(var(--primary) / 0.06);
   border: 1px solid hsl(var(--primary) / 0.24);
-  border-radius: 6px;
+  border-radius: var(--radius-card);
 }
 
 .update-version-icon {
   display: grid;
   place-items: center;
-  width: 36px;
-  height: 36px;
+  width: 38px;
+  height: 38px;
   color: hsl(var(--primary));
-  background: hsl(var(--primary) / 0.11);
-  border: 1px solid hsl(var(--primary) / 0.18);
-  border-radius: 6px;
+  background: hsl(var(--primary) / 0.12);
+  border: 1px solid hsl(var(--primary) / 0.2);
+  border-radius: var(--radius-card);
 }
 
 .update-version-summary div {
   display: grid;
-  gap: 5px;
+  gap: 4px;
   min-width: 0;
 }
 
 .update-version-summary strong {
-  font-size: 0.8333rem;
+  font-size: 0.9286rem;
+  font-weight: 600;
   line-height: 1.45;
 }
 
 .update-version-summary small {
   color: hsl(var(--muted-foreground));
-  font-size: 0.7083rem;
-  line-height: 1.6;
+  font-size: 0.7857rem;
+  line-height: 1.55;
 }
 
 .update-notes {
@@ -227,36 +228,36 @@ function restoreFocus(): void {
 
 .update-section-heading strong {
   color: hsl(var(--foreground));
-  font-size: 0.75rem;
-  font-weight: 700;
-  letter-spacing: 0.045em;
+  font-size: 0.8571rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .update-section-heading span {
   color: hsl(var(--muted-foreground));
-  font-size: 0.6667rem;
+  font-size: 0.75rem;
 }
 
 .update-notes-scroll {
   max-height: clamp(180px, 38vh, 320px);
   overflow: auto;
   padding: 14px 16px;
-  background: hsl(var(--background));
+  background: hsl(var(--surface-inset));
   border: 1px solid hsl(var(--border));
-  border-radius: 5px;
+  border-radius: var(--radius-card);
   scrollbar-gutter: stable;
 }
 
 .update-notes-scroll :deep(.read-only-markdown) {
   color: hsl(var(--foreground));
-  font-size: 0.75rem;
+  font-size: 0.8571rem;
   line-height: 1.65;
 }
 
 .update-notes-scroll :deep(.read-only-markdown h3) {
   margin: 12px 0 6px;
-  font-size: 0.75rem;
-  font-weight: 700;
+  font-size: 0.8571rem;
+  font-weight: 600;
 }
 
 .update-notes-scroll :deep(.read-only-markdown h3:first-child) {
@@ -287,22 +288,23 @@ function restoreFocus(): void {
   display: grid;
   gap: 8px;
   padding: 12px 14px;
-  background: hsl(var(--secondary) / 0.45);
+  background: hsl(var(--surface-inset));
   border: 1px solid hsl(var(--border));
-  border-radius: 5px;
+  border-radius: var(--radius-card);
 }
 
 .update-progress > div {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  color: hsl(var(--muted-foreground));
-  font-size: 0.75rem;
+  color: hsl(var(--text-secondary, var(--muted-foreground)));
+  font-size: 0.7857rem;
 }
 
 .update-progress progress {
   width: 100%;
   height: 6px;
+  border-radius: 999px;
   accent-color: hsl(var(--primary));
 }
 
@@ -310,15 +312,16 @@ function restoreFocus(): void {
   margin: 0;
   padding: 12px 14px;
   color: hsl(var(--primary));
-  background: hsl(var(--primary) / 0.06);
-  border: 1px solid hsl(var(--primary) / 0.2);
-  border-radius: 5px;
+  background: hsl(var(--primary) / 0.08);
+  border: 1px solid hsl(var(--primary) / 0.24);
+  border-radius: var(--radius-card);
+  font-size: 0.8571rem;
 }
 
 .update-dismiss-note {
   margin: 0;
   color: hsl(var(--muted-foreground));
-  font-size: 0.7083rem;
+  font-size: 0.7857rem;
   line-height: 1.5;
 }
 
@@ -328,8 +331,8 @@ function restoreFocus(): void {
   justify-content: space-between;
   gap: 12px;
   min-height: 58px;
-  padding: 10px 18px;
-  background: hsl(var(--secondary) / 0.28);
+  padding: 10px 20px;
+  background: hsl(var(--fill-subtle));
   flex-wrap: wrap;
 }
 
@@ -349,14 +352,20 @@ function restoreFocus(): void {
 }
 
 .update-secondary-button {
-  color: hsl(var(--muted-foreground));
+  color: hsl(var(--text-secondary, var(--muted-foreground)));
   background: transparent;
+  border-color: transparent;
+}
+
+.update-secondary-button:hover:not(:disabled) {
+  color: hsl(var(--foreground));
+  background: hsl(var(--fill-subtle));
   border-color: transparent;
 }
 
 .update-footer-primary .button {
   min-height: 30px;
-  padding-inline: 12px;
+  padding-inline: 14px;
 }
 
 @media (max-width: 620px) {

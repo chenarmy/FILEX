@@ -154,23 +154,46 @@ async function startRule(rule: TunnelRule): Promise<void> {
 </template>
 
 <style scoped>
-.tunnels-pane { display: flex; flex: 1; flex-direction: column; min-height: 0; color: hsl(var(--foreground)); font-size: 1rem; }
-.tunnels-heading { display: flex; align-items: center; justify-content: space-between; padding: 9px 10px 6px; border-bottom: 1px solid hsl(var(--border)); }
-.tunnels-heading small { color: hsl(var(--muted-foreground)); }
-.active-heading { margin-top: auto; border-top: 1px solid hsl(var(--border)); }
+.tunnels-pane {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  color: hsl(var(--foreground));
+  font-size: 0.8571rem;
+}
+.tunnels-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid hsl(var(--border-subtle));
+}
+.tunnels-heading small { color: hsl(var(--muted-foreground)); font-size: 0.75rem; }
+.active-heading { margin-top: auto; border-top: 1px solid hsl(var(--border-subtle)); }
 .tunnel-rules-list { min-height: 0; max-height: 55%; overflow: auto; }
 .active-list { max-height: 40%; }
-.tunnel-rule { display: flex; align-items: flex-start; justify-content: space-between; gap: 4px; padding: 8px 7px; border-bottom: 1px solid hsl(var(--border) / .65); }
-.tunnel-rule-main { display: flex; min-width: 0; align-items: flex-start; gap: 7px; }
+.tunnel-rule {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid hsl(var(--border-subtle));
+  transition: background var(--duration-micro) var(--ease-arco);
+}
+.tunnel-rule:hover { background: hsl(var(--fill-subtle)); }
+.tunnel-rule-main { display: flex; min-width: 0; align-items: flex-start; gap: 8px; }
 .tunnel-icon { flex: none; margin-top: 2px; color: hsl(var(--muted-foreground)); }
 .tunnel-copy { display: grid; min-width: 0; gap: 3px; }
 .tunnel-copy strong, .tunnel-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tunnel-copy strong { font-size: 0.8571rem; font-weight: 600; }
 .tunnel-copy small { color: hsl(var(--muted-foreground)); font-size: 0.75rem; }
-.tunnel-actions { display: flex; flex: none; }
-.tunnel-empty { margin: 0; padding: 10px; color: hsl(var(--muted-foreground)); font-size: 0.8333rem; }
-.tunnel-error { display: flex; align-items: flex-start; gap: 5px; margin: 5px 8px 0; color: hsl(var(--destructive)); font-size: 0.8333rem; }
+.tunnel-actions { display: flex; flex: none; gap: 2px; }
+.tunnel-empty { margin: 0; padding: 12px; color: hsl(var(--muted-foreground)); font-size: 0.7857rem; }
+.tunnel-error { display: flex; align-items: flex-start; gap: 5px; margin: 6px 10px 0; color: hsl(var(--destructive)); font-size: 0.7857rem; }
 .tunnel-error-text { color: hsl(var(--destructive)) !important; }
-.tunnel-state-dot { flex: none; width: 7px; height: 7px; margin: 4px 3px 0; border-radius: 50%; background: hsl(var(--muted-foreground)); }
+.tunnel-state-dot { flex: none; width: 7px; height: 7px; margin: 5px 3px 0; border-radius: 50%; background: hsl(var(--muted-foreground)); }
 .tunnel-state-dot.listening { background: hsl(var(--success)); }
 .tunnel-state-dot.starting { background: hsl(var(--warning)); }
 .tunnel-state-dot.stopping { background: hsl(var(--warning)); }

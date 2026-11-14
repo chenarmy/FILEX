@@ -174,6 +174,8 @@ The toolbar prioritizes reconnect/disconnect, new split, Files, Monitor and Tunn
 
 The primary surface is the bottom dual-pane browser inside the center column: a local pane and a remote pane side by side, with a Files | Commands sub-tab strip, editable path field, refresh, upload/download, new folder, follow-terminal chip and a transfer footer that shows the running task count and opens the task drawer. Each pane has a compact directory-only tree beside its file table. Tree nodes lazy-load, omit files and symbolic links, and navigate on a single click. The horizontal separator has a 160 px minimum for the browser but no fixed 480 px ceiling; its effective maximum follows the available center-column height so the browser may occupy the workspace without overflowing the shell.
 
+File-entry visuals inherit the compact Lucide-style outline grammar, adapt it with a restrained category palette, and replace the former one-icon-for-every-file treatment. Folders use amber; source and script files use sky; structured data uses yellow; settings use violet; archives use orange; images use rose; audio/video use pink and purple; documents use blue; spreadsheets use emerald; databases use cyan; keys and certificates use amber; executables use teal; unknown files remain muted. Shape, filename and the Type column carry the meaning when color is unavailable. Expanded tree folders change shape as well as color, and symlinks always use a dedicated link shape. The mapping is shared by the bottom browser and legacy inspector in dark and light themes.
+
 List columns: name, size, type, modified, permissions and owner (numeric uid/gid when the server provides it); responsive collapse begins with owner and permissions. Symlinks are visually distinct and display targets in details. Rows expose a permission-mode action that opens an explicit octal review dialog before any chmod mutation.
 
 Header: channel state, editable path, up, refresh, new folder and upload. Enter navigates to a validated directory; Escape restores the current path. A failed navigation keeps the last successful listing and shows the structured error inline.
@@ -265,69 +267,96 @@ Required states:
 
 ## 5. Visual tokens
 
+The visual system adapts Arco Design's clean neutral fill ladder, hairline dividers, vivid Arco Blue primary accent (`#165DFF` light / `#3C7EFF` dark), semantic status colors and layered floating elevation onto FILEX's compact multi-pane workbench.
+
 ### Dark theme
 
 ```css
---background: 240 4% 9%;
---foreground: 0 0% 91%;
---card: 0 0% 12%;
---card-foreground: 0 0% 91%;
---popover: 240 3% 14%;
---popover-foreground: 0 0% 91%;
---primary: 220 84% 56%;
+--background: 240 6% 10%;
+--foreground: 240 8% 93%;
+--text-secondary: 218 11% 81%;
+--card: 240 2% 14%;
+--card-foreground: 240 8% 93%;
+--popover: 240 3% 17%;
+--popover-foreground: 240 8% 93%;
+--surface-inset: 240 5% 12%;
+--fill-subtle: 240 4% 15%;
+--primary: 220 100% 62%;
+--primary-hover: 220 100% 67%;
+--primary-active: 221 100% 58%;
 --primary-foreground: 0 0% 100%;
---secondary: 240 4% 16%;
---secondary-foreground: 0 0% 91%;
---muted: 240 4% 15%;
---muted-foreground: 240 4% 58%;
---accent: 240 4% 20%;
---accent-foreground: 0 0% 96%;
---destructive: 0 72% 55%;
---destructive-foreground: 0 0% 98%;
---success: 135 59% 49%;
---border: 240 4% 22%;
---input: 240 4% 25%;
---ring: 220 84% 56%;
---radius: 0.5rem;
---terminal-bg: 0 0% 5%;
+--secondary: 240 2% 18%;
+--secondary-foreground: 240 8% 93%;
+--muted: 240 3% 17%;
+--muted-foreground: 213 10% 57%;
+--accent: 240 3% 22%;
+--accent-foreground: 220 23% 98%;
+--destructive: 2 90% 67%;
+--destructive-hover: 2 92% 72%;
+--destructive-foreground: 0 0% 100%;
+--danger: var(--destructive);
+--warning: 31 100% 59%;
+--success: 132 67% 46%;
+--border: 240 3% 22%;
+--border-subtle: 240 4% 18%;
+--input: 240 3% 26%;
+--input-hover: 240 3% 34%;
+--ring: 220 100% 62%;
+--radius: 0.25rem;
+--radius-card: 0.375rem;
+--radius-popover: 0.375rem;
+--radius-dialog: 0.5rem;
+--terminal-bg: 0 0% 6%;
 ```
 
 ### Light theme
 
 ```css
---background: 240 11% 96%;
---foreground: 240 6% 12%;
+--background: 220 23% 97%;
+--foreground: 220 17% 14%;
+--text-secondary: 216 15% 36%;
 --card: 0 0% 100%;
---card-foreground: 240 6% 12%;
+--card-foreground: 220 17% 14%;
 --popover: 0 0% 100%;
---primary: 220 83% 52%;
+--popover-foreground: 220 17% 14%;
+--surface-inset: 220 14% 96%;
+--fill-subtle: 220 23% 98%;
+--primary: 222 100% 54%;
+--primary-hover: 220 100% 63%;
+--primary-active: 224 87% 44%;
 --primary-foreground: 0 0% 100%;
---secondary: 240 16% 93%;
---secondary-foreground: 240 6% 16%;
---muted: 240 16% 94%;
---muted-foreground: 240 4% 42%;
---accent: 240 16% 90%;
---accent-foreground: 240 6% 14%;
---destructive: 0 72% 48%;
---success: 141 60% 38%;
---border: 240 12% 87%;
---input: 240 12% 83%;
---ring: 220 83% 52%;
+--secondary: 220 14% 96%;
+--secondary-foreground: 220 17% 14%;
+--muted: 220 14% 96%;
+--muted-foreground: 213 10% 57%;
+--accent: 225 14% 91%;
+--accent-foreground: 220 17% 14%;
+--destructive: 0 90% 60%;
+--destructive-hover: 0 93% 68%;
+--destructive-foreground: 0 0% 100%;
+--danger: var(--destructive);
+--warning: 29 100% 50%;
+--success: 134 100% 35%;
+--border: 225 14% 90%;
+--border-subtle: 220 14% 94%;
+--input: 218 11% 81%;
+--input-hover: 216 12% 72%;
+--ring: 222 100% 54%;
 ```
 
 Status roles:
 
-- Primary blue: focus, selection, main action.
-- Emerald: connected, completed, healthy.
-- Amber: connecting, stale, changed, warning, production attention.
-- Rose: failed, rejected, destructive, host-key mismatch.
-- Violet/sky/teal: category distinction only.
+- Arco primary blue (`--primary`): focus rings, active tab indicators, primary CTAs, toggles.
+- Arco green (`--success`): connected, completed, verified signature badges, healthy metrics.
+- Arco amber (`--warning`): connecting, stale, changed, warning notices, production attention.
+- Arco red (`--destructive` / `--danger`): failed, rejected, destructive actions, host-key mismatch.
+- Extended neutral/category accents: file-entry icon semantics only.
 
 ## 6. Typography and terminal appearance
 
-- UI default: bundled HarmonyOS Sans SC Regular/Bold with platform CJK fallbacks; default 14 px, adjustable 11–20 px.
+- UI default: bundled HarmonyOS Sans SC Regular/Bold followed by system UI/CJK fallbacks (`Inter`, `PingFang SC`, `Microsoft YaHei UI`, `Noto Sans CJK SC`, sans-serif); default 14 px root font size, adjustable 11–20 px.
 - The font license is distributed with the application and the bundled fonts are preloaded before the shell.
-- UI sizes: primarily 10, 11 and 12 px; user scale 11-20 px.
+- Unified optical hierarchy scaled from root `rem`: micro/badge `0.75rem`, caption/metadata `0.7857rem`, dense control/body `0.8571rem`, pane/card section heading `0.9286rem`, modal title `1.0714rem`. Numeric metrics, ports, percentages and timestamps enable `tabular-nums`.
 - Terminal default: a bundled or system monospace stack chosen for glyph coverage and performance.
 - UI and terminal font settings are separate.
 - Terminal palette is separate from the application theme. The default adaptive palette follows the resolved application appearance, while explicit dark and light palettes can be chosen independently.
@@ -337,13 +366,15 @@ Status roles:
 
 ## 7. Common component behavior
 
-- Toolbar button: 26 px high, 11 px label, 12-16 px icon.
-- Icon button: 24 x 24 px with tooltip and accessible label.
-- Inputs: 3 px radius, 1 px border, primary focus ring.
-- Pane header: 28-32 px, muted background, 11 px title.
-- Dialog: black/60 overlay, subtle blur, bordered card, 44 px header, scrollable body, 48 px footer.
-- Toast: top right; error is assertive, other status polite.
+- Buttons: `4 px` radius (`--radius`), crisp `140 ms` `--ease-arco` transitions across hover/active states; primary (`--primary`), default/secondary (`--card`/`--secondary` with hairline border), subtle/ghost (`transparent` fill in menus and headers), and outline danger (`--destructive`) variants. Header bar actions remain single-line (`white-space: nowrap`) at all UI font sizes up to 20 px.
+- Icon buttons: `26 × 26 px` (`24 × 24 px` in compact pane toolbars) rounded squares with unified Lucide outline icons (`stroke-width: 1.75`), accessible label and hover fill.
+- Inputs, selects and textareas: `4 px` radius, matched height/baseline inside `.form-grid` (`input` and `select` share exact vertical geometry), `--input` hairline border transitioning to `--primary` with a subtle focus halo on focus.
+- Switches, segmented controls, checkboxes and radios: pill tracks with elevated active thumb/segment and `--primary` accent state.
+- Pane header: `30–34 px` structured header with muted surface fill, `1 px` bottom border and semibold title.
+- Dialogs, popovers, context menus and command palette: layered floating surface (`--popover` / `--card`), `6–8 px` radius (`--radius-popover` / `--radius-dialog`), translucent backdrop blur for modals, soft directional shadow, icon + title header with close control, scrollable body and clearly separated secondary/primary footer.
+- Toast: top right floating pill/card with semantic left/icon accent and directional shadow; error is assertive, other status polite.
 - Loading remains in the initiating control or pane. Full-screen blocking is reserved for unrecoverable bootstrap/migration states.
+- Motion: gentle scale/opacity modal & popover entrances use `--duration-micro` / `--duration-modal` and collapse immediately under `[data-reduce-motion="true"]` or `prefers-reduced-motion: reduce`.
 
 ## 8. Interaction and keyboard model
 

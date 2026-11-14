@@ -112,7 +112,7 @@ function normalizeSettings(input: Partial<SafeSettings>): SafeSettings {
     taskDrawerHeight: clampNumber(input.taskDrawerHeight, 96, 360, defaultSafeSettings.taskDrawerHeight),
     hostPanelOpen: input.hostPanelOpen !== false,
     fileBrowserOpen: input.fileBrowserOpen !== false,
-    followTerminalCwd: input.followTerminalCwd === true,
+    followTerminalCwd: input.followTerminalCwd !== false,
     focusMode: input.focusMode === true,
     detailsPaneOpen: input.detailsPaneOpen === true,
     hostPanelWidth: clampNumber(input.hostPanelWidth, 200, 420, defaultSafeSettings.hostPanelWidth),

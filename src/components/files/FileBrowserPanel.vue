@@ -9,9 +9,7 @@ import {
   ChevronUp,
   Copy,
   Edit3,
-  File,
   FileCode2,
-  Folder,
   FolderInput,
   FolderPlus,
   HelpCircle,
@@ -49,6 +47,7 @@ import PermissionDialog from '@/components/dialogs/PermissionDialog.vue';
 import EditorPanel from '@/components/editor/EditorPanel.vue';
 import FileContextMenu from '@/components/files/FileContextMenu.vue';
 import DirectoryTree from '@/components/files/DirectoryTree.vue';
+import FileEntryIcon from '@/components/files/FileEntryIcon.vue';
 import { ownerLabel } from '@/domain/permissions';
 import { directoryAncestors, directoryRoot } from '@/domain/directoryNavigation';
 import {
@@ -1540,7 +1539,7 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
                     @keydown.enter.prevent="openPaneEntry(item, pane.id)"
                     @keydown.shift.f10.prevent="openContextMenuFromKeyboard(item, pane.id, $event)"
                   >
-                    <span class="file-cell file-cell-name"><Folder v-if="item.isDirectory" :size="13" /><File v-else :size="13" /><span class="mono" :title="item.name">{{ item.name }}</span></span>
+                    <span class="file-cell file-cell-name"><FileEntryIcon :name="item.name" :is-directory="item.isDirectory" :is-symlink="item.isSymlink" :size="14" /><span class="mono" :title="item.name">{{ item.name }}</span></span>
                     <span class="file-cell mono">{{ formatSize(item.size) }}</span>
                     <span class="file-cell">{{ entryTypeLabel(item) }}</span>
                     <span class="file-cell mono">{{ formatTimestamp(item.modifiedAtMs) }}</span>
@@ -1564,7 +1563,7 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
                   @keydown.enter.prevent="openPaneEntry(entry, pane.id)"
                   @keydown.shift.f10.prevent="openContextMenuFromKeyboard(entry, pane.id, $event)"
                 >
-                  <span class="file-cell file-cell-name"><Folder v-if="entry.isDirectory" :size="13" /><File v-else :size="13" /><span class="mono" :title="entry.name">{{ entry.name }}</span></span>
+                  <span class="file-cell file-cell-name"><FileEntryIcon :name="entry.name" :is-directory="entry.isDirectory" :is-symlink="entry.isSymlink" :size="14" /><span class="mono" :title="entry.name">{{ entry.name }}</span></span>
                   <span class="file-cell mono">{{ formatSize(entry.size) }}</span>
                   <span class="file-cell">{{ entryTypeLabel(entry) }}</span>
                   <span class="file-cell mono">{{ formatTimestamp(entry.modifiedAtMs) }}</span>
@@ -1671,7 +1670,10 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
 
     <div v-if="createDirectoryOpen" class="dialog-layer" @mousedown.self="createDirectoryOpen = false" @keydown.esc="createDirectoryOpen = false">
       <form class="dialog remote-directory-dialog" role="dialog" aria-modal="true" @submit.prevent="submitCreateDirectory">
-        <header class="dialog-header"><strong>{{ t(directoryTargetPane === 'local' ? 'inspector.createLocalDirectory' : 'inspector.createDirectory') }}</strong></header>
+        <header class="dialog-header">
+          <div><FolderPlus :size="15" /><strong>{{ t(directoryTargetPane === 'local' ? 'inspector.createLocalDirectory' : 'inspector.createDirectory') }}</strong></div>
+          <button type="button" class="icon-button" :aria-label="t('settings.cancel')" @click="createDirectoryOpen = false"><X :size="14" /></button>
+        </header>
         <div class="dialog-content">
           <label class="field">
             {{ t('inspector.directoryName') }}
@@ -1690,7 +1692,10 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
 
     <div v-if="createFileOpen" class="dialog-layer" @mousedown.self="createFileOpen = false" @keydown.esc="createFileOpen = false">
       <form class="dialog remote-directory-dialog" role="dialog" aria-modal="true" @submit.prevent="submitCreateFile">
-        <header class="dialog-header"><strong>{{ t(directoryTargetPane === 'local' ? 'inspector.createLocalFile' : 'inspector.createFile') }}</strong></header>
+        <header class="dialog-header">
+          <div><FileCode2 :size="15" /><strong>{{ t(directoryTargetPane === 'local' ? 'inspector.createLocalFile' : 'inspector.createFile') }}</strong></div>
+          <button type="button" class="icon-button" :aria-label="t('settings.cancel')" @click="createFileOpen = false"><X :size="14" /></button>
+        </header>
         <div class="dialog-content">
           <label class="field">
             {{ t('inspector.fileName') }}
@@ -1709,7 +1714,10 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
 
     <div v-if="renameDialogOpen" class="dialog-layer" @mousedown.self="renameDialogOpen = false" @keydown.esc="renameDialogOpen = false">
       <form class="dialog remote-directory-dialog" role="dialog" aria-modal="true" @submit.prevent="submitRename">
-        <header class="dialog-header"><strong>{{ t(renameTargetPane === 'local' ? 'inspector.renameLocal' : 'inspector.renameRemote') }}</strong></header>
+        <header class="dialog-header">
+          <div><Edit3 :size="15" /><strong>{{ t(renameTargetPane === 'local' ? 'inspector.renameLocal' : 'inspector.renameRemote') }}</strong></div>
+          <button type="button" class="icon-button" :aria-label="t('settings.cancel')" @click="renameDialogOpen = false"><X :size="14" /></button>
+        </header>
         <div class="dialog-content">
           <label class="field">
             {{ t('inspector.newName') }}
@@ -1728,7 +1736,10 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
 
     <div v-if="moveDialogOpen && moveSourceEntry" class="dialog-layer" @mousedown.self="closeMoveDialog" @keydown.esc.stop.prevent="closeMoveDialog">
       <form class="dialog remote-directory-dialog" role="dialog" aria-modal="true" aria-labelledby="browser-move-entry-title" :aria-busy="moveBusy" @submit.prevent="submitMove">
-        <header class="dialog-header"><strong id="browser-move-entry-title">{{ t(moveTargetPane === 'local' ? 'inspector.moveLocal' : 'inspector.moveRemote') }}</strong></header>
+        <header class="dialog-header">
+          <div><FolderInput :size="15" /><strong id="browser-move-entry-title">{{ t(moveTargetPane === 'local' ? 'inspector.moveLocal' : 'inspector.moveRemote') }}</strong></div>
+          <button type="button" class="icon-button" :disabled="moveBusy" :aria-label="t('settings.cancel')" @click="closeMoveDialog"><X :size="14" /></button>
+        </header>
         <div class="dialog-content">
           <dl class="move-target-list">
             <div><dt>{{ t('inspector.moveSource') }}</dt><dd class="mono">{{ moveSourceEntry.path }}</dd></div>
@@ -1752,7 +1763,10 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
 
     <div v-if="copyDialogOpen && copySourceEntry" class="dialog-layer" @mousedown.self="closeCopyDialog" @keydown.esc.stop.prevent="closeCopyDialog">
       <form class="dialog remote-directory-dialog" role="dialog" aria-modal="true" aria-labelledby="browser-copy-entry-title" :aria-busy="copyBusy" @submit.prevent="submitCopy">
-        <header class="dialog-header"><strong id="browser-copy-entry-title">{{ t(copyTargetPane === 'local' ? 'inspector.copyLocal' : 'inspector.copyRemote') }}</strong></header>
+        <header class="dialog-header">
+          <div><Copy :size="15" /><strong id="browser-copy-entry-title">{{ t(copyTargetPane === 'local' ? 'inspector.copyLocal' : 'inspector.copyRemote') }}</strong></div>
+          <button type="button" class="icon-button" :disabled="copyBusy" :aria-label="t('settings.cancel')" @click="closeCopyDialog"><X :size="14" /></button>
+        </header>
         <div class="dialog-content">
           <dl class="move-target-list">
             <div><dt>{{ t('inspector.copySource') }}</dt><dd class="mono">{{ copySourceEntry.path }}</dd></div>

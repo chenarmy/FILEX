@@ -150,7 +150,7 @@ pub struct SafeSettings {
     pub host_panel_open: bool,
     #[serde(default = "default_file_browser_open")]
     pub file_browser_open: bool,
-    #[serde(default)]
+    #[serde(default = "default_follow_terminal_cwd")]
     pub follow_terminal_cwd: bool,
     #[serde(default)]
     pub focus_mode: bool,
@@ -180,6 +180,10 @@ fn default_host_panel_open() -> bool {
 }
 
 fn default_file_browser_open() -> bool {
+    true
+}
+
+fn default_follow_terminal_cwd() -> bool {
     true
 }
 

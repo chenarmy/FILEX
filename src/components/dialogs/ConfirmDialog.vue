@@ -10,7 +10,7 @@ const ui = useUiStore();
   <div class="dialog-layer confirm-layer" @mousedown.self="ui.resolveConfirmation(false)" @keydown.esc="ui.resolveConfirmation(false)">
     <section class="dialog confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
       <header class="dialog-header">
-        <strong id="confirm-title"><AlertTriangle :size="15" />{{ ui.confirmation?.title }}</strong>
+        <div><AlertTriangle :size="15" class="confirm-warning-icon" /><strong id="confirm-title">{{ ui.confirmation?.title }}</strong></div>
         <button type="button" class="icon-button" :aria-label="t('settings.cancel')" @click="ui.resolveConfirmation(false)"><X :size="14" /></button>
       </header>
       <div class="dialog-content"><p id="confirm-message">{{ ui.confirmation?.message }}</p></div>
@@ -23,5 +23,18 @@ const ui = useUiStore();
 </template>
 
 <style scoped>
-#confirm-message { max-height: min(50vh, 420px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.confirm-warning-icon {
+  color: hsl(var(--warning));
+}
+
+#confirm-message {
+  max-height: min(50vh, 420px);
+  margin: 0;
+  overflow: auto;
+  color: hsl(var(--text-secondary, var(--foreground)));
+  font-size: 0.8571rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 </style>

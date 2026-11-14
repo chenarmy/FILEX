@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { ShieldCheck } from 'lucide-vue-next';
+import { ShieldCheck, X } from 'lucide-vue-next';
 import { t } from '@/i18n';
 import {
   formatOctalMode,
@@ -109,7 +109,8 @@ const scopeOptions: RemotePermissionScope[] = ['all', 'files', 'directories'];
       @submit.prevent="submit"
     >
       <header class="dialog-header">
-        <div><ShieldCheck :size="14" /><strong id="permission-dialog-title">{{ t('permissions.title') }}</strong></div>
+        <div><ShieldCheck :size="15" /><strong id="permission-dialog-title">{{ t('permissions.title') }}</strong></div>
+        <button type="button" class="icon-button" :disabled="busy" :aria-label="t('settings.close')" @click="emit('close')"><X :size="14" /></button>
       </header>
       <div class="dialog-body">
         <dl class="move-target-list">

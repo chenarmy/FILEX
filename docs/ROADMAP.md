@@ -213,9 +213,10 @@ Scope (implemented):
 - Floating command input bar with bounded in-memory history (never persisted or logged).
 - Terminal interaction hardening: Alt double-tap history access; per-entry insert/execute/copy/delete; selection and right-click menus for copy, copy-and-input, in-terminal search and local clear; accessible keyboard dismissal and clipboard feedback.
 - Full-screen TTY layout hardening: reject proportional terminal fonts at render time, retry after browser fonts settle, and synchronize the fitted xterm geometry to the PTY after pane, font and session changes.
-- OSC 7 terminal working-directory tracking with a follow-terminal option in the file browser.
+- OSC 7 terminal working-directory tracking with a follow-terminal option in the file browser. New and legacy settings without an explicit preference default to selected; an explicit user opt-out remains preserved.
 - Terminal focus hardening with an explicit active/inactive input status, persistent block/outline cursor states and click-to-focus behavior.
 - Directory-only lazy trees for local and remote navigation, single-click folder activation, canonical listing paths and editable Enter/Escape path fields. Simple POSIX `cd` input provides a bounded fallback to OSC 7 and is verified by the SFTP listing before the visible path changes.
+- Shared, theme-aware file-entry iconography for the bottom browser and legacy inspector: folder state and symlinks have distinct shapes, while common code, data, configuration, archive, media, document, spreadsheet, database, key and executable types use a restrained category palette without relying on color alone.
 - Remote permission mode editing (chmod) with explicit octal review; numeric uid/gid ownership columns.
 - The file browser can be resized from 160 px up to the available center-column height; the former fixed 480 px ceiling is removed.
 - Monitor extension: load averages 1/5/15 and a bounded multi-mount disk list; network rate history chart in the host panel.

@@ -8,6 +8,7 @@ import {
   Palette,
   RefreshCw,
   Server,
+  Settings,
   ShieldCheck,
   TerminalSquare,
   X,
@@ -516,7 +517,7 @@ onMounted(async () => {
   <div class="dialog-layer" @mousedown.self="close" @keydown.esc="close">
     <section class="dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <header class="dialog-header">
-        <strong id="settings-title">{{ t('settings.title') }}</strong>
+        <div><Settings :size="15" /><strong id="settings-title">{{ t('settings.title') }}</strong></div>
         <button type="button" class="icon-button" aria-label="Close" :disabled="saving || updateInstallActive" @click="close"><X :size="14" /></button>
       </header>
       <div class="settings-body">
@@ -582,7 +583,7 @@ onMounted(async () => {
             <div class="setting-row"><div><strong>{{ t('settings.automaticReconnect') }}</strong><small>{{ t('settings.automaticReconnectHelp') }}</small></div><select v-model.number="draft.reconnectAttempts"><option :value="3">{{ t('settings.attemptsValue', { count: 3 }) }}</option><option :value="5">{{ t('settings.attemptsValue', { count: 5 }) }}</option><option :value="0">{{ t('settings.off') }}</option></select></div>
             <div class="setting-row"><div><strong>{{ t('settings.monitorInterval') }}</strong><small>{{ t('settings.monitorIntervalHelp') }}</small></div><select v-model.number="draft.monitorIntervalSeconds"><option :value="15">{{ t('settings.secondsValue', { n: 15 }) }}</option><option :value="30">{{ t('settings.secondsValue', { n: 30 }) }}</option><option :value="60">{{ t('settings.secondsValue', { n: 60 }) }}</option></select></div>
             <div class="setting-row"><div><strong>{{ t('settings.textEditor') }}</strong><small>{{ t('settings.textEditorHelp') }}</small></div><select v-model="draft.textEditorPreference" :aria-label="t('settings.textEditor')"><option value="internal">{{ t('fileMenu.internalEditor') }}</option><option value="external">{{ t('fileMenu.externalEditor') }}</option></select></div>
-            <div class="setting-row"><div><strong>{{ t('settings.externalEditorTool') }}</strong><small class="mono">{{ draft.externalEditorPath || t('settings.externalEditorNotSet') }}</small></div><button type="button" class="button" @click="chooseExternalEditor"><FolderOpen :size="12" />{{ t('settings.chooseExternalEditor') }}</button></div>
+            <div class="setting-row"><div><strong>{{ t('settings.externalEditorTool') }}</strong><small class="mono">{{ draft.externalEditorPath || t('settings.externalEditorNotSet') }}</small></div><button type="button" class="button" @click="chooseExternalEditor"><FolderOpen :size="13" />{{ t('settings.chooseExternalEditor') }}</button></div>
           </section>
 
           <section v-else-if="activeSection === 'security'">
@@ -592,8 +593,8 @@ onMounted(async () => {
             <div class="setting-row"><div><strong>{{ t('settings.trustedHosts') }}</strong><small>{{ t('settings.trustedHostsHelp') }}</small></div><span class="mono">{{ trustRecords.length }}</span></div>
             <div class="trust-ledger-toolbar">
               <label class="trust-ledger-search"><span class="sr-only">{{ t('settings.trustSearch') }}</span><input v-model="trustSearch" type="search" :placeholder="t('settings.trustSearch')"></label>
-              <button type="button" class="button" :disabled="trustImportBusy || trustLoading" @click="chooseKnownHostsFile"><FolderOpen :size="12" />{{ t('settings.importKnownHosts') }}</button>
-              <button type="button" class="button" :disabled="trustLoading || trustImportBusy" @click="refreshTrustLedger"><RefreshCw :size="12" :class="{ spin: trustLoading }" />{{ t('settings.refreshTrust') }}</button>
+              <button type="button" class="button" :disabled="trustImportBusy || trustLoading" @click="chooseKnownHostsFile"><FolderOpen :size="13" />{{ t('settings.importKnownHosts') }}</button>
+              <button type="button" class="button" :disabled="trustLoading || trustImportBusy" @click="refreshTrustLedger"><RefreshCw :size="13" :class="{ spin: trustLoading }" />{{ t('settings.refreshTrust') }}</button>
             </div>
             <p v-if="trustImportError" class="trust-ledger-error" role="alert">{{ t(trustImportError as Parameters<typeof t>[0]) }}</p>
             <p v-if="trustImportNotice" class="trust-import-notice" role="status">{{ trustImportNotice }}</p>

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-14
+
+### Added
+
+- Shared theme-aware file-entry iconography across the bottom file browser, directory tree and legacy inspector, distinguishing folders, symlinks, code, structured data, configuration, archives, media, documents, spreadsheets, databases, keys and executables while keeping color secondary to icon shape and labels.
+
+### Changed
+
+- Unified the workbench UI around the Arco Design dark and light visual system, refreshing buttons, icons, tabs, tables, forms, popovers, context menus, toasts and modal dialogs while retaining compact terminal-workbench proportions and `HarmonyOS Sans SC` typography priority.
+- Standardized dialog header icons, window/tab close buttons, light-theme hover fills and monitor tab resets, and removed entry `opacity: 0` fade bleed-through on menus/toasts and `transform` drift on modal open animations.
+- Follow-terminal directory tracking (`followTerminalCwd`) now defaults to enabled for new installations and legacy settings that never recorded a preference, while keeping explicit opt-outs unchanged.
+
 ## [0.1.3] - 2026-11-13
 
 ### Added

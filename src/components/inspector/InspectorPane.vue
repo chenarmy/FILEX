@@ -11,8 +11,6 @@ import {
   CircleStop,
   Copy,
   Edit3,
-  File,
-  Folder,
   FolderInput,
   FolderPlus,
   FolderOpen,
@@ -43,6 +41,7 @@ import { useSyncPreviewStore } from '@/stores/syncPreview';
 import { useTransfersStore } from '@/stores/transfers';
 import { isTauriRuntime } from '@/api/common';
 import { inspectLocalEntry } from '@/api/domain/localFilesApi';
+import FileEntryIcon from '@/components/files/FileEntryIcon.vue';
 import type { AppError, AuthenticationMethod, ConnectionProfile, CreateTransferInput, DirectorySyncChangeKind, DirectorySyncEntryKind, InspectorTab, LocalFileEntry, ProcessEntry, RemoteFileEntry, UpdateConnectionProfileInput } from '@/types/contracts';
 
 const connections = useConnectionsStore();
@@ -1059,7 +1058,7 @@ defineExpose({ focusInspector });
             <template v-else>
               <p v-if="pane.truncated" class="dialog-note preview-truncated">{{ t('inspector.directoryTruncated') }}</p>
               <button v-for="entry in pane.entries" :key="entry.path" type="button" class="file-row" :class="{ selected: entry.path === pane.selectedPath }" :draggable="pane.id === 'remote' && !entry.isSymlink" @dragstart="beginRemoteFileDrag(entry, pane.id, $event)" @click="selectPaneEntry(entry, pane.id)" @dblclick="openPaneEntry(entry, pane.id)" @keydown.enter.prevent="openPaneEntry(entry, pane.id)">
-                <Folder v-if="entry.isDirectory" :size="13" /><File v-else :size="13" />
+                <FileEntryIcon :name="entry.name" :is-directory="entry.isDirectory" :is-symlink="entry.isSymlink" :size="14" />
                 <span>{{ entry.name }}</span><small>{{ formatSize(entry.size) }}</small>
                 <small class="file-permissions" :title="permissionModeTitle(entry.permissionsMode)">{{ t('inspector.permissionModeShort', { mode: formatPermissionMode(entry.permissionsMode) }) }}</small>
               </button>
@@ -1139,7 +1138,10 @@ defineExpose({ focusInspector });
 
     <div v-if="createDirectoryOpen" class="dialog-layer" @mousedown.self="createDirectoryOpen = false" @keydown.esc="createDirectoryOpen = false">
       <form class="dialog remote-directory-dialog" role="dialog" aria-modal="true" @submit.prevent="submitCreateDirectory">
-        <header class="dialog-header"><strong>{{ t(directoryTargetPane === 'local' ? 'inspector.createLocalDirectory' : 'inspector.createDirectory') }}</strong></header>
+        <header class="dialog-header">
+          <div><FolderPlus :size="15" /><strong>{{ t(directoryTargetPane === 'local' ? 'inspector.createLocalDirectory' : 'inspector.createDirectory') }}</strong></div>
+          <button type="button" class="icon-button" :aria-label="t('settings.cancel')" @click="createDirectoryOpen = false"><X :size="14" /></button>
+        </header>
         <div class="dialog-content">
           <label class="field">
             {{ t('inspector.directoryName') }}
@@ -1158,7 +1160,10 @@ defineExpose({ focusInspector });
 
     <div v-if="renameDialogOpen" class="dialog-layer" @mousedown.self="renameDialogOpen = false" @keydown.esc="renameDialogOpen = false">
       <form class="dialog remote-directory-dialog" role="dialog" aria-modal="true" @submit.prevent="submitRename">
-        <header class="dialog-header"><strong>{{ t(renameTargetPane === 'local' ? 'inspector.renameLocal' : 'inspector.renameRemote') }}</strong></header>
+        <header class="dialog-header">
+          <div><Edit3 :size="15" /><strong>{{ t(renameTargetPane === 'local' ? 'inspector.renameLocal' : 'inspector.renameRemote') }}</strong></div>
+          <button type="button" class="icon-button" :aria-label="t('settings.cancel')" @click="renameDialogOpen = false"><X :size="14" /></button>
+        </header>
         <div class="dialog-content">
           <label class="field">
             {{ t('inspector.newName') }}
@@ -1177,7 +1182,10 @@ defineExpose({ focusInspector });
 
     <div v-if="moveDialogOpen && moveSourceEntry" class="dialog-layer" @mousedown.self="closeMoveDialog" @keydown.esc.stop.prevent="closeMoveDialog">
       <form class="dialog remote-directory-dialog" role="dialog" aria-modal="true" aria-labelledby="move-entry-title" :aria-busy="moveBusy" @submit.prevent="submitMove">
-        <header class="dialog-header"><strong id="move-entry-title">{{ t(moveTargetPane === 'local' ? 'inspector.moveLocal' : 'inspector.moveRemote') }}</strong></header>
+        <header class="dialog-header">
+          <div><FolderInput :size="15" /><strong id="move-entry-title">{{ t(moveTargetPane === 'local' ? 'inspector.moveLocal' : 'inspector.moveRemote') }}</strong></div>
+          <button type="button" class="icon-button" :disabled="moveBusy" :aria-label="t('settings.cancel')" @click="closeMoveDialog"><X :size="14" /></button>
+        </header>
         <div class="dialog-content">
           <dl class="move-target-list">
             <div><dt>{{ t('inspector.moveSource') }}</dt><dd class="mono">{{ moveSourceEntry.path }}</dd></div>
@@ -1201,7 +1209,10 @@ defineExpose({ focusInspector });
 
     <div v-if="copyDialogOpen && copySourceEntry" class="dialog-layer" @mousedown.self="closeCopyDialog" @keydown.esc.stop.prevent="closeCopyDialog">
       <form class="dialog remote-directory-dialog" role="dialog" aria-modal="true" aria-labelledby="copy-entry-title" :aria-busy="copyBusy" @submit.prevent="submitCopy">
-        <header class="dialog-header"><strong id="copy-entry-title">{{ t(copyTargetPane === 'local' ? 'inspector.copyLocal' : 'inspector.copyRemote') }}</strong></header>
+        <header class="dialog-header">
+          <div><Copy :size="15" /><strong id="copy-entry-title">{{ t(copyTargetPane === 'local' ? 'inspector.copyLocal' : 'inspector.copyRemote') }}</strong></div>
+          <button type="button" class="icon-button" :disabled="copyBusy" :aria-label="t('settings.cancel')" @click="closeCopyDialog"><X :size="14" /></button>
+        </header>
         <div class="dialog-content">
           <dl class="move-target-list">
             <div><dt>{{ t('inspector.copySource') }}</dt><dd class="mono">{{ copySourceEntry.path }}</dd></div>

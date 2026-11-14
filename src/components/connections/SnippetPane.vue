@@ -156,30 +156,117 @@ async function sendToTerminal(): Promise<void> {
 </template>
 
 <style scoped>
-.snippet-pane { display: flex; flex-direction: column; min-height: 0; height: 100%; color: hsl(var(--foreground)); font-size: 1rem; }
-.snippet-heading { display: flex; align-items: flex-start; justify-content: space-between; padding: 10px 10px 8px; border-bottom: 1px solid hsl(var(--border)); }
-.snippet-heading div { display: grid; gap: 4px; }
-.snippet-heading small, .snippet-preview small { color: hsl(var(--muted-foreground)); }
-.snippet-list { max-height: 180px; overflow: auto; border-bottom: 1px solid hsl(var(--border)); }
-.snippet-group h3 { margin: 8px 10px 2px; color: hsl(var(--muted-foreground)); font-size: 0.8333rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
-.snippet-item { display: grid; gap: 4px; width: 100%; padding: 8px 10px; text-align: left; color: inherit; border: 0; border-bottom: 1px solid hsl(var(--border)); background: transparent; cursor: pointer; }
-.snippet-item:hover, .snippet-item.selected { background: hsl(var(--accent)); }
-.snippet-item code { overflow: hidden; color: hsl(var(--muted-foreground)); font-size: 0.8333rem; text-overflow: ellipsis; white-space: nowrap; }
-.snippet-empty { margin: 0; padding: 12px; color: hsl(var(--muted-foreground)); }
-.snippet-editor { display: grid; gap: 9px; padding: 10px; overflow: auto; }
-.snippet-editor > label, .snippet-parameters label { display: grid; gap: 5px; color: hsl(var(--muted-foreground)); }
-.snippet-editor input, .snippet-editor textarea { width: 100%; min-width: 0; padding: 6px 7px; color: hsl(var(--foreground)); border: 1px solid hsl(var(--input)); border-radius: 4px; background: hsl(var(--card)); font: inherit; }
+.snippet-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  color: hsl(var(--foreground));
+  font-size: 0.8571rem;
+}
+.snippet-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid hsl(var(--border-subtle));
+}
+.snippet-heading div { display: grid; gap: 3px; }
+.snippet-heading small, .snippet-preview small { color: hsl(var(--muted-foreground)); font-size: 0.75rem; }
+.snippet-list {
+  max-height: 180px;
+  overflow: auto;
+  border-bottom: 1px solid hsl(var(--border-subtle));
+}
+.snippet-group h3 {
+  margin: 8px 12px 4px;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.7143rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.snippet-item {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 8px 12px;
+  text-align: start;
+  color: inherit;
+  border: 0;
+  border-bottom: 1px solid hsl(var(--border-subtle));
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--duration-micro) var(--ease-arco),
+    color var(--duration-micro) var(--ease-arco);
+}
+.snippet-item:hover { background: hsl(var(--fill-subtle)); }
+.snippet-item.selected {
+  color: hsl(var(--primary));
+  background: hsl(var(--primary) / 0.12);
+}
+.snippet-item code {
+  overflow: hidden;
+  color: hsl(var(--muted-foreground));
+  font-family: var(--font-mono);
+  font-size: 0.7857rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.snippet-empty { margin: 0; padding: 14px; color: hsl(var(--muted-foreground)); }
+.snippet-editor { display: grid; gap: 10px; padding: 12px; overflow: auto; }
+.snippet-editor > label, .snippet-parameters label {
+  display: grid;
+  gap: 5px;
+  color: hsl(var(--text-secondary));
+  font-weight: 500;
+}
+.snippet-editor input, .snippet-editor textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 10px;
+  color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-control);
+  background: hsl(var(--surface-inset));
+  font: inherit;
+  transition: border-color var(--duration-micro) var(--ease-arco),
+    background var(--duration-micro) var(--ease-arco),
+    box-shadow var(--duration-micro) var(--ease-arco);
+}
+.snippet-editor input:hover, .snippet-editor textarea:hover { border-color: hsl(var(--input-hover)); }
+.snippet-editor input:focus-visible, .snippet-editor textarea:focus-visible {
+  background: hsl(var(--background));
+  border-color: hsl(var(--primary));
+  outline: 1px solid transparent;
+  box-shadow: 0 0 0 2px hsl(var(--primary) / 0.18);
+}
 .snippet-editor textarea, .snippet-preview pre { font-family: var(--font-mono, monospace); }
 .snippet-editor textarea { resize: vertical; }
-.snippet-parameters { display: grid; gap: 7px; }
+.snippet-parameters { display: grid; gap: 8px; }
 .snippet-preview { display: grid; gap: 5px; }
-.snippet-preview pre { max-height: 100px; margin: 0; padding: 7px; overflow: auto; color: hsl(var(--foreground)); border: 1px solid hsl(var(--border)); border-radius: 4px; background: hsl(var(--background)); white-space: pre-wrap; overflow-wrap: anywhere; }
+.snippet-preview pre {
+  max-height: 100px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border-subtle));
+  border-radius: var(--radius-control);
+  background: hsl(var(--surface-inset));
+  font-size: 0.7857rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .snippet-error { margin: 0; color: hsl(var(--destructive)); }
 .snippet-hint { margin: 0; color: hsl(var(--muted-foreground)); }
-.snippet-editor footer { display: flex; justify-content: flex-end; align-items: center; gap: 6px; }
-.snippet-editor footer .danger { margin-right: auto; }
-.button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; color: hsl(var(--foreground)); border: 1px solid hsl(var(--border)); border-radius: 4px; background: hsl(var(--card)); cursor: pointer; }
-.button.primary { border-color: hsl(var(--primary)); background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
-.button.danger { border-color: hsl(var(--destructive)); color: hsl(var(--destructive)); }
-.button:disabled { opacity: .6; cursor: wait; }
+.snippet-editor footer { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
+.snippet-editor footer .danger { margin-inline-end: auto; }
+.snippet-editor footer .button {
+  min-height: 28px;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 0.7857rem;
+}
+.snippet-editor footer .button:disabled { cursor: wait; }
 </style>

@@ -453,8 +453,8 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 2px;
-  padding-inline: 4px;
+  gap: 3px;
+  padding-inline: 6px;
   overflow-x: auto;
   background: transparent;
   scrollbar-width: thin;
@@ -465,14 +465,22 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
   display: flex;
   flex: 0 1 auto;
   min-width: 88px;
-  max-width: 180px;
-  height: 25px;
+  max-width: 184px;
+  height: 26px;
   align-items: center;
   gap: 5px;
-  padding-inline: 7px 22px;
+  padding-inline: 9px 24px;
   color: hsl(var(--muted-foreground));
-  font-size: 0.75rem;
-  border-radius: 3px 3px 0 0;
+  font-size: 0.7857rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control) var(--radius-control) 0 0;
+  transition: color var(--duration-micro) var(--ease-arco),
+    background var(--duration-micro) var(--ease-arco);
+}
+
+.terminal-tab:hover {
+  color: hsl(var(--foreground));
+  background: hsl(var(--fill-subtle));
 }
 
 .terminal-tab-item {
@@ -480,21 +488,24 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
   display: flex;
   flex: 0 1 auto;
   min-width: 88px;
-  max-width: 180px;
+  max-width: 184px;
   align-items: center;
 }
 
 .terminal-tab.active {
   color: hsl(var(--foreground));
+  font-weight: 500;
   background: hsl(var(--background));
-  border-color: hsl(var(--border));
+  border-color: hsl(var(--border-subtle));
+  border-bottom-color: transparent;
 }
 
 .terminal-tab.active::after {
   position: absolute;
-  inset-inline: 2px;
+  inset-inline: 6px;
   inset-block-end: -1px;
   height: 2px;
+  border-radius: 2px;
   background: hsl(var(--primary));
   content: '';
 }
@@ -517,22 +528,26 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
 
 .terminal-tab-close {
   position: absolute;
-  inset-inline-end: 3px;
+  inset-inline-end: 4px;
   display: inline-flex;
   flex: 0 0 auto;
-  width: 17px;
-  height: 17px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
   align-items: center;
   justify-content: center;
-  border-radius: 2px;
+  border: 0;
+  border-radius: var(--radius-control);
   color: hsl(var(--muted-foreground));
   background: transparent;
+  transition: color var(--duration-micro) var(--ease-arco),
+    background var(--duration-micro) var(--ease-arco);
 }
 
 .terminal-tab-close:hover,
 .terminal-tab-close:focus-visible {
   color: hsl(var(--foreground));
-  background: hsl(var(--accent));
+  background: hsl(var(--fill-subtle));
   outline: none;
 }
 
@@ -546,14 +561,16 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
 
 .terminal-layout-button {
   display: inline-flex;
-  flex: 0 0 22px;
-  width: 22px;
-  height: 22px;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
   align-items: center;
   justify-content: center;
   border: 1px solid transparent;
-  border-radius: 3px;
+  border-radius: var(--radius-control);
   color: hsl(var(--muted-foreground));
+  transition: color var(--duration-micro) var(--ease-arco),
+    background var(--duration-micro) var(--ease-arco);
 }
 
 .terminal-layout-button.active {
@@ -563,7 +580,7 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
 
 .terminal-layout-button:hover:not(:disabled) {
   color: hsl(var(--foreground));
-  background: hsl(var(--accent));
+  background: hsl(var(--fill-subtle));
 }
 
 .terminal-layout-button:disabled {
@@ -579,7 +596,7 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
   align-items: center;
   overflow: hidden;
   color: hsl(var(--warning));
-  font-size: 0.6875rem;
+  font-size: 0.7143rem;
   font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
   white-space: nowrap;

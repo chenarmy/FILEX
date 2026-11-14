@@ -120,7 +120,7 @@ async function openExternally(): Promise<void> {
   <div class="dialog-layer" @mousedown.self="close" @keydown.esc="close">
     <section class="dialog remote-text-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="remote-preview-title">
       <header class="dialog-header">
-        <strong id="remote-preview-title"><FileText :size="15" />{{ t('inspector.previewTitle') }}</strong>
+        <div><FileText :size="15" /><strong id="remote-preview-title">{{ t('inspector.previewTitle') }}</strong></div>
         <button type="button" class="icon-button" :aria-label="t('inspector.previewClose')" @click="close"><X :size="14" /></button>
       </header>
       <div class="remote-preview-meta mono">{{ sftp.previewPath }}</div>
@@ -142,9 +142,9 @@ async function openExternally(): Promise<void> {
         <AlertCircle :size="15" />{{ t(sftp.previewError.messageKey as Parameters<typeof t>[0]) }}
       </div>
       <footer class="dialog-footer">
-        <button v-if="sftp.previewPath && !sftp.previewLoading" type="button" class="button" :disabled="sftp.externalOpening" @click="openExternally"><ExternalLink :size="12" />{{ sftp.externalOpening ? t('inspector.externalOpenLoading') : t('inspector.externalOpen') }}</button>
+        <button v-if="sftp.previewPath && !sftp.previewLoading" type="button" class="button" :disabled="sftp.externalOpening" @click="openExternally"><ExternalLink :size="13" />{{ sftp.externalOpening ? t('inspector.externalOpenLoading') : t('inspector.externalOpen') }}</button>
         <button v-if="sftp.preview && !editing && !sftp.preview.truncated && !sftp.previewError" type="button" class="button" @click="startEditing">{{ t('inspector.editFile') }}</button>
-        <button v-if="sftp.preview && !sftp.previewError" type="button" class="button" :disabled="quickSession" :title="quickSession ? t('quick.savedHint') : undefined" @click="download"><Download :size="12" />{{ t('inspector.downloadFile') }}</button>
+        <button v-if="sftp.preview && !sftp.previewError" type="button" class="button" :disabled="quickSession" :title="quickSession ? t('quick.savedHint') : undefined" @click="download"><Download :size="13" />{{ t('inspector.downloadFile') }}</button>
         <button v-if="editing" type="button" class="button" :disabled="sftp.savingPreview" @click="cancelEditing">{{ t('settings.cancel') }}</button>
         <button v-if="editing" type="button" class="button primary" :disabled="!dirty || !draftWithinLimit || sftp.savingPreview || ['SFTP_PREVIEW_CONFLICT', 'SFTP_SAVE_ROLLBACK_FAILED', 'SFTP_SAVE_TARGET_APPEARED'].includes(sftp.previewError?.code ?? '')" @click="save">{{ sftp.savingPreview ? t('inspector.savingFile') : t('inspector.saveFile') }}</button>
         <button v-if="sftp.previewError?.code === 'SFTP_PREVIEW_CONFLICT'" type="button" class="button" :disabled="sftp.savingPreview" @click="reloadRemote">{{ t('inspector.reloadRemote') }}</button>

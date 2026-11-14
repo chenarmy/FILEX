@@ -91,7 +91,7 @@ pub fn default_safe_settings() -> SafeSettings {
         task_drawer_height: 156,
         host_panel_open: true,
         file_browser_open: true,
-        follow_terminal_cwd: false,
+        follow_terminal_cwd: true,
         focus_mode: false,
         details_pane_open: false,
         host_panel_width: 280,
@@ -1733,8 +1733,30 @@ mod tests {
         assert!(settings.ui_font_family.contains("HarmonyOS Sans SC"));
         assert_eq!(settings.ui_font_size, 14);
         assert_eq!(settings.assistant_pane_width, 360);
+        assert!(settings.follow_terminal_cwd);
         assert_eq!(settings.text_editor_preference, "internal");
         assert!(settings.external_editor_path.is_none());
+    }
+
+    #[test]
+    fn missing_follow_terminal_preference_defaults_on_without_overriding_opt_out() {
+        let mut serialized =
+            serde_json::to_value(default_safe_settings()).expect("settings encode");
+        serialized
+            .as_object_mut()
+            .expect("settings object")
+            .remove("followTerminalCwd");
+        let migrated: SafeSettings =
+            serde_json::from_value(serialized).expect("legacy settings decode");
+        assert!(migrated.follow_terminal_cwd);
+
+        let mut opted_out = default_safe_settings();
+        opted_out.follow_terminal_cwd = false;
+        let round_trip: SafeSettings = serde_json::from_value(
+            serde_json::to_value(opted_out).expect("opt-out settings encode"),
+        )
+        .expect("opt-out settings decode");
+        assert!(!round_trip.follow_terminal_cwd);
     }
 
     #[test]

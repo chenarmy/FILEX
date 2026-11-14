@@ -1,5 +1,63 @@
 # FILEX verification evidence
 
+## 2026-11-14 — v0.1.4 release preparation
+
+- Scope: synchronized workspace manifests and `Cargo.lock` to `0.1.4`, updated `CHANGELOG.md` release notes, and verified all pending pre-release changes (`follow-terminal` default selection, file-entry icon visual hierarchy, and the Arco Design workbench visual system refresh).
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Version sync | `pnpm version:check` | Passed (`0.1.4`) |
+| Release notes | `node scripts/release-notes.mjs v0.1.4` | Passed |
+| ESLint | `pnpm lint` | Passed (0 warnings) |
+| TypeScript | `pnpm typecheck` | Passed |
+| Frontend unit tests | `pnpm test` | Passed, 17 files and 73 tests |
+| Production bundle | `pnpm build` | Passed (existing Vite >500 kB chunk-size warning retained) |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust locked check | `cargo check --workspace --locked` | Passed |
+| Rust workspace tests | `cargo test --workspace --locked` | Passed, 34 tests (`filex-core`: 10, `filex-credentials`: 2, `filex-desktop-lib`: 12, `filex-ssh`: 4, `filex-storage`: 6; `filex-contracts`: 0) |
+| Rust Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
+| Workbench Playwright E2E | `pnpm exec playwright test e2e/workbench.spec.ts` | Passed, 19 tests (28.6s); `e2e/live-ssh.spec.ts` excluded in standalone Chromium |
+| Diff hygiene | `git diff --check` | Passed |
+
+## 2026-11-14 — Arco Design workbench visual system refresh
+
+- Scope: unified Arco Design dark/light tokens (`src/styles/theme.css`), workbench layout/control/tab/table/form/dialog/popover/toast/context-menu styling (`src/styles/workbench.css`), button & header-icon standardization and close-button cleanup across dialogs, settings, terminal tabs/menus, file dialogs, inspector panels, and sidebar panes (`src/components/dialogs/`, `src/components/settings/`, `src/components/terminal/`, `src/components/files/FileBrowserPanel.vue`, `src/components/inspector/InspectorPane.vue`, `src/components/connections/`), and UX token specification updates (`docs/UX_DESIGN.md`).
+- Visual fixes verified during inspection: removed dialog entry `transform` from `arco-dialog-in` to prevent mid-animation bounding-box drift, eliminated `opacity: 0` fade bleed-through on popovers/context menus/toasts, added `border: 0; padding: 0;` to `.terminal-tab-close` / `.editor-tab-close` and `appearance: none;` to `.monitor-details-tabs button`, disambiguated `PermissionDialog` header close (`settings.close`) vs footer cancel `aria-label`, and tuned light-mode `--fill-subtle` contrast (`220 14% 95%`).
+
+| Check | Command | Result |
+| --- | --- | --- |
+| ESLint | `pnpm lint` | Passed (0 warnings) |
+| TypeScript | `pnpm typecheck` | Passed |
+| Version sync | `pnpm version:check` | Passed (`0.1.3`) |
+| Unit test suite | `pnpm test` | Passed, 17 files and 73 tests |
+| Production build | `pnpm build` | Passed (existing Vite >500 kB chunk-size warning retained) |
+| Workbench Playwright E2E | `pnpm exec playwright test e2e/workbench.spec.ts` | Passed, 19 tests (30.4s); `e2e/live-ssh.spec.ts` not run in standalone Chromium (requires live WebView2 CDP on `127.0.0.1:9222`) |
+| Diff hygiene | `git diff --check` | Passed |
+| Screenshot review | `test-results/*.png` after final CSS/UI edit | Inspected `quick-connection-recent-1440.png`, `terminal-context-menu-1440.png`, `file-context-menu-1440.png`, `file-context-permission-1440.png`, `monitor-details-process-1440.png`, `monitor-details-network-light-960-font20.png`, `assistant-settings-light-960-font20.png`, `assistant-panel-light-960-font20.png`, `terminal-theme-picker-light-960.png`, and `update-available-dark-1440.png` |
+
+## 2026-11-14 — file-entry icon visual hierarchy
+
+- Scope: shared file/folder icon classification and theme-aware category color treatment in the bottom local/remote file browser, directory tree and legacy inspector file view.
+- Design boundary: retains the existing dense row geometry and Lucide outline language; categories remain distinguishable by icon shape, adjacent filename and Type text rather than color alone.
+- Automated evidence: `tests/fileVisualKind.test.ts` covers folders, symlinks, compound archives, extensionless configuration files, source/data/media/document/database/key/executable categories and case-insensitive matching.
+- `pnpm typecheck`, `pnpm lint` and `pnpm build` passed. The production build retains the existing large-chunk advisory.
+- `pnpm test` passed 17 files and 73 tests, including the new file-visual classifier cases. The existing Playwright file-menu workflow passed unchanged at 1440 × 900 and 960 × 640.
+- A temporary 15-entry visual fixture was inspected at 1440 × 900 in dark and light themes. Folder, symlink, code, structured data, configuration, archive, image, audio, video, document, spreadsheet, database, key, executable and generic treatments remained legible with the existing 26 px row density; the fixture was removed after capture.
+
+## 2026-11-14 — follow-terminal default selection
+
+Aligned the safe-settings defaults and missing-field migration on both the TypeScript/browser and Rust/SQLite paths so Follow terminal is selected for new installations and legacy settings that never recorded a preference. An explicitly saved `false` remains unchanged.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Targeted settings unit test | `pnpm exec vitest run tests/settings.test.ts` | Passed, 8 tests |
+| Full frontend unit suite | `pnpm test` | Passed, 17 files and 71 tests |
+| TypeScript | `pnpm typecheck` | Passed |
+| Lint | `pnpm lint` | Passed with zero warnings |
+| Production build | `pnpm build` | Passed; existing large-chunk advisory only |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust core tests | `cargo test -p filex-core` | Passed, 10 tests plus doc tests |
+
 ## 2026-11-13 — v0.1.3 directory navigation, terminal focus and update prompting
 
 Added directory-only lazy trees for local and remote file panes, canonical remote listing paths, editable path fields, explicit terminal input focus/cursor states and bounded simple-POSIX-`cd` fallback tracking. Automatic signed-update checks now open the highest in-app modal for every unsuppressed version and best-effort restore/show/focus the desktop window. Close, Escape, outside-click, Cancel and Skip persist only the displayed version; a later version clears the suppression and prompts again.

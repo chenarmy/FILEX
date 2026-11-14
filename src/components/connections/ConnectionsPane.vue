@@ -263,13 +263,60 @@ defineExpose({ focusFilter });
 <style scoped>
 .connections-pane.mode-recent,
 .connections-pane.mode-tunnels,
-.connections-pane.mode-snippets { grid-template-rows: 32px 30px minmax(0, 1fr); }
-.recent-list { min-height: 0; overflow: auto; padding: 5px 0; }
-.recent-row { display: grid; grid-template-columns: 9px minmax(0, 1fr) 14px; align-items: center; gap: 7px; width: calc(100% - 8px); min-height: 48px; margin: 2px 4px; padding: 6px 7px; color: inherit; text-align: left; border: 0; border-radius: 3px; background: transparent; cursor: pointer; }
-.recent-row:hover, .recent-row:focus-visible { background: hsl(var(--accent)); }
-.recent-row:disabled { opacity: .6; cursor: wait; }
-.recent-copy { display: grid; min-width: 0; gap: 2px; }
-.recent-copy strong, .recent-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.recent-copy small { color: hsl(var(--muted-foreground)); font-size: 0.75rem; }
-.connection-quick-icon { justify-self: center; }
+.connections-pane.mode-snippets {
+  grid-template-rows: 32px 30px minmax(0, 1fr);
+}
+.recent-list {
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 4px;
+}
+.recent-row {
+  display: grid;
+  grid-template-columns: 9px minmax(0, 1fr) 14px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 46px;
+  margin: 2px 0;
+  padding: 6px 8px;
+  color: inherit;
+  text-align: start;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--duration-micro) var(--ease-arco);
+}
+.recent-row:hover,
+.recent-row:focus-visible {
+  background: hsl(var(--fill-subtle));
+}
+.recent-row:disabled {
+  opacity: .55;
+  cursor: wait;
+}
+.recent-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.recent-copy strong,
+.recent-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recent-copy strong {
+  font-size: 0.8571rem;
+  font-weight: 600;
+}
+.recent-copy small {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+}
+.connection-quick-icon {
+  justify-self: center;
+  color: hsl(var(--muted-foreground));
+}
 </style>
