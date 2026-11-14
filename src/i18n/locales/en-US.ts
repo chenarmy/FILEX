@@ -120,6 +120,8 @@ export const enUS: Record<MessageKey, string> = {
   'terminal.copied': 'Selection copied',
   'terminal.copyFailed': 'Could not copy to the clipboard.',
   'terminal.fontFallback': 'The selected terminal font is not effectively monospace. FILEX is using the safe monospace stack.',
+  'terminal.connectingHost': 'Connecting to host...',
+  'terminal.connectedHost': 'Connected to host',
   'assistant.title': 'AI assistant',
   'assistant.configure': 'Configure assistant',
   'assistant.providerSetup': 'Configure an OpenAI-compatible provider',

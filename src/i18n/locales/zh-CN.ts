@@ -118,6 +118,8 @@ export const zhCN = {
   'terminal.copied': '已复制选中内容',
   'terminal.copyFailed': '无法复制到剪贴板。',
   'terminal.fontFallback': '所选终端字体不是有效的等宽字体，已使用安全等宽字体。',
+  'terminal.connectingHost': '连接主机...',
+  'terminal.connectedHost': '连接主机成功',
   'assistant.title': 'AI 助手',
   'assistant.configure': '配置助手',
   'assistant.providerSetup': '配置 OpenAI 兼容服务',

@@ -21,8 +21,10 @@ describe('safe settings repository', () => {
 
     localStorage.setItem('filex.safe-settings.v1', JSON.stringify({
       uiFontFamily: 'Example Sans, sans-serif',
+      terminalFontFamily: 'JetBrains Mono, Consolas, monospace',
     }));
     expect(readSafeSettings().uiFontFamily).toBe('Example Sans, sans-serif');
+    expect(readSafeSettings().terminalFontFamily).toBe(defaultSafeSettings.terminalFontFamily);
   });
 
   it('clamps visual settings and ignores unsupported values', () => {

@@ -25,6 +25,9 @@ pub struct SettingsService {
 
 const LEGACY_UI_FONT_FAMILY: &str = "Inter, system-ui, sans-serif";
 pub const DEFAULT_UI_FONT_FAMILY: &str = "\"HarmonyOS Sans SC\", \"HarmonyOS Sans\", \"PingFang SC\", \"Microsoft YaHei UI\", \"Noto Sans CJK SC\", sans-serif";
+const LEGACY_TERMINAL_FONT_FAMILY: &str = "JetBrains Mono, Consolas, monospace";
+pub const DEFAULT_TERMINAL_FONT_FAMILY: &str =
+    "'JetBrains Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace";
 
 impl SettingsService {
     pub fn new(repository: Arc<dyn SettingsRepository>) -> Self {
@@ -38,6 +41,10 @@ impl SettingsService {
         let mut migrated = false;
         if settings.ui_font_family == LEGACY_UI_FONT_FAMILY {
             settings.ui_font_family = DEFAULT_UI_FONT_FAMILY.to_owned();
+            migrated = true;
+        }
+        if settings.terminal_font_family == LEGACY_TERMINAL_FONT_FAMILY {
+            settings.terminal_font_family = DEFAULT_TERMINAL_FONT_FAMILY.to_owned();
             migrated = true;
         }
         match settings.terminal_theme.as_str() {
@@ -70,7 +77,7 @@ pub fn default_safe_settings() -> SafeSettings {
         locale: "zh-CN".to_owned(),
         ui_font_family: DEFAULT_UI_FONT_FAMILY.to_owned(),
         ui_font_size: 14,
-        terminal_font_family: "JetBrains Mono, Consolas, monospace".to_owned(),
+        terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
         terminal_font_size: 13,
         terminal_theme: "match".to_owned(),
         terminal_encoding: "utf-8".to_owned(),

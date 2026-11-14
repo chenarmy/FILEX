@@ -1458,3 +1458,160 @@ test('selects terminal text without auto-opening context menu and populates init
   await expect(menu.getByRole('menuitem', { name: '复制并输入' })).toBeVisible();
   await expect(menu.getByRole('menuitem', { name: '粘贴' })).toBeVisible();
 });
+
+test('renders semantic terminal colors, monospace grid alignment, and transparent selection spans', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.evaluate(() => {
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__?.config.globalProperties.$pinia;
+    const sessions = pinia?._s.get('sessions') as {
+      summaries: Array<Record<string, unknown>>;
+      activeSessionId: string | null;
+      outputBuffers: Record<string, Uint8Array[]>;
+      outputBufferStarts: Record<string, number>;
+      outputRevision: number;
+      isQuickProfile: (id?: string | null) => boolean;
+      resizeSession: () => Promise<void>;
+    } | undefined;
+    const settings = pinia?._s.get('settings') as {
+      value: Record<string, unknown>;
+      apply?: () => void;
+    } | undefined;
+    if (!sessions || !settings) throw new Error('Stores unavailable');
+
+    Object.assign(settings.value, {
+      theme: 'light',
+      terminalTheme: 'filex-light',
+      locale: 'zh-CN',
+      fileBrowserOpen: false,
+      focusMode: false,
+    });
+    settings.apply?.call(settings);
+
+    const sessionId = 'session-color-and-align';
+    sessions.isQuickProfile = () => false;
+    sessions.resizeSession = () => Promise.resolve();
+    sessions.summaries = [{
+      id: sessionId,
+      generation: 1,
+      profileId: 'profile-color-and-align',
+      state: 'connected',
+      host: '123.57.91.172',
+      port: 22,
+      username: 'root',
+      lastError: null,
+    }];
+    sessions.activeSessionId = sessionId;
+
+    const sampleOutput = [
+      '连接主机...\r\n',
+      '连接主机成功\r\n',
+      'Last login: Sat Nov 14 19:19:42 2026 from 27.8.49.120\r\n',
+      '\r\n',
+      'Welcome to Alibaba Cloud Elastic Compute Service !\r\n',
+      '\r\n',
+      '[root@iZ2zeiwvlu7t0gzfwkugs0Z ~]# docker ps\r\n',
+      'CONTAINER ID   IMAGE\r\n',
+      'ea23eaf54d65   keking/kkfileview:v4.1.0\r\n',
+      'b87cfc5ded3b   nocodb/nocodb:0.263.4\r\n',
+    ].join('');
+    sessions.outputBuffers[sessionId] = [new TextEncoder().encode(sampleOutput)];
+    sessions.outputBufferStarts[sessionId] = 0;
+    sessions.outputRevision += 1;
+  });
+
+  const rows = page.locator('.terminal-pane-surface .xterm-rows > div');
+  await expect(rows.nth(2)).toContainText('Last login: Sat Nov 14 19:19:42 2026 from 27.8.49.120');
+  await expect(rows.nth(8)).toContainText('ea23eaf54d65   keking/kkfileview:v4.1.0');
+
+  // Verify semantic colors were applied to Last login row (timestamp, IP address, etc.).
+  const coloredSpanCount = await rows.nth(2).locator('span[style*="color"]').count();
+  expect(coloredSpanCount).toBeGreaterThanOrEqual(3);
+
+  // Verify monospace alignment between row 8 (`keking/kkfileview:v4.1.0`) and row 9 (`nocodb/nocodb:0.263.4`).
+  const alignment = await page.evaluate(() => {
+    const rowEls = document.querySelectorAll('.terminal-pane-surface .xterm-rows > div');
+    const charLeft = (rowEl: Element, index: number): number => {
+      const walker = document.createTreeWalker(rowEl, NodeFilter.SHOW_TEXT);
+      let seen = 0;
+      while (walker.nextNode()) {
+        const text = walker.currentNode.textContent ?? '';
+        if (seen + text.length > index) {
+          const range = document.createRange();
+          const localIndex = index - seen;
+          range.setStart(walker.currentNode, localIndex);
+          range.setEnd(walker.currentNode, localIndex + 1);
+          return range.getBoundingClientRect().left;
+        }
+        seen += text.length;
+      }
+      return -1;
+    };
+    const row8 = rowEls[8];
+    const row9 = rowEls[9];
+    if (!row8 || !row9) return { col15Delta: Number.POSITIVE_INFINITY, col35Delta: Number.POSITIVE_INFINITY };
+    const col15Row8 = charLeft(row8, 15);
+    const col15Row9 = charLeft(row9, 15);
+    const col35Row8 = charLeft(row8, 35);
+    const col35Row9 = charLeft(row9, 35);
+    return {
+      col15Delta: Math.abs(col15Row8 - col15Row9),
+      col35Delta: Math.abs(col35Row8 - col35Row9),
+    };
+  });
+  expect(alignment.col15Delta).toBeLessThan(0.5);
+  expect(alignment.col35Delta).toBeLessThan(0.5);
+
+  // Drag-select `.1.0` at the end of `ea23eaf54d65   keking/kkfileview:v4.1.0` and ensure
+  // no `.xterm-decoration-top` span retains an opaque background covering `:v4`.
+  const targetBox = await page.evaluate(() => {
+    const rowEl = document.querySelectorAll('.terminal-pane-surface .xterm-rows > div')[8];
+    if (!rowEl) return { startLeft: 0, endRight: 0, midY: 0 };
+    const walker = document.createTreeWalker(rowEl, NodeFilter.SHOW_TEXT);
+    let seen = 0;
+    let startLeft = 0;
+    let endRight = 0;
+    let midY = 0;
+    while (walker.nextNode()) {
+      const text = walker.currentNode.textContent ?? '';
+      if (seen <= 35 && seen + text.length > 35) {
+        const r = document.createRange();
+        r.setStart(walker.currentNode, 35 - seen);
+        r.setEnd(walker.currentNode, 35 - seen + 1);
+        const rect = r.getBoundingClientRect();
+        startLeft = rect.left + 1;
+        midY = rect.top + rect.height / 2;
+      }
+      if (seen <= 38 && seen + text.length > 38) {
+        const r = document.createRange();
+        r.setStart(walker.currentNode, 38 - seen);
+        r.setEnd(walker.currentNode, 38 - seen + 1);
+        endRight = r.getBoundingClientRect().right;
+      }
+      seen += text.length;
+    }
+    return { startLeft, endRight, midY };
+  });
+
+  await page.mouse.move(targetBox.startLeft, targetBox.midY);
+  await page.mouse.down();
+  await page.mouse.move(targetBox.endRight, targetBox.midY, { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(80);
+
+  const opaqueDecorationSpans = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('.xterm-rows > div > .xterm-decoration-top'))
+      .filter((span) => {
+        const el = span as HTMLElement;
+        return !el.classList.contains('xterm-cursor') && el.style.backgroundColor !== 'transparent';
+      })
+      .map((span) => span.textContent),
+  );
+  expect(opaqueDecorationSpans).toEqual([]);
+  await expect(rows.nth(8)).toContainText('keking/kkfileview:v4.1.0');
+  await page.screenshot({ path: 'test-results/terminal-color-and-selection-1440.png' });
+});

@@ -1,6 +1,6 @@
 import type { SafeSettings } from '@/types/contracts';
 import { normalizeTerminalTheme } from '@/domain/terminalThemes';
-import { DEFAULT_TERMINAL_FONT_FAMILY } from '@/domain/terminalInteractions';
+import { DEFAULT_TERMINAL_FONT_FAMILY, LEGACY_TERMINAL_FONT_FAMILY } from '@/domain/terminalInteractions';
 import { DEFAULT_KEYBOARD_SHORTCUTS, normalizeKeyboardShortcuts } from '@/utils/keyboardShortcuts';
 
 const storageKey = 'filex.safe-settings.v1';
@@ -77,7 +77,9 @@ function normalizeSettings(input: Partial<SafeSettings>): SafeSettings {
       ? defaultUiFontFamily
       : input.uiFontFamily?.slice(0, 160) || defaultSafeSettings.uiFontFamily,
     uiFontSize: clampNumber(input.uiFontSize, 11, 20, defaultSafeSettings.uiFontSize),
-    terminalFontFamily: input.terminalFontFamily?.slice(0, 160) || defaultSafeSettings.terminalFontFamily,
+    terminalFontFamily: input.terminalFontFamily === LEGACY_TERMINAL_FONT_FAMILY
+      ? DEFAULT_TERMINAL_FONT_FAMILY
+      : input.terminalFontFamily?.slice(0, 160) || defaultSafeSettings.terminalFontFamily,
     terminalFontSize: clampNumber(input.terminalFontSize, 11, 24, defaultSafeSettings.terminalFontSize),
     terminalTheme: normalizeTerminalTheme(input.terminalTheme),
     terminalEncoding: terminalEncodings.includes(input.terminalEncoding as typeof terminalEncodings[number])

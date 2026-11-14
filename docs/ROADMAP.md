@@ -251,6 +251,7 @@ Scope:
 - Curated DevOps diagnostics dialog (`OpsDetailsDialog`): bounded read-only views for Listening Ports, Systemd Services, Disk & Inode Usage, and System/Kernel Logs.
 - Process list right-click context actions (`MonitorDetailsDialog`): right-click row menu for confirmed POSIX signals (`SIGTERM`, `SIGKILL`, `SIGHUP`, `SIGSTOP`, `SIGCONT`), Windows `Stop-Process`, and PID/name copy.
 - Terminal selection & initial directory tree polish (`0.1.6`): left-drag text selection no longer auto-opens the context menu or leaves click reticles over selected ranges, `Ctrl+Shift+C`/`Ctrl+Shift+V` and selection-aware `Ctrl+C` work cleanly, the terminal quick-ops footer renders unclipped (`flex: 0 0 auto`), and initial remote/local directory navigation trees automatically populate missing ancestor directories (`missingAncestorDirectories` + `syncTreePath`).
+- Terminal semantic colorization & selection glyph transparency (`0.1.7`): added `TerminalLogColorizer` normal-buffer highlighting (skipping alternate-screen TUIs and preserving remote ANSI foregrounds), cleared opaque `.xterm-decoration-top` inline backgrounds via `registerTerminalSelectionRenderer` so selected text never obscures adjacent characters, added `registerTerminalForegroundAdapter` / `registerTerminalBufferRenderRecovery` / `document.fonts` `loadingdone` metric pulses, and migrated legacy monospace font defaults across TypeScript and Rust.
 
 ## Phase 6 — AI assistant
 

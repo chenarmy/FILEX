@@ -1,4 +1,5 @@
 export const DEFAULT_TERMINAL_FONT_FAMILY = "'JetBrains Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace";
+export const LEGACY_TERMINAL_FONT_FAMILY = 'JetBrains Mono, Consolas, monospace';
 export const ALT_DOUBLE_TAP_WINDOW_MS = 420;
 
 export type AltTapState = {
@@ -49,7 +50,10 @@ export function resolveTerminalFontFamily(
   fontSize: number,
   measureText?: TextWidthMeasure,
 ): { fontFamily: string; fellBack: boolean } {
-  const normalized = requested.trim() || DEFAULT_TERMINAL_FONT_FAMILY;
+  const trimmed = requested.trim();
+  const normalized = !trimmed || trimmed === LEGACY_TERMINAL_FONT_FAMILY
+    ? DEFAULT_TERMINAL_FONT_FAMILY
+    : trimmed;
   if (isEffectiveMonospaceFont(normalized, fontSize, measureText)) {
     return { fontFamily: normalized, fellBack: false };
   }

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-11-14
+
+### Added
+
+- Normal-buffer semantic log colorization (`TerminalLogColorizer` / `getTerminalLogColorPalette`) in [src/domain/terminalLogColorizer.ts](src/domain/terminalLogColorizer.ts), highlighting timestamps, IP addresses, services, CLI flags, permissions, numbers, and status keywords while skipping alternate-screen TUI buffers and preserving explicit remote ANSI colors.
+- Terminal compatibility & rendering adapters (`getTerminalCompatibilityOptions`, `registerTerminalSelectionRenderer`, `registerTerminalForegroundAdapter`, `registerTerminalBufferRenderRecovery`, `pulseTerminalFontMetrics`) in [src/domain/terminalAdapters.ts](src/domain/terminalAdapters.ts), plus localized `连接主机...` / `连接主机成功` connection banner lifecycle messages.
+
+### Fixed
+
+- Cleared opaque inline background colors injected by `@xterm/xterm` DOM row decoration spans (`.xterm-decoration-top`) inside selected cells so `.xterm-selection div` owns selection highlights without hiding adjacent glyphs (such as `:v4` next to selected `.1.0`).
+- Removed conflicting `!important` overrides on `.xterm-rows`, added CJK spacing normalization (`text-spacing-trim: space-all; text-autospace: no-autospace;`), triggered font metrics refresh on `document.fonts` `loadingdone`, and migrated the legacy `"JetBrains Mono, Consolas, monospace"` default to `"'JetBrains Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace"` across TypeScript and Rust settings to keep columnar command output (`docker ps`, `top`) strictly aligned.
+
 ## [0.1.6] - 2026-11-14
 
 ### Fixed

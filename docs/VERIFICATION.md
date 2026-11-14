@@ -1,5 +1,25 @@
 # FILEX verification evidence
 
+## 2026-11-14 — v0.1.7 release preparation
+
+- Scope: adapted `St0ff3l/fileterm` terminal adapters for `@xterm/xterm@5.5.0`: added `TerminalLogColorizer` (`src/domain/terminalLogColorizer.ts`) for normal-buffer semantic log highlighting while skipping alternate-screen TUIs and preserving explicit remote ANSI colors, added `registerTerminalSelectionRenderer` / `registerTerminalForegroundAdapter` / `registerTerminalBufferRenderRecovery` / `pulseTerminalFontMetrics` (`src/domain/terminalAdapters.ts`) so `.xterm-decoration-top` inline selection backgrounds no longer hide adjacent characters, wired `document.fonts` `loadingdone` metric refresh and `连接主机...` / `连接主机成功` banner lifecycle in `TerminalPane.vue`, migrated legacy monospace font defaults in TypeScript and Rust (`crates/filex-core/src/lib.rs`), and synchronized workspace manifests and `Cargo.lock` to `0.1.7`.
+- Visual review: inspected `test-results/terminal-color-and-selection-1440.png` and `test-results/terminal-selection-and-tree-1440.png` at 1440 × 900 in light theme, verifying `Last login` semantic coloring, strict `docker ps` column alignment, and unobstructed `:v4` rendering next to selected `.1.0`.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Version sync | `pnpm version:check` | Passed (`0.1.7`) |
+| Release notes | `node scripts/release-notes.mjs v0.1.7` | Passed |
+| ESLint | `pnpm lint` | Passed (0 warnings) |
+| TypeScript | `pnpm typecheck` | Passed |
+| Frontend unit tests | `pnpm test` | Passed, 18 files and 80 tests |
+| Production bundle | `pnpm build` | Passed (`11.80s`; existing Vite >500 kB chunk-size warning retained) |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust locked check | `cargo check --workspace --locked` | Passed |
+| Rust Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
+| Rust workspace tests | `cargo test --workspace --locked` | Passed, 37 tests (`filex-core`: 10, `filex-credentials`: 2, `filex-desktop-lib`: 15, `filex-ssh`: 4, `filex-storage`: 6; `filex-contracts`: 0; `filex-desktop`: 0) |
+| Workbench Playwright E2E | `pnpm exec playwright test e2e/workbench.spec.ts` | Passed, 22 tests (`35.9s`) |
+| Diff hygiene | `git diff --check` | Passed |
+
 ## 2026-11-14 — v0.1.6 release preparation
 
 - Scope: fixed terminal drag-selection UX (stopped auto-opening the context menu on left `pointerup`, suppressed click reticle on active selections, added `Ctrl+Shift+C`/`Ctrl+Shift+V` and selection-aware `Ctrl+C`, aligned `.xterm` ligature/kerning rules, and removed stale `20 px` footer height clipping on `.terminal-pane-status`), fixed empty initial remote/local `DirectoryTree` ancestors via `missingAncestorDirectories` and `syncTreePath`, added Vitest + Playwright regression coverage, and synchronized workspace manifests and `Cargo.lock` to `0.1.6`.

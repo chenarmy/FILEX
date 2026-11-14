@@ -20,12 +20,16 @@ describe('terminal interactions', () => {
     });
   });
 
-  it('falls back when the effective terminal font is proportional', () => {
+  it('falls back when the effective terminal font is proportional and upgrades legacy unquoted stacks', () => {
     const proportional = (text: string) => text.startsWith('i') ? text.length * 4 : text.length * 9;
     const monospace = (text: string) => text.length * 8;
     expect(resolveTerminalFontFamily('Example Sans', 13, proportional)).toEqual({
       fontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
       fellBack: true,
+    });
+    expect(resolveTerminalFontFamily('JetBrains Mono, Consolas, monospace', 13, monospace)).toEqual({
+      fontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
+      fellBack: false,
     });
     expect(resolveTerminalFontFamily('Example Mono', 13, monospace)).toEqual({
       fontFamily: 'Example Mono',

@@ -5,6 +5,14 @@ import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { ArrowDown, ArrowUp, Bot, CheckSquare, ClipboardPaste, Copy, Search, Trash2, X } from 'lucide-vue-next';
 import '@xterm/xterm/css/xterm.css';
+import {
+  getTerminalCompatibilityOptions,
+  pulseTerminalFontMetrics,
+  registerTerminalBufferRenderRecovery,
+  registerTerminalForegroundAdapter,
+  registerTerminalSelectionRenderer,
+} from '@/domain/terminalAdapters';
+import { getTerminalLogColorPalette, TerminalLogColorizer } from '@/domain/terminalLogColorizer';
 import { resolveTerminalPalette, resolveTerminalThemeAppearance } from '@/domain/terminalThemes';
 import { clampTerminalMenuPosition, resolveTerminalFontFamily } from '@/domain/terminalInteractions';
 import { resolveCdCommand } from '@/domain/terminalCwd';
@@ -71,7 +79,7 @@ const terminalAppearance = computed(() => resolveTerminalThemeAppearance(
   settings.value.theme,
   systemColorScheme.value,
 ));
-const minimumContrastRatio = computed(() => (terminalAppearance.value === 'light' ? 4.5 : 1));
+const minimumContrastRatio = computed(() => (terminalAppearance.value === 'light' ? 4.5 : 4.5));
 const connected = computed(() => session.value?.state === 'connected');
 const terminalPalette = computed(() => {
   return resolveTerminalPalette(
@@ -105,6 +113,10 @@ let disposeSelectionListener: (() => void) | null = null;
 let disposeSearchResults: (() => void) | null = null;
 let disposeOscCwd: { dispose(): void } | null = null;
 let disposeResizeListener: (() => void) | null = null;
+let disposeSelectionRenderer: { dispose(): void } | null = null;
+let disposeForegroundAdapter: { dispose(): void } | null = null;
+let disposeBufferRecovery: { dispose(): void } | null = null;
+let logColorizer: TerminalLogColorizer | null = null;
 let systemThemeMedia: MediaQueryList | null = null;
 let reticleTimer: number | null = null;
 let outputOffset = 0;
@@ -112,6 +124,7 @@ let outputDecoder = new TextDecoder(settings.value.terminalEncoding);
 let lastResizeSignature: string | null = null;
 let fontFallbackNotified = false;
 let terminalInputBuffer = '';
+let bannerStage: 'none' | 'connecting' | 'connected' = 'none';
 
 const searchOptions = {
   caseSensitive: false,
@@ -414,6 +427,7 @@ function handleContextMenuKeydown(event: KeyboardEvent): void {
 function replaySession(): void {
   if (!terminal) return;
   terminal.reset();
+  bannerStage = 'none';
   outputOffset = 0;
   outputDecoder = new TextDecoder(settings.value.terminalEncoding);
   clearSearch();
@@ -424,6 +438,15 @@ function replaySession(): void {
   }
   const chunks = sessions.outputBuffers[sessionId] ?? [];
   const outputStart = sessions.outputBufferStarts[sessionId] ?? 0;
+  const state = session.value?.state;
+  if (
+    chunks.length === 0
+    && state
+    && !['connected', 'disconnected', 'failed', 'closed'].includes(state)
+  ) {
+    terminal.writeln(t('terminal.connectingHost'));
+    bannerStage = 'connecting';
+  }
   for (const chunk of chunks) writeDecodedOutput(chunk);
   outputOffset = outputStart + chunks.length;
 }
@@ -521,14 +544,18 @@ function applyTerminalFont(notifyFallback = false): void {
     settings.value.terminalFontSize,
   );
   activeFontFamily.value = resolution.fontFamily;
-  terminal.options.fontFamily = resolution.fontFamily;
   terminal.options.fontSize = settings.value.terminalFontSize;
+  pulseTerminalFontMetrics(terminal, resolution.fontFamily);
   if (resolution.fellBack && notifyFallback && !fontFallbackNotified) {
     fontFallbackNotified = true;
     ui.notify(t('terminal.fontFallback'));
   }
   if (!resolution.fellBack) fontFallbackNotified = false;
   refitTerminalAfterLayout(true);
+}
+
+function handleFontsLoaded(): void {
+  applyTerminalFont(false);
 }
 
 async function reconnect(): Promise<void> {
@@ -547,6 +574,7 @@ onMounted(async () => {
   );
   activeFontFamily.value = initialFont.fontFamily;
   terminal = new XTerm({
+    ...getTerminalCompatibilityOptions(),
     allowProposedApi: true,
     cursorBlink: true,
     cursorStyle: 'block',
@@ -564,6 +592,7 @@ onMounted(async () => {
   searchAddon = new SearchAddon({ highlightLimit: 1000 });
   terminal.loadAddon(fitAddon);
   terminal.loadAddon(searchAddon);
+  logColorizer = new TerminalLogColorizer(terminal, getTerminalLogColorPalette(terminalPalette.value));
   const resizeListener = terminal.onResize(({ cols, rows: nextRows }) => {
     columns.value = cols;
     rows.value = nextRows;
@@ -599,6 +628,10 @@ onMounted(async () => {
 
   await nextTick();
   if (terminalHost.value) terminal.open(terminalHost.value);
+  disposeBufferRecovery = registerTerminalBufferRenderRecovery(terminal);
+  disposeForegroundAdapter = registerTerminalForegroundAdapter(terminal);
+  disposeSelectionRenderer = registerTerminalSelectionRenderer(terminal);
+  document.fonts?.addEventListener('loadingdone', handleFontsLoaded);
   const encoder = new TextEncoder();
   terminal.onData((data) => {
     trackTerminalInput(data);
@@ -687,12 +720,24 @@ watch([terminalPalette, minimumContrastRatio], ([palette, ratio]) => {
   if (!terminal) return;
   terminal.options.theme = palette;
   terminal.options.minimumContrastRatio = ratio;
+  logColorizer?.setPalette(getTerminalLogColorPalette(palette));
 });
 
 watch(
   () => session.value?.state,
   (state) => {
-    if (state === 'connected') {
+    if (
+      state
+      && !['connected', 'disconnected', 'failed', 'closed'].includes(state)
+      && bannerStage === 'none'
+    ) {
+      terminal?.writeln(t('terminal.connectingHost'));
+      bannerStage = 'connecting';
+    } else if (state === 'connected') {
+      if (bannerStage === 'connecting') {
+        terminal?.writeln(t('terminal.connectedHost'));
+        bannerStage = 'connected';
+      }
       lastResizeSignature = null;
       refitTerminalAfterLayout(true);
     } else if (state === 'connecting' || state === 'disconnected' || state === 'failed') {
@@ -752,10 +797,15 @@ onBeforeUnmount(() => {
   if (contextMenuHandler) terminal?.element?.removeEventListener('contextmenu', contextMenuHandler);
   document.removeEventListener('pointerdown', handleDocumentPointerDown, true);
   window.removeEventListener('keydown', handleWindowKeydown);
+  document.fonts?.removeEventListener('loadingdone', handleFontsLoaded);
   disposeSelectionListener?.();
   disposeSearchResults?.();
   disposeResizeListener?.();
   disposeOscCwd?.dispose();
+  disposeSelectionRenderer?.dispose();
+  disposeForegroundAdapter?.dispose();
+  disposeBufferRecovery?.dispose();
+  logColorizer?.dispose();
   searchAddon?.dispose();
   terminal?.dispose();
 });
@@ -1076,26 +1126,8 @@ defineExpose({ focusTerminal });
   cursor: text;
   font-kerning: none !important;
   font-variant-ligatures: none !important;
-}
-
-.terminal-pane-surface :deep(.xterm-rows) {
-  color: var(--xterm-fg, inherit);
-  font-family: var(--xterm-font, var(--font-mono)) !important;
-  font-size: var(--xterm-size, 13px) !important;
-  font-kerning: none !important;
-  font-variant-ligatures: none !important;
-  white-space: pre !important;
-}
-
-.terminal-pane-surface :deep(.xterm-rows > div) {
-  white-space: pre !important;
-}
-
-.terminal-pane-surface :deep(.xterm-rows span) {
-  display: inline-block;
-  height: 100%;
-  vertical-align: top;
-  white-space: pre !important;
+  text-spacing-trim: space-all;
+  text-autospace: no-autospace;
 }
 
 .terminal-pane-surface :deep(.xterm-cursor.xterm-cursor-block) {
