@@ -344,17 +344,14 @@ fn is_valid_executable_file(path: &Path) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
         return false;
     };
-    if !metadata.is_file() {
-        return false;
-    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
+        metadata.is_file() && (metadata.permissions().mode() & 0o111 != 0)
     }
     #[cfg(not(unix))]
     {
-        true
+        metadata.is_file()
     }
 }
 
@@ -1076,14 +1073,22 @@ mod unix_pty {
     ) -> Result<Arc<dyn PtySessionHandle>, AppError> {
         let mut master: RawFd = -1;
         let mut slave: RawFd = -1;
-        let winsize = libc::winsize {
+        let mut winsize = libc::winsize {
             ws_row: rows,
             ws_col: columns,
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
         // SAFETY: Valid stack descriptors and winsize pointer.
-        if unsafe { libc::openpty(&mut master, &mut slave, null_mut(), null_mut(), &winsize) } != 0
+        if unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                null_mut(),
+                null_mut(),
+                &mut winsize,
+            )
+        } != 0
         {
             return Err(local_spawn_error());
         }
