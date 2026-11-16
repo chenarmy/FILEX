@@ -12,10 +12,16 @@ export type SettingsSection =
   | 'updates'
   | 'shortcuts';
 
+export type KeyProxyLibraryTab = 'keys' | 'proxies';
+
 export const useUiStore = defineStore('ui', () => {
   const settingsOpen = ref(false);
   const settingsSection = ref<SettingsSection>('appearance');
   const quickConnectOpen = ref(false);
+  const localTerminalDialogOpen = ref(false);
+  const elevatedAccessSessionId = ref<string | null>(null);
+  const keyProxyLibraryOpen = ref(false);
+  const keyProxyLibraryTab = ref<KeyProxyLibraryTab>('keys');
   const addProfileOpen = ref(false);
   const editingProfileId = ref<string | null>(null);
   const sshImportOpen = ref(false);
@@ -24,10 +30,13 @@ export const useUiStore = defineStore('ui', () => {
     remotePath: string;
     localPath?: string;
     profileId?: string;
+    destinationProfileId?: string;
+    destinationRemotePath?: string;
   } | null>(null);
   const tunnelDialogOpen = ref(false);
   const tunnelDialogRuleId = ref<string | null>(null);
   const assistantOpen = ref(false);
+  const overviewOpen = ref(false);
   const commandPaletteOpen = ref(false);
   const monitorDetailsView = ref<MonitorDetailsView | null>(null);
   const dockerDialogOpen = ref(false);
@@ -101,6 +110,31 @@ export const useUiStore = defineStore('ui', () => {
     quickConnectOpen.value = false;
   }
 
+  function openLocalTerminalDialog(): void {
+    localTerminalDialogOpen.value = true;
+  }
+
+  function closeLocalTerminalDialog(): void {
+    localTerminalDialogOpen.value = false;
+  }
+
+  function openKeyProxyLibrary(tab: KeyProxyLibraryTab = 'keys'): void {
+    keyProxyLibraryTab.value = tab;
+    keyProxyLibraryOpen.value = true;
+  }
+
+  function closeKeyProxyLibrary(): void {
+    keyProxyLibraryOpen.value = false;
+  }
+
+  function openOverview(): void {
+    overviewOpen.value = true;
+  }
+
+  function closeOverview(): void {
+    overviewOpen.value = false;
+  }
+
   function openAddProfile(): void {
     editingProfileId.value = null;
     addProfileOpen.value = true;
@@ -124,12 +158,21 @@ export const useUiStore = defineStore('ui', () => {
     sshImportOpen.value = false;
   }
 
-  function openTransfer(direction: TransferDirection, remotePath: string, localPath?: string, profileId?: string): void {
+  function openTransfer(
+    direction: TransferDirection,
+    remotePath: string,
+    localPath?: string,
+    profileId?: string,
+    destinationProfileId?: string,
+    destinationRemotePath?: string,
+  ): void {
     transferDialog.value = {
       direction,
       remotePath,
       ...(localPath === undefined ? {} : { localPath }),
       ...(profileId === undefined ? {} : { profileId }),
+      ...(destinationProfileId === undefined ? {} : { destinationProfileId }),
+      ...(destinationRemotePath === undefined ? {} : { destinationRemotePath }),
     };
   }
 
@@ -140,6 +183,14 @@ export const useUiStore = defineStore('ui', () => {
   function openTunnel(ruleId?: string): void {
     tunnelDialogRuleId.value = ruleId ?? null;
     tunnelDialogOpen.value = true;
+  }
+
+  function openElevatedAccessDialog(sessionId: string): void {
+    elevatedAccessSessionId.value = sessionId;
+  }
+
+  function closeElevatedAccessDialog(): void {
+    elevatedAccessSessionId.value = null;
   }
 
   function closeTunnel(): void {
@@ -185,6 +236,9 @@ export const useUiStore = defineStore('ui', () => {
     settingsOpen,
     settingsSection,
     quickConnectOpen,
+    localTerminalDialogOpen,
+    keyProxyLibraryOpen,
+    keyProxyLibraryTab,
     addProfileOpen,
     editingProfileId,
     sshImportOpen,
@@ -192,6 +246,7 @@ export const useUiStore = defineStore('ui', () => {
     tunnelDialogOpen,
     tunnelDialogRuleId,
     assistantOpen,
+    overviewOpen,
     commandPaletteOpen,
     monitorDetailsView,
     dockerDialogOpen,
@@ -212,6 +267,15 @@ export const useUiStore = defineStore('ui', () => {
     closeSettings,
     openQuickConnect,
     closeQuickConnect,
+    openLocalTerminalDialog,
+    closeLocalTerminalDialog,
+    openKeyProxyLibrary,
+    closeKeyProxyLibrary,
+    openOverview,
+    closeOverview,
+    elevatedAccessSessionId,
+    openElevatedAccessDialog,
+    closeElevatedAccessDialog,
     openAddProfile,
     openEditProfile,
     closeAddProfile,

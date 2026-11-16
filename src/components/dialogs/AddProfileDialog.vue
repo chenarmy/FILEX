@@ -4,10 +4,14 @@ import { ChevronDown, ChevronUp, KeyRound, Plus, Server, ShieldCheck, Trash2, X 
 import { t } from '@/i18n';
 import { selectPrivateKeyFile } from '@/api/domain/connectionsApi';
 import { useConnectionsStore } from '@/stores/connections';
+import { useKeysStore } from '@/stores/keys';
+import { useProxiesStore } from '@/stores/proxies';
 import { useUiStore } from '@/stores/ui';
 import type { AppError, AuthenticationMethod, CreateConnectionProfileInput, EnvironmentKind } from '@/types/contracts';
 
 const connections = useConnectionsStore();
+const keys = useKeysStore();
+const proxies = useProxiesStore();
 const ui = useUiStore();
 const firstField = ref<HTMLInputElement | null>(null);
 const filePickerError = ref<AppError | null>(null);
@@ -32,6 +36,8 @@ const form = reactive<{
   tags: string;
   authenticationMethod: AuthenticationMethod;
   identityFile: string;
+  keyId: string;
+  proxyProfileId: string;
   proxyJump: string;
   proxyJumpProfileIds: string[];
 }>({
@@ -44,9 +50,19 @@ const form = reactive<{
   tags: editingProfile.value?.tags.join(', ') ?? '',
   authenticationMethod: editingProfile.value?.authenticationMethod ?? 'password',
   identityFile: editingProfile.value?.identityFile ?? '',
+  keyId: editingProfile.value?.keyId ?? '',
+  proxyProfileId: editingProfile.value?.proxyProfileId ?? '',
   proxyJump: editingProfile.value?.proxyJump ?? '',
   proxyJumpProfileIds: [...(editingProfile.value?.proxyJumpProfileIds ?? [])],
 });
+
+const selectedCentralKey = computed(() =>
+  keys.entries.find((entry) => entry.id === form.keyId) ?? null,
+);
+const hasJumpConfiguration = computed(() =>
+  form.proxyJumpProfileIds.length > 0 || Boolean(form.proxyJump.trim()),
+);
+const hasOutboundProxy = computed(() => Boolean(form.proxyProfileId.trim()));
 
 const fieldError = computed(() => connections.error?.field ?? null);
 const errorMessage = computed(() => connections.error
@@ -57,6 +73,7 @@ const filePickerErrorMessage = computed(() => filePickerError.value
   : '');
 
 onMounted(async () => {
+  await Promise.all([keys.refresh(), proxies.refresh()]);
   await nextTick();
   firstField.value?.focus();
 });
@@ -80,7 +97,7 @@ async function choosePrivateKeyFile(): Promise<void> {
 }
 
 function addJumpProfile(): void {
-  if (editingProfileUsedAsJump.value || form.proxyJumpProfileIds.length >= 4) return;
+  if (editingProfileUsedAsJump.value || hasOutboundProxy.value || form.proxyJumpProfileIds.length >= 4) return;
   const available = eligibleJumpProfiles.value.find((profile) => !form.proxyJumpProfileIds.includes(profile.id));
   if (available) form.proxyJumpProfileIds.push(available.id);
 }
@@ -97,7 +114,11 @@ function moveJumpProfile(index: number, offset: -1 | 1): void {
 }
 
 async function submit(): Promise<void> {
-  if (form.authenticationMethod === 'private_key' && (!form.identityFile.trim() || !privateKeyPathConfirmed.value)) {
+  if (
+    form.authenticationMethod === 'private_key'
+    && !form.keyId.trim()
+    && (!form.identityFile.trim() || !privateKeyPathConfirmed.value)
+  ) {
     privateKeyPathMissing.value = true;
     return;
   }
@@ -111,7 +132,9 @@ async function submit(): Promise<void> {
     environment: form.environment,
     tags: form.tags.split(',').map((tag) => tag.trim()).filter(Boolean),
     authenticationMethod: form.authenticationMethod,
-    identityFile: form.identityFile.trim() || null,
+    identityFile: form.keyId.trim() ? null : form.identityFile.trim() || null,
+    keyId: form.authenticationMethod === 'private_key' ? (form.keyId.trim() || null) : null,
+    proxyProfileId: form.proxyProfileId.trim() || null,
     proxyJump: form.proxyJump.trim() || null,
     proxyJumpProfileIds: [...form.proxyJumpProfileIds],
   };
@@ -152,26 +175,64 @@ async function submit(): Promise<void> {
             </select>
             <small class="field-hint">{{ t('profile.authMethodsHint') }}</small>
           </label>
-          <label v-if="form.authenticationMethod === 'private_key'" class="field full">
-            <span>{{ t('profile.identityFile') }}</span>
-            <div class="field-with-action">
-              <input v-model="form.identityFile" :aria-invalid="fieldError === 'identityFile' || privateKeyPathMissing" readonly autocomplete="off" spellcheck="false">
-              <button type="button" class="button" :disabled="connections.saving" @click="choosePrivateKeyFile">
-                <KeyRound :size="13" />{{ t('profile.chooseKeyFile') }}
-              </button>
-            </div>
-            <small class="field-hint">{{ t('profile.identityFileHint') }}</small>
-            <small v-if="privateKeyPathMissing" class="form-error" role="alert">{{ t('profile.privateKeyPathRequired') }}</small>
-          </label>
+          <div v-if="form.authenticationMethod === 'private_key'" class="field full">
+            <label class="field-label" for="profile-central-key">{{ t('profile.centralKeyLabel') }}</label>
+            <select
+              id="profile-central-key"
+              v-model="form.keyId"
+              :disabled="connections.saving"
+              @change="privateKeyPathMissing = false"
+            >
+              <option value="">{{ t('profile.centralKeyPlaceholder') }}</option>
+              <option v-for="entry in keys.entries" :key="entry.id" :value="entry.id">
+                {{ entry.label }} — {{ entry.algorithm }} ({{ entry.fingerprintSha256 }})
+              </option>
+            </select>
+            <small v-if="selectedCentralKey" class="field-hint">
+              {{
+                t('profile.centralKeySelectedHint', {
+                  label: selectedCentralKey.label,
+                  algorithm: selectedCentralKey.algorithm,
+                  fingerprint: selectedCentralKey.fingerprintSha256,
+                })
+              }}
+            </small>
+            <template v-else>
+              <label class="field-label" for="profile-identity-file">{{ t('profile.identityFile') }}</label>
+              <div class="field-with-action">
+                <input id="profile-identity-file" v-model="form.identityFile" :aria-invalid="fieldError === 'identityFile' || privateKeyPathMissing" readonly autocomplete="off" spellcheck="false">
+                <button type="button" class="button" :disabled="connections.saving" @click="choosePrivateKeyFile">
+                  <KeyRound :size="13" />{{ t('profile.chooseKeyFile') }}
+                </button>
+              </div>
+              <small class="field-hint">{{ t('profile.identityFileHint') }}</small>
+              <small v-if="privateKeyPathMissing" class="form-error" role="alert">{{ t('profile.privateKeyPathRequired') }}</small>
+            </template>
+          </div>
           <label v-else-if="form.identityFile" class="field full">
             <span>{{ t('profile.identityFileIgnored') }}</span>
             <input v-model="form.identityFile" readonly autocomplete="off" spellcheck="false">
             <small class="warning-text">{{ t('profile.identityFileIgnoredHint') }}</small>
           </label>
+          <label class="field full">
+            <span>{{ t('profile.outboundProxyLabel') }}</span>
+            <select
+              v-model="form.proxyProfileId"
+              :aria-invalid="fieldError === 'proxyProfileId'"
+              :disabled="connections.saving || hasJumpConfiguration"
+            >
+              <option value="">{{ t('profile.outboundProxyPlaceholder') }}</option>
+              <option v-for="proxy in proxies.entries" :key="proxy.id" :value="proxy.id">
+                {{ proxy.label }} — {{ proxy.kind === 'socks5' ? 'SOCKS5' : 'HTTP CONNECT' }} ({{ proxy.host }}:{{ proxy.port }})
+              </option>
+            </select>
+            <small v-if="hasJumpConfiguration" class="warning-text">{{ t('profile.outboundProxyConflictHint') }}</small>
+          </label>
           <div class="field full jump-route-field">
             <label class="field-label" for="profile-proxy-jump-source">{{ t('profile.proxyJump') }}</label>
-            <input id="profile-proxy-jump-source" v-model="form.proxyJump" autocomplete="off" spellcheck="false" placeholder="bastion or user@host:22">
-            <small class="field-hint">{{ t('profile.proxyJumpSourceHint') }}</small>
+            <input id="profile-proxy-jump-source" v-model="form.proxyJump" :disabled="hasOutboundProxy" autocomplete="off" spellcheck="false" placeholder="bastion or user@host:22">
+            <small v-if="hasOutboundProxy" class="warning-text">{{ t('profile.proxyJumpConflictWithOutboundHint') }}</small>
+            <small v-else class="field-hint">{{ t('profile.proxyJumpSourceHint') }}</small>
             <small v-if="form.proxyJump.trim() && form.proxyJumpProfileIds.length === 0" class="warning-text">
               {{ t('profile.proxyJumpMapRequired') }}
             </small>
@@ -201,7 +262,7 @@ async function submit(): Promise<void> {
                 </button>
               </div>
             </div>
-            <button type="button" class="button jump-route-add" :disabled="editingProfileUsedAsJump || form.proxyJumpProfileIds.length >= 4 || eligibleJumpProfiles.length <= form.proxyJumpProfileIds.length" @click="addJumpProfile">
+            <button type="button" class="button jump-route-add" :disabled="editingProfileUsedAsJump || hasOutboundProxy || form.proxyJumpProfileIds.length >= 4 || eligibleJumpProfiles.length <= form.proxyJumpProfileIds.length" @click="addJumpProfile">
               <Plus :size="13" />{{ t('profile.addJumpHost') }}
             </button>
           </div>

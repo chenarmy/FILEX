@@ -37,6 +37,8 @@ export function createBrowserProfile(
     if (routeError) return Promise.resolve(failure(routeError, requestId));
     const profile: ConnectionProfile = {
       ...input,
+      keyId: input.keyId ?? null,
+      proxyProfileId: input.proxyProfileId ?? null,
       id: createRequestId(),
       name: input.name.trim(),
       host: input.host.trim(),
@@ -86,6 +88,8 @@ export function updateBrowserProfile(
   const updated: ConnectionProfile = {
     ...existing,
     ...input,
+    keyId: input.keyId ?? null,
+    proxyProfileId: input.proxyProfileId ?? null,
     name: input.name.trim(),
     group: input.group.trim() || '未分组',
     host: input.host.trim(),
@@ -174,6 +178,8 @@ function readProfiles(): ConnectionProfile[] {
     ...profile,
     authenticationMethod: profile.authenticationMethod ?? 'password',
     identityFile: profile.identityFile ?? null,
+    keyId: profile.keyId ?? null,
+    proxyProfileId: profile.proxyProfileId ?? null,
     proxyJump: profile.proxyJump ?? null,
     proxyJumpProfileIds: profile.proxyJumpProfileIds ?? [],
   })) as ConnectionProfile[];

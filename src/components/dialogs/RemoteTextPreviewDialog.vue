@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { AlertCircle, Download, ExternalLink, FileText, X } from 'lucide-vue-next';
+import { SUPPORTED_TEXT_ENCODINGS, normalizeTextEncoding } from '@/domain/encodings';
 import { t } from '@/i18n';
 import { useSftpStore } from '@/stores/sftp';
 import { useLocalFilesStore } from '@/stores/localFiles';
@@ -114,6 +115,19 @@ async function download(): Promise<void> {
 async function openExternally(): Promise<void> {
   if (await sftp.openPreviewExternally()) ui.notify(t('inspector.externalOpenLaunched'));
 }
+
+function handlePreviewEncodingChange(event: Event): void {
+  const target = event.target as HTMLSelectElement | null;
+  if (!target) return;
+  const next = normalizeTextEncoding(target.value, sftp.previewEncoding);
+  if (editing.value) {
+    sftp.previewEncoding = next;
+    return;
+  }
+  if (sftp.previewPath) {
+    void sftp.previewFile(sftp.previewPath, next);
+  }
+}
 </script>
 
 <template>
@@ -123,7 +137,19 @@ async function openExternally(): Promise<void> {
         <div><FileText :size="15" /><strong id="remote-preview-title">{{ t('inspector.previewTitle') }}</strong></div>
         <button type="button" class="icon-button" :aria-label="t('inspector.previewClose')" @click="close"><X :size="14" /></button>
       </header>
-      <div class="remote-preview-meta mono">{{ sftp.previewPath }}</div>
+      <div class="remote-preview-meta">
+        <span class="remote-preview-path mono">{{ sftp.previewPath }}</span>
+        <select
+          v-if="sftp.previewPath"
+          class="text-encoding-select"
+          :value="sftp.previewEncoding"
+          :disabled="sftp.previewLoading || sftp.savingPreview"
+          :aria-label="t('inspector.previewEncoding')"
+          @change="handlePreviewEncodingChange"
+        >
+          <option v-for="item in SUPPORTED_TEXT_ENCODINGS" :key="item.value" :value="item.value">{{ item.label }}</option>
+        </select>
+      </div>
       <p v-if="sftp.previewPath" class="dialog-note preview-external-help">{{ t('inspector.externalOpenHelp') }}</p>
       <div v-if="sftp.previewLoading" class="dialog-content preview-state">{{ t('inspector.previewLoading') }}</div>
       <div v-else-if="sftp.preview" class="remote-preview-body">

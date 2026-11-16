@@ -27,6 +27,7 @@ import {
   previewKnownHostsImport,
   selectKnownHostsFile,
 } from '@/api/domain/trustApi';
+import { SUPPORTED_TEXT_ENCODINGS } from '@/domain/encodings';
 import TerminalThemePicker from '@/components/settings/TerminalThemePicker.vue';
 import AssistantSettingsPanel from '@/components/settings/AssistantSettingsPanel.vue';
 import { t } from '@/i18n';
@@ -570,10 +571,11 @@ onMounted(async () => {
             <TerminalThemePicker v-model="draft.terminalTheme" :app-theme="draft.theme" />
             <div class="setting-row"><div><strong>{{ t('settings.terminalFont') }}</strong></div><input v-model="draft.terminalFontFamily"></div>
             <div class="setting-row"><div><strong>{{ t('settings.terminalSize') }}</strong></div><label class="range-control"><input v-model.number="draft.terminalFontSize" type="range" min="11" max="24"><span>{{ draft.terminalFontSize }} px</span></label></div>
-            <div class="setting-row"><div><strong>{{ t('settings.terminalEncoding') }}</strong><small>{{ t('settings.terminalEncodingHelp') }}</small></div><select v-model="draft.terminalEncoding"><option value="utf-8">UTF-8</option><option value="gbk">GBK</option><option value="big5">Big5</option><option value="shift_jis">Shift_JIS</option><option value="windows-1252">Windows-1252</option></select></div>
+            <div class="setting-row"><div><strong>{{ t('settings.terminalEncoding') }}</strong><small>{{ t('settings.terminalEncodingHelp') }}</small></div><select v-model="draft.terminalEncoding"><option v-for="item in SUPPORTED_TEXT_ENCODINGS" :key="item.value" :value="item.value">{{ item.label }}</option></select></div>
             <div class="setting-row"><div><strong>{{ t('settings.scrollback') }}</strong><small>{{ t('settings.scrollbackHelp') }}</small></div><select v-model.number="draft.terminalScrollback"><option :value="5000">{{ t('settings.scrollbackLines', { count: '5,000' }) }}</option><option :value="10000">{{ t('settings.scrollbackLines', { count: '10,000' }) }}</option><option :value="25000">{{ t('settings.scrollbackLines', { count: '25,000' }) }}</option></select></div>
             <div class="setting-row"><div><strong>{{ t('settings.multilinePasteProtection') }}</strong></div><label class="switch"><input v-model="draft.pasteProtection" type="checkbox"><span /></label></div>
             <div class="setting-row"><div><strong>{{ t('settings.logging') }}</strong><small>{{ t('settings.loggingHelp') }}</small></div><label class="switch"><input v-model="draft.terminalLogging" type="checkbox"><span /></label></div>
+            <div class="setting-row"><div><strong>{{ t('settings.compactComposer') }}</strong><small>{{ t('settings.compactComposerHelp') }}</small></div><label class="switch"><input v-model="draft.compactComposerOpen" type="checkbox"><span /></label></div>
           </section>
 
           <section v-else-if="activeSection === 'connections'">

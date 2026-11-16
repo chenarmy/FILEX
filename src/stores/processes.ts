@@ -1,7 +1,13 @@
 import { computed, ref } from 'vue';
 import { defineStore } from 'pinia';
 import { collectProcessSnapshot, terminateRemoteProcess } from '@/api/domain/processesApi';
+import { createSessionStateCache } from '@/domain/sessionStateCache';
 import type { AppError, ProcessSignal, ProcessSnapshot } from '@/types/contracts';
+
+interface ProcessSessionCache {
+  snapshot: ProcessSnapshot | null;
+  error: AppError | null;
+}
 
 export const useProcessesStore = defineStore('processes', () => {
   const snapshot = ref<ProcessSnapshot | null>(null);
@@ -9,30 +15,72 @@ export const useProcessesStore = defineStore('processes', () => {
   const error = ref<AppError | null>(null);
   const terminatingPid = ref<number | null>(null);
   const displayState = computed(() => snapshot.value?.state ?? 'unprobed');
+  const sessionCaches = createSessionStateCache<ProcessSessionCache>();
   let snapshotSessionId: string | null = null;
   let generation = 0;
 
-  async function collect(sessionId: string): Promise<void> {
-    if (snapshotSessionId !== sessionId) {
-      generation += 1;
-      snapshotSessionId = sessionId;
-      snapshot.value = null;
-      error.value = null;
-      loading.value = false;
-      terminatingPid.value = null;
+  function persistCurrentSession(): void {
+    if (!snapshotSessionId) return;
+    if (snapshot.value === null && error.value === null) return;
+    sessionCaches.set(snapshotSessionId, { snapshot: snapshot.value, error: error.value });
+  }
+
+  function resetActive(): void {
+    snapshot.value = null;
+    error.value = null;
+    loading.value = false;
+    terminatingPid.value = null;
+  }
+
+  function activateSession(nextSessionId: string | null): boolean {
+    persistCurrentSession();
+    if (
+      nextSessionId !== null
+      && snapshotSessionId === nextSessionId
+      && (snapshot.value !== null || error.value !== null)
+    ) {
+      return true;
     }
+    generation += 1;
+    snapshotSessionId = nextSessionId;
+    loading.value = false;
+    terminatingPid.value = null;
+    if (nextSessionId !== null) {
+      const cached = sessionCaches.get(nextSessionId);
+      if (cached) {
+        snapshot.value = cached.snapshot;
+        error.value = cached.error;
+        return true;
+      }
+    }
+    resetActive();
+    return false;
+  }
+
+  function dropSession(sessionId: string): void {
+    sessionCaches.delete(sessionId);
+    if (snapshotSessionId === sessionId) {
+      generation += 1;
+      snapshotSessionId = null;
+      resetActive();
+    }
+  }
+
+  async function collect(sessionId: string): Promise<void> {
+    if (snapshotSessionId !== sessionId) activateSession(sessionId);
     if (loading.value || terminatingPid.value !== null) return;
     const request = ++generation;
     loading.value = true;
     error.value = null;
     try {
       const result = await collectProcessSnapshot(sessionId);
-      if (request !== generation) return;
+      if (request !== generation || snapshotSessionId !== sessionId) return;
       if (result.ok) snapshot.value = result.data;
       else {
         snapshot.value = null;
         error.value = result.error;
       }
+      persistCurrentSession();
     } finally {
       if (request === generation) loading.value = false;
     }
@@ -52,6 +100,7 @@ export const useProcessesStore = defineStore('processes', () => {
       else {
         snapshot.value = null;
         error.value = result.error;
+        persistCurrentSession();
       }
     } finally {
       if (request === generation) terminatingPid.value = null;
@@ -62,12 +111,12 @@ export const useProcessesStore = defineStore('processes', () => {
 
   function clear(): void {
     generation += 1;
-    snapshotSessionId = null;
-    snapshot.value = null;
-    error.value = null;
-    loading.value = false;
-    terminatingPid.value = null;
+    if (snapshotSessionId) sessionCaches.delete(snapshotSessionId);
+    resetActive();
   }
 
-  return { snapshot, loading, error, terminatingPid, displayState, collect, terminate, clear };
+  return {
+    snapshot, loading, error, terminatingPid, displayState,
+    activateSession, dropSession, collect, terminate, clear,
+  };
 });

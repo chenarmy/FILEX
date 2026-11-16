@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { CopyPlus, FileText, LockKeyhole, Plus, RefreshCw, Search, SplitSquareVertical, X } from 'lucide-vue-next';
+import { CopyPlus, CornerDownLeft, FileText, LockKeyhole, Plus, RefreshCw, Search, SplitSquareVertical, Terminal, X } from 'lucide-vue-next';
+import CommandInputBar from '@/components/terminal/CommandInputBar.vue';
 import TerminalPane from '@/components/terminal/TerminalPane.vue';
 import { isTauriRuntime } from '@/api/common';
+import { isLocalSession } from '@/domain/sessionCapabilities';
 import { useConnectionsStore } from '@/stores/connections';
 import { useSessionsStore } from '@/stores/sessions';
 import { useSettingsStore } from '@/stores/settings';
 import { useTerminalLogsStore } from '@/stores/terminalLogs';
 import { useUiStore } from '@/stores/ui';
 import { t } from '@/i18n';
+import type { SessionSummary } from '@/types/contracts';
 
 const connections = useConnectionsStore();
 const sessions = useSessionsStore();
@@ -17,19 +20,33 @@ const settings = useSettingsStore();
 const terminalLogs = useTerminalLogsStore();
 const layout = ref<'single' | 'vertical' | 'horizontal'>('single');
 const paneSessionIds = ref<(string | null)[]>([]);
-const terminalPaneRefs = ref<InstanceType<typeof TerminalPane>[]>([]);
+const paneRefs = new Map<string, { focusTerminal: () => void }>();
 const focusedPaneIndex = ref(0);
-const searchOpenPaneIndex = ref<number | null>(null);
+const searchOpenSessionIds = ref<string[]>([]);
 const searchFocusToken = ref(0);
 const visiblePanes = computed<(string | null)[]>(() => (
   paneSessionIds.value.length > 0 ? paneSessionIds.value : [null]
 ));
+const emptyPaneIndex = computed(() => visiblePanes.value.indexOf(null));
+
+function setPaneRef(key: string, instance: unknown): void {
+  if (instance && typeof instance === 'object' && 'focusTerminal' in instance) {
+    paneRefs.set(key, instance as { focusTerminal: () => void });
+  } else {
+    paneRefs.delete(key);
+  }
+}
+
+function paneIndexForSession(sessionId: string): number {
+  return visiblePanes.value.indexOf(sessionId);
+}
 const canStartSession = computed(() => !sessions.busy
   && !sessions.challenge
   && !sessions.passwordProfileId
   && !sessions.privateKeyPassphraseProfileId);
 const canDuplicateActive = computed(() => Boolean(sessions.activeSession)
   && !sessions.isQuickProfile(sessions.activeSession?.profileId)
+  && (isLocalSession(sessions.activeSession) || Boolean(sessions.profileForId(sessions.activeSession?.profileId ?? '')))
   && canStartSession.value);
 const activeLogStatus = computed(() => terminalLogs.statusFor(sessions.activeSessionId));
 const activeLogRunning = computed(() => activeLogStatus.value?.state === 'active');
@@ -45,8 +62,14 @@ const logStatusText = computed(() => {
   return t('terminal.logFailed');
 });
 
-function sessionName(profileId: string): string {
-  return sessions.profileForId(profileId)?.name ?? t('terminal.noSession');
+function sessionName(sessionOrProfileId: SessionSummary | string): string {
+  if (typeof sessionOrProfileId === 'string') {
+    return sessions.profileForId(sessionOrProfileId)?.name ?? t('terminal.noSession');
+  }
+  if (isLocalSession(sessionOrProfileId)) {
+    return sessions.localMetadataForSession(sessionOrProfileId.id)?.shellLabel ?? t('localTerminal.defaultTitle');
+  }
+  return sessions.profileForId(sessionOrProfileId.profileId)?.name ?? t('terminal.noSession');
 }
 
 function formatLogBytes(bytes: number): string {
@@ -60,7 +83,10 @@ function showLogError(): void {
   ui.notify(t(terminalLogs.error.messageKey as Parameters<typeof t>[0]));
 }
 
-const canReconnect = computed(() => Boolean(connections.activeProfile) && !sessions.busy && !sessions.challenge);
+const canReconnect = computed(() => !isLocalSession(sessions.activeSession)
+  && Boolean(connections.activeProfile)
+  && !sessions.busy
+  && !sessions.challenge);
 const canDisconnect = computed(() => sessions.activeSession?.state === 'connected' && !sessions.busy);
 
 async function reconnect(): Promise<void> {
@@ -109,15 +135,11 @@ function paneSession(index: number): string | null {
 function focusPane(index: number): void {
   if (index < 0 || index >= visiblePanes.value.length) return;
   focusedPaneIndex.value = index;
-  if (searchOpenPaneIndex.value !== null && searchOpenPaneIndex.value !== index) {
-    searchOpenPaneIndex.value = null;
-  }
   const sessionId = paneSession(index);
   if (sessionId) sessions.selectSession(sessionId);
 }
 
 function selectSessionTab(sessionId: string): void {
-  searchOpenPaneIndex.value = null;
   if (layout.value === 'single') {
     paneSessionIds.value = [sessionId];
     focusedPaneIndex.value = 0;
@@ -137,16 +159,24 @@ async function startNewSession(): Promise<void> {
     ui.openQuickConnect();
     return;
   }
-  searchOpenPaneIndex.value = null;
   await sessions.begin(connections.activeProfile);
 }
 
 async function duplicateActiveSession(): Promise<void> {
   const current = sessions.activeSession;
   if (!canDuplicateActive.value || !current) return;
+  if (isLocalSession(current)) {
+    const meta = sessions.localMetadataForSession(current.id);
+    await sessions.openLocalSession({
+      shellKind: meta?.shellKind ?? null,
+      workingDirectory: meta?.workingDirectory ?? null,
+      columns: 120,
+      rows: 32,
+    });
+    return;
+  }
   const profile = sessions.profileForId(current.profileId);
   if (!profile) return;
-  searchOpenPaneIndex.value = null;
   await sessions.begin(profile);
 }
 
@@ -157,8 +187,9 @@ async function createSplit(orientation: 'vertical' | 'horizontal'): Promise<void
   }
   const source = sessions.activeSession;
   if (!canDuplicateActive.value || !source) return;
-  const profile = sessions.profileForId(source.profileId);
-  if (!profile) return;
+  const sourceIsLocal = isLocalSession(source);
+  const profile = sourceIsLocal ? null : sessions.profileForId(source.profileId);
+  if (!sourceIsLocal && !profile) return;
 
   const previousLayout = layout.value;
   const previousPanes = [...paneSessionIds.value];
@@ -167,10 +198,19 @@ async function createSplit(orientation: 'vertical' | 'horizontal'): Promise<void
   paneSessionIds.value = [sourceSessionId, null];
   layout.value = orientation;
   focusedPaneIndex.value = 1;
-  searchOpenPaneIndex.value = null;
 
   try {
-    await sessions.begin(profile);
+    if (sourceIsLocal) {
+      const meta = sessions.localMetadataForSession(source.id);
+      await sessions.openLocalSession({
+        shellKind: meta?.shellKind ?? null,
+        workingDirectory: meta?.workingDirectory ?? null,
+        columns: 120,
+        rows: 32,
+      });
+    } else if (profile) {
+      await sessions.begin(profile);
+    }
   } catch (error) {
     layout.value = previousLayout;
     paneSessionIds.value = previousPanes;
@@ -190,29 +230,39 @@ async function createSplit(orientation: 'vertical' | 'horizontal'): Promise<void
 }
 
 function removePane(index: number): void {
-  if (layout.value === 'single') return;
+  if (layout.value === 'single' || index < 0) return;
   const remainingId = paneSessionIds.value.find((_, paneIndex) => paneIndex !== index) ?? null;
   layout.value = 'single';
   paneSessionIds.value = remainingId ? [remainingId] : [];
   focusedPaneIndex.value = 0;
-  searchOpenPaneIndex.value = null;
   if (remainingId) sessions.selectSession(remainingId);
 }
 
-function openSearch(index = focusedPaneIndex.value): void {
-  if (!paneSession(index)) return;
-  focusedPaneIndex.value = index;
-  sessions.selectSession(paneSession(index) as string);
-  searchOpenPaneIndex.value = index;
+function openSearchForSession(sessionId: string): void {
+  const index = paneIndexForSession(sessionId);
+  if (index >= 0) focusedPaneIndex.value = index;
+  sessions.selectSession(sessionId);
+  if (!searchOpenSessionIds.value.includes(sessionId)) {
+    searchOpenSessionIds.value = [...searchOpenSessionIds.value, sessionId];
+  }
   searchFocusToken.value += 1;
 }
 
-function closeSearch(index: number): void {
-  if (searchOpenPaneIndex.value === index) searchOpenPaneIndex.value = null;
+function openSearch(index = focusedPaneIndex.value): void {
+  const sessionId = paneSession(index);
+  if (!sessionId) return;
+  openSearchForSession(sessionId);
+}
+
+function closeSearchForSession(sessionId: string): void {
+  if (searchOpenSessionIds.value.includes(sessionId)) {
+    searchOpenSessionIds.value = searchOpenSessionIds.value.filter((id) => id !== sessionId);
+  }
 }
 
 function focusActiveTerminal(): void {
-  terminalPaneRefs.value[focusedPaneIndex.value]?.focusTerminal();
+  const sessionId = paneSession(focusedPaneIndex.value);
+  paneRefs.get(sessionId ?? '__empty__')?.focusTerminal();
 }
 
 function selectRelativeSession(direction: 1 | -1): void {
@@ -227,6 +277,9 @@ function selectRelativeSession(direction: 1 | -1): void {
 
 function reconcilePanes(): void {
   const validIds = new Set(sessions.summaries.map((item) => item.id));
+  if (searchOpenSessionIds.value.some((id) => !validIds.has(id))) {
+    searchOpenSessionIds.value = searchOpenSessionIds.value.filter((id) => validIds.has(id));
+  }
   const hasPendingSplitSlot = paneSessionIds.value.includes(null);
   if (layout.value !== 'single' && hasPendingSplitSlot && sessions.busy) return;
 
@@ -242,7 +295,6 @@ function reconcilePanes(): void {
     layout.value = 'single';
     paneSessionIds.value = remainingId ? [remainingId] : [];
     focusedPaneIndex.value = 0;
-    searchOpenPaneIndex.value = null;
     return;
   }
   if (layout.value === 'single') {
@@ -264,11 +316,9 @@ watch(
     if (!sessionId) return;
     const existingIndex = paneSessionIds.value.indexOf(sessionId);
     if (existingIndex >= 0) {
-      if (existingIndex !== focusedPaneIndex.value) searchOpenPaneIndex.value = null;
       focusedPaneIndex.value = existingIndex;
       return;
     }
-    searchOpenPaneIndex.value = null;
     if (layout.value === 'single') {
       paneSessionIds.value = [sessionId];
       focusedPaneIndex.value = 0;
@@ -290,7 +340,11 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
 </script>
 
 <template>
-  <section class="terminal-workspace" aria-label="Terminal workspace">
+  <section
+    class="terminal-workspace"
+    :class="{ 'composer-open': settings.value.compactComposerOpen }"
+    aria-label="Terminal workspace"
+  >
     <Teleport defer to="#session-tabs-slot">
       <div class="terminal-tabs" role="tablist" :aria-label="t('terminal.sessions')">
         <div
@@ -308,14 +362,15 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
             @click="selectSessionTab(session.id)"
           >
             <span class="state-dot" :class="session.state" />
-            <span class="terminal-tab-name" :title="sessionName(session.profileId)">{{ sessionName(session.profileId) }}</span>
+            <span class="terminal-tab-name" :title="sessionName(session)">{{ sessionName(session) }}</span>
+            <span v-if="isLocalSession(session)" class="terminal-tab-kind">{{ t('localTerminal.badge') }}</span>
             <FileText
               v-if="terminalLogs.statusFor(session.id)?.state === 'active'"
               class="terminal-tab-log"
               :size="10"
               :aria-label="t('terminal.logActive', { size: formatLogBytes(terminalLogs.statusFor(session.id)?.bytes ?? 0) })"
             />
-            <LockKeyhole v-if="session.state === 'connected'" class="terminal-tab-trust" :size="11" :aria-label="t('terminal.strictHostTrust')" :title="t('terminal.strictHostTrust')" />
+            <LockKeyhole v-if="session.state === 'connected' && !isLocalSession(session)" class="terminal-tab-trust" :size="11" :aria-label="t('terminal.strictHostTrust')" :title="t('terminal.strictHostTrust')" />
           </button>
           <button
             type="button"
@@ -336,6 +391,16 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
           @click="startNewSession"
         >
           <Plus :size="13" />
+        </button>
+        <button
+          type="button"
+          class="icon-button"
+          :aria-label="t('localTerminal.title')"
+          :title="t('localTerminal.title')"
+          :disabled="!canStartSession"
+          @click="ui.openLocalTerminalDialog"
+        >
+          <Terminal :size="13" />
         </button>
         <button
           type="button"
@@ -390,6 +455,17 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
         </button>
         <button
           type="button"
+          class="terminal-layout-button"
+          :class="{ active: settings.value.compactComposerOpen }"
+          :aria-label="t('commandBar.toggleButton')"
+          :aria-pressed="settings.value.compactComposerOpen"
+          :title="t('commandBar.toggleButton')"
+          @click="settings.value.compactComposerOpen = !settings.value.compactComposerOpen"
+        >
+          <CornerDownLeft :size="13" />
+        </button>
+        <button
+          type="button"
           class="icon-button"
           :aria-label="t('terminal.search')"
           :title="t('terminal.search')"
@@ -420,20 +496,38 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
 
     <div class="terminal-pane-grid" :class="'layout-' + layout">
       <TerminalPane
-        v-for="(sessionId, index) in visiblePanes"
-        ref="terminalPaneRefs"
-        :key="String(index) + ':' + (sessionId ?? 'empty')"
-        :session-id="sessionId"
-        :focused="index === focusedPaneIndex"
-        :search-open="searchOpenPaneIndex === index"
+        v-for="session in sessions.summaries"
+        v-show="paneIndexForSession(session.id) >= 0"
+        :key="session.id"
+        :ref="(el) => setPaneRef(session.id, el)"
+        :session-id="session.id"
+        :visible="paneIndexForSession(session.id) >= 0"
+        :focused="paneIndexForSession(session.id) === focusedPaneIndex"
+        :search-open="searchOpenSessionIds.includes(session.id)"
         :focus-search-token="searchFocusToken"
         :can-close="layout !== 'single' && !sessions.busy"
-        @focus="focusPane(index)"
-        @search-open="openSearch(index)"
-        @search-close="closeSearch(index)"
-        @close="removePane(index)"
+        :style="paneIndexForSession(session.id) >= 0 ? { order: paneIndexForSession(session.id) } : undefined"
+        @focus="focusPane(paneIndexForSession(session.id))"
+        @search-open="openSearchForSession(session.id)"
+        @search-close="closeSearchForSession(session.id)"
+        @close="removePane(paneIndexForSession(session.id))"
+      />
+      <TerminalPane
+        v-if="emptyPaneIndex >= 0"
+        key="__empty__"
+        :ref="(el) => setPaneRef('__empty__', el)"
+        :session-id="null"
+        :visible="true"
+        :focused="emptyPaneIndex === focusedPaneIndex"
+        :search-open="false"
+        :focus-search-token="searchFocusToken"
+        :can-close="layout !== 'single' && !sessions.busy"
+        :style="{ order: emptyPaneIndex }"
+        @focus="focusPane(emptyPaneIndex)"
+        @close="removePane(emptyPaneIndex)"
       />
     </div>
+    <CommandInputBar v-if="settings.value.compactComposerOpen" />
   </section>
 </template>
 
@@ -445,6 +539,10 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
   height: 100%;
   min-width: 0;
   min-height: 0;
+}
+
+.terminal-workspace.composer-open {
+  grid-template-rows: minmax(0, 1fr) auto;
 }
 
 /* The tab strip is teleported into the shell's #session-tabs-slot; keep its
@@ -519,6 +617,18 @@ defineExpose({ focusActiveTerminal, openSearch, selectRelativeSession, startNewS
 .terminal-tab-trust {
   flex: 0 0 auto;
   color: hsl(var(--success));
+}
+
+.terminal-tab-kind {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 2px;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.625rem;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0.03em;
 }
 
 .terminal-tab-log {

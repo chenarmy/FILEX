@@ -58,3 +58,31 @@ export async function selectExternalEditorExecutable(
     });
   }
 }
+
+export async function selectLocalDirectory(
+  title: string,
+): Promise<OperationResult<string | null>> {
+  if (!isTauriRuntime()) {
+    return failure({
+      code: 'FILE_PICKER_DESKTOP_ONLY',
+      messageKey: 'errors.filePickerDesktopOnly',
+      retryable: false,
+      remoteState: 'not_applicable',
+    });
+  }
+  try {
+    const selected = await open({
+      title,
+      multiple: false,
+      directory: true,
+    });
+    return success(typeof selected === 'string' ? selected : null);
+  } catch {
+    return failure({
+      code: 'FILE_PICKER_FAILED',
+      messageKey: 'errors.filePickerFailed',
+      retryable: true,
+      remoteState: 'not_applicable',
+    });
+  }
+}

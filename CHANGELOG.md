@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-11-16
+
+### Added
+
+- Local PTY terminal sessions (`filex-local-terminal` / `LocalTerminalDialog`) with allowlisted shell selection, resize/shutdown lifecycle handling, local working-directory follow, and isolation from SSH credentials and remote telemetry.
+- Explicit opt-in elevated file access leases (`elevated_access` / `ElevatedAccessDialog`) with zeroized in-memory secret handling, per-operation session-identity verification, amber TTL indicator badges, and manual or disconnect revocation.
+- Central SSH key metadata/fingerprint library and validated SOCKS5 / HTTP CONNECT outbound proxy library (`key_proxy_library` / `KeyAndProxyLibraryDialog`) backed by OS credential references.
+- Bounded per-profile SQLite command history (200 entries with secret-exclusion filtering) and an optional compact `CommandInputBar` composer.
+- `encoding_rs`-backed remote text encoding support (UTF-8, UTF-16LE/BE, GBK/GB18030, Big5, Shift-JIS, EUC-JP, EUC-KR, Windows-1252) with strict unmappable character rejection, confirmed two-endpoint `remote_to_remote` SFTP relay streaming, restart-safe transfer resume checkpoints, and per-profile path bookmarks with active-vs-history transfer filtering.
+- Workbench overview modal (`OverviewDialog`), unified activity center (`TaskDrawer` across `all`, `transfers`, `jobs`, `tunnels`, and `events` with inline details), and bounded SSH diagnostic preset remote jobs (`remote_jobs`).
+- Native clipboard file copy/paste upload (`Ctrl+C` / `Ctrl+V` via `clipboard_files` / `useFileUploadQueue`) and keyboard folder letter/prefix typeahead navigation (`fileTypeahead` / `useFilePaneKeyboard` with `.file-typeahead-pill` and virtualized scroll-into-view).
+
+### Fixed
+
+- Preserved active `XTerm` terminal instances, search state, composer drafts, SFTP directory paths/selection/expanded tree state, active inspector views, and host monitoring snapshots across duplicated sessions and all tab switches without triggering redundant directory reloads, buffer resets, or spurious PTY resizes, while preserving strict per-session isolation and releasing closed-session caches.
+
 ## [0.1.7] - 2026-11-14
 
 ### Added

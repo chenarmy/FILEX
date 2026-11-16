@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch, type ComponentPublicInstance } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type ComponentPublicInstance } from 'vue';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import {
@@ -18,6 +18,7 @@ import {
   Info,
   MemoryStick,
   RefreshCw,
+  Search,
   Server,
   ShieldCheck,
   ShieldQuestion,
@@ -40,7 +41,9 @@ import { useChecksumsStore } from '@/stores/checksums';
 import { useSyncPreviewStore } from '@/stores/syncPreview';
 import { useTransfersStore } from '@/stores/transfers';
 import { isTauriRuntime } from '@/api/common';
-import { inspectLocalEntry } from '@/api/domain/localFilesApi';
+import { useFilePaneKeyboard } from '@/composables/useFilePaneKeyboard';
+import { useFileUploadQueue } from '@/composables/useFileUploadQueue';
+import { isSafeTransferName } from '@/domain/fileClipboard';
 import FileEntryIcon from '@/components/files/FileEntryIcon.vue';
 import type { AppError, AuthenticationMethod, ConnectionProfile, CreateTransferInput, DirectorySyncChangeKind, DirectorySyncEntryKind, InspectorTab, LocalFileEntry, ProcessEntry, RemoteFileEntry, UpdateConnectionProfileInput } from '@/types/contracts';
 
@@ -82,10 +85,15 @@ const activePane = ref<'local' | 'remote'>('remote');
 const remoteDropElement = ref<HTMLElement | null>(null);
 const nativeDropActive = ref(false);
 const localDropActive = ref(false);
-const dropBusy = ref(false);
 const REMOTE_FILE_DRAG_TYPE = 'application/x-filex-remote-entry';
 let unlistenNativeDrop: UnlistenFn | null = null;
 let inspectorUnmounted = false;
+const {
+  uploadBusy,
+  queueLocalPathsForUpload,
+  copyLocalEntryForUpload,
+  pasteUploadFromClipboard,
+} = useFileUploadQueue();
 const remoteReady = computed(() => {
   const session = sessions.activeSession;
   return session !== null && session.state === 'connected' && sftp.sessionId === session.id;
@@ -178,6 +186,61 @@ const copyDestinationDirectory = ref('');
 const copyTargetName = ref('');
 const copyOperationId = ref<string | null>(null);
 const copyCancelling = ref(false);
+const filePaneKeyboard = useFilePaneKeyboard<LocalFileEntry | RemoteFileEntry>({
+  getEntries: (pane) => (pane === 'local' ? (localFiles.listing?.entries ?? []) : sftp.entries),
+  getSelectedPath: (pane) => (pane === 'local' ? localFiles.selectedPath : sftp.selectedPath),
+  selectEntry: (entry, pane) => selectPaneEntry(entry, pane),
+  isBlocked: () => settings.value.inspectorTab !== 'files'
+    || createDirectoryOpen.value
+    || renameDialogOpen.value
+    || moveDialogOpen.value
+    || copyDialogOpen.value
+    || checksumDialogOpen.value
+    || syncPreviewDialogOpen.value
+    || ui.settingsOpen
+    || ui.commandPaletteOpen
+    || ui.confirmation !== null,
+  onCopyLocal: () => copyLocalEntryForUpload(selectedLocalEntry.value),
+  onPasteUpload: (pane, event) => pasteUploadFromClipboard({
+    event,
+    pane,
+    dualPaneEnabled: dualPaneEnabled.value,
+    remoteReady: remoteReady.value,
+    quickSession: quickSession.value,
+  }),
+});
+const { typeaheadIndicator } = filePaneKeyboard;
+
+function handlePaneMousedown(pane: 'local' | 'remote', event: MouseEvent): void {
+  activePane.value = pane;
+  if (event.button !== 0) return;
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  if (target && !target.closest('button, input, select, textarea, a, [tabindex]')) {
+    filePaneKeyboard.focusListContainer(pane);
+  }
+}
+
+watch(
+  () => [localFiles.loading, sftp.loading] as const,
+  ([localLoading, remoteLoading], [prevLocalLoading, prevRemoteLoading]) => {
+    if (settings.value.inspectorTab !== 'files') return;
+    const localDone = prevLocalLoading && !localLoading && activePane.value === 'local';
+    const remoteDone = prevRemoteLoading && !remoteLoading && activePane.value === 'remote';
+    if ((localDone || remoteDone) && document.activeElement === document.body) {
+      const paneToFocus = activePane.value;
+      void nextTick(() => {
+        if (document.activeElement === document.body && settings.value.inspectorTab === 'files') {
+          filePaneKeyboard.focusListContainer(paneToFocus);
+        }
+      });
+    }
+  },
+);
+
+watch(
+  () => [localFiles.listing?.path ?? '', sftp.path, activePane.value, settings.value.inspectorTab] as const,
+  () => filePaneKeyboard.clearTypeahead(),
+);
 const directoryError = computed(() => directoryTargetPane.value === 'local' ? localFiles.error : sftp.error);
 const renameError = computed(() => renameTargetPane.value === 'local' ? localFiles.error : sftp.error);
 const moveError = computed(() => moveTargetPane.value === 'local' ? localFiles.error : sftp.error);
@@ -218,10 +281,10 @@ watch(
       copySourceEntry.value = null;
     }
     if (sessionId && state === 'connected') {
-      if (sftp.sessionId !== sessionId) sftp.clear();
-      void sftp.load(sessionId, '.');
+      const restored = sftp.activateSession(sessionId);
+      if (!restored && !sftp.loading) void sftp.load(sessionId, '.');
     } else {
-      sftp.clear();
+      sftp.activateSession(null);
       createDirectoryOpen.value = false;
       renameDialogOpen.value = false;
       moveDialogOpen.value = false;
@@ -261,7 +324,7 @@ onMounted(async () => {
         if (isTarget) void queueDroppedLocalPaths(event.payload.paths);
         return;
       }
-      nativeDropActive.value = isTarget && !dropBusy.value;
+      nativeDropActive.value = isTarget && !uploadBusy.value;
     });
     if (inspectorUnmounted) void unlisten();
     else unlistenNativeDrop = unlisten;
@@ -272,6 +335,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   inspectorUnmounted = true;
+  filePaneKeyboard.dispose();
   if (copyOperationId.value) void requestCopyCancellation();
   document.removeEventListener('visibilitychange', updateAppForeground);
   window.removeEventListener('focus', updateAppForeground);
@@ -478,8 +542,12 @@ function localJoin(directory: string, name: string): string {
   return parent ? `${parent}${separator}${name}` : `${separator}${name}`;
 }
 
-function bindRemoteDropElement(element: Element | ComponentPublicInstance | null): void {
-  remoteDropElement.value = element instanceof HTMLElement ? element : null;
+function bindPaneListElement(
+  pane: 'local' | 'remote',
+  element: Element | ComponentPublicInstance | null,
+): void {
+  const resolved = filePaneKeyboard.bindListElement(pane, element);
+  if (pane === 'remote') remoteDropElement.value = resolved;
 }
 
 function isRemoteDropTarget(position: { x: number; y: number }): boolean {
@@ -492,71 +560,16 @@ function isRemoteDropTarget(position: { x: number; y: number }): boolean {
   return x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom;
 }
 
-function isSafeTransferName(name: string): boolean {
-  return name.length > 0
-    && name.length <= 255
-    && name !== '.'
-    && name !== '..'
-    // eslint-disable-next-line no-control-regex -- control characters must be detected here
-    && !/[\\/\u0000-\u001f\u007f]/u.test(name);
-}
-
 async function queueDroppedLocalPaths(paths: string[]): Promise<void> {
-  if (dropBusy.value) return;
-  const session = sessions.activeSession;
-  if (!session || !remoteReady.value || settings.value.inspectorTab !== 'files') return;
-  if (quickSession.value) {
-    ui.notify(t('quick.savedHint'));
-    return;
-  }
-  dropBusy.value = true;
-  nativeDropActive.value = false;
-  const sessionId = session.id;
-  const profileId = session.profileId;
-  const remoteRoot = sftp.path;
-  const distinctPaths = [...new Set(paths)];
-  let unsupported = Math.max(0, distinctPaths.length - 64);
-  let queued = 0;
-  try {
-    for (const path of distinctPaths.slice(0, 64)) {
-      if (!path || path.length > 4_096 || path.includes('\0')) {
-        unsupported += 1;
-        continue;
-      }
-      const inspected = await inspectLocalEntry(path);
-      if (!inspected.ok) {
-        transfers.error = inspected.error;
-        break;
-      }
-      const entry = inspected.data;
-      if (!isSafeTransferName(entry.name)
-        || entry.isSymlink
-        || (!entry.isDirectory && entry.size === null)) {
-        unsupported += 1;
-        continue;
-      }
-      const input: CreateTransferInput = {
-        profileId,
-        direction: 'upload',
-        localPath: entry.path,
-        remotePath: remoteJoin(remoteRoot, entry.name),
-        conflictPolicy: 'ask',
-        totalBytes: entry.isDirectory ? null : entry.size,
-      };
-      if (!await transfers.enqueue(input, sessionId)) break;
-      queued += 1;
-    }
-    if (queued > 0) {
-      settings.value.taskTab = 'transfers';
-      settings.value.taskDrawerOpen = true;
-      ui.notify(t('inspector.dropUploadQueued', { count: queued }));
-    }
-    if (unsupported > 0) ui.notify(t('inspector.dropUnsupportedItems', { count: unsupported }));
-  } catch {
-    ui.notify(t('inspector.dropFailed'));
-  } finally {
-    dropBusy.value = false;
-  }
+  if (settings.value.inspectorTab !== 'files') return;
+  await queueLocalPathsForUpload(paths, {
+    source: 'drop',
+    remoteReady: remoteReady.value,
+    quickSession: quickSession.value,
+    onBeforeStart: () => {
+      nativeDropActive.value = false;
+    },
+  });
 }
 
 function beginRemoteFileDrag(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote', event: DragEvent): void {
@@ -746,6 +759,8 @@ function updateInput(value: ConnectionProfile, favorite = value.favorite): Updat
     tags: value.tags,
     authenticationMethod: value.authenticationMethod,
     identityFile: value.identityFile,
+    keyId: value.keyId ?? null,
+    proxyProfileId: value.proxyProfileId ?? null,
     proxyJump: value.proxyJump,
     proxyJumpProfileIds: [...value.proxyJumpProfileIds],
   };
@@ -1039,13 +1054,24 @@ defineExpose({ focusInspector });
         </span>
       </div>
       <div class="file-browser" :class="{ 'file-browser-dual': dualPaneEnabled }">
-        <section v-for="pane in browserPanes" :key="pane.id" class="file-browser-pane" :class="{ active: activePane === pane.id }" role="region" :aria-label="t(pane.label)" @mousedown="activePane = pane.id">
+        <section
+          v-for="pane in browserPanes"
+          :key="pane.id"
+          class="file-browser-pane"
+          :class="{ active: activePane === pane.id }"
+          role="region"
+          :aria-label="t(pane.label)"
+          @mousedown="handlePaneMousedown(pane.id, $event)"
+          @keydown="filePaneKeyboard.handlePaneKeydown(pane.id, $event)"
+          @paste="filePaneKeyboard.handlePanePaste(pane.id, $event)"
+        >
           <header class="file-browser-pane-heading">
             <strong>{{ t(pane.label) }}</strong>
             <div class="path-breadcrumb mono"><button type="button" class="icon-button" :disabled="pane.id === 'remote' ? !sftp.sessionId : !localFiles.listing?.parentPath" :aria-label="t('inspector.parentDirectory')" @click.stop="pane.id === 'local' ? localFiles.parent() : sftp.parent()"><ChevronUp :size="11" /></button><ChevronRight :size="11" /><span :title="pane.path">{{ pane.path }}</span></div>
           </header>
           <div
-            :ref="pane.id === 'remote' ? bindRemoteDropElement : undefined"
+            :ref="(el) => bindPaneListElement(pane.id, el)"
+            tabindex="-1"
             class="file-list"
             :class="{ 'file-list-drop-target': (pane.id === 'remote' && nativeDropActive) || (pane.id === 'local' && localDropActive) }"
             @dragover="allowRemoteFileDrop($event, pane.id)"
@@ -1057,12 +1083,22 @@ defineExpose({ focusInspector });
             <div v-else-if="pane.entries.length === 0" class="task-empty">{{ t('inspector.emptyDirectory') }}</div>
             <template v-else>
               <p v-if="pane.truncated" class="dialog-note preview-truncated">{{ t('inspector.directoryTruncated') }}</p>
-              <button v-for="entry in pane.entries" :key="entry.path" type="button" class="file-row" :class="{ selected: entry.path === pane.selectedPath }" :draggable="pane.id === 'remote' && !entry.isSymlink" @dragstart="beginRemoteFileDrag(entry, pane.id, $event)" @click="selectPaneEntry(entry, pane.id)" @dblclick="openPaneEntry(entry, pane.id)" @keydown.enter.prevent="openPaneEntry(entry, pane.id)">
+              <button v-for="entry in pane.entries" :key="entry.path" type="button" class="file-row" :class="{ selected: entry.path === pane.selectedPath }" :data-entry-path="entry.path" :draggable="pane.id === 'remote' && !entry.isSymlink" @dragstart="beginRemoteFileDrag(entry, pane.id, $event)" @click="selectPaneEntry(entry, pane.id)" @dblclick="openPaneEntry(entry, pane.id)" @keydown.enter.prevent="openPaneEntry(entry, pane.id)">
                 <FileEntryIcon :name="entry.name" :is-directory="entry.isDirectory" :is-symlink="entry.isSymlink" :size="14" />
                 <span>{{ entry.name }}</span><small>{{ formatSize(entry.size) }}</small>
                 <small class="file-permissions" :title="permissionModeTitle(entry.permissionsMode)">{{ t('inspector.permissionModeShort', { mode: formatPermissionMode(entry.permissionsMode) }) }}</small>
               </button>
             </template>
+            <div
+              v-if="typeaheadIndicator && typeaheadIndicator.pane === pane.id"
+              class="file-typeahead-pill mono"
+              :class="{ unmatched: !typeaheadIndicator.matched }"
+              role="status"
+              aria-live="polite"
+            >
+              <Search :size="11" aria-hidden="true" />
+              <span>{{ t(typeaheadIndicator.matched ? 'files.typeaheadMatch' : 'files.typeaheadNoMatch', { query: typeaheadIndicator.query }) }}</span>
+            </div>
             <div v-if="pane.id === 'remote' && nativeDropActive" class="file-drop-hint">{{ t('inspector.dropUploadHint') }}</div>
             <div v-if="pane.id === 'local' && localDropActive" class="file-drop-hint">{{ t('inspector.dropDownloadHint') }}</div>
           </div>

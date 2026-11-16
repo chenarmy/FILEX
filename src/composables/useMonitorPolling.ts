@@ -3,6 +3,7 @@ import { useMonitorStore } from '@/stores/monitor';
 import { useProcessesStore } from '@/stores/processes';
 import { useSessionsStore } from '@/stores/sessions';
 import { useSettingsStore } from '@/stores/settings';
+import { hasCapability } from '@/domain/sessionCapabilities';
 
 interface MonitorPollingOptions {
   /** Polling only runs while this returns true. */
@@ -48,27 +49,23 @@ export function useMonitorPolling(options: MonitorPollingOptions): void {
       () => sessions.activeSession?.state,
       () => options.enabled(),
     ] as const,
-    ([sessionId, state, enabled], _previous, onCleanup) => {
+    ([sessionId, state, enabled], previous) => {
       const sessionChanged = initialized && (previousSessionId !== sessionId || previousSessionState !== state);
       initialized = true;
       previousSessionId = sessionId;
       previousSessionState = state;
       const shouldPreserve = options.preserveDataOnPause === true && Boolean(sessionId) && state === 'connected';
       if (!shouldPreserve || sessionChanged) {
-        monitor.clear();
+        const targetId = sessionId && state === 'connected' ? sessionId : null;
+        monitor.activateSession(targetId);
         if (options.withProcesses() || sessionChanged) {
-          processes.clear();
+          processes.activateSession(targetId);
         }
       }
-      onCleanup(() => {
-        if (!options.preserveDataOnPause) {
-          monitor.clear();
-          processes.clear();
-        }
-      });
-      if (sessionId && state === 'connected' && enabled && appForeground.value) {
-        void monitor.collect(sessionId);
-        if (options.withProcesses()) void processes.collect(sessionId);
+      if (sessionId && state === 'connected' && hasCapability(sessions.activeSession, 'host_monitoring') && enabled && appForeground.value) {
+        const justEnabled = previous?.[2] === false && enabled;
+        if (!monitor.snapshot || justEnabled) void monitor.collect(sessionId);
+        if (options.withProcesses() && (!processes.snapshot || justEnabled)) void processes.collect(sessionId);
       }
     },
     { immediate: true },
@@ -85,7 +82,7 @@ export function useMonitorPolling(options: MonitorPollingOptions): void {
       () => monitor.consecutiveFailures,
     ] as const,
     ([sessionId, state, enabled, monitorState, intervalSeconds, foreground, consecutiveFailures], _previous, onCleanup) => {
-      if (!sessionId || state !== 'connected' || !enabled || !foreground) return;
+      if (!sessionId || state !== 'connected' || !hasCapability(sessions.activeSession, 'host_monitoring') || !enabled || !foreground) return;
       if (monitorState === 'unsupported' || monitorState === 'permission_denied') return;
       const backoffFactor = 2 ** Math.min(consecutiveFailures, 4);
       const pollIntervalMs = Math.min(300_000, intervalSeconds * backoffFactor * 1_000);
@@ -99,7 +96,7 @@ export function useMonitorPolling(options: MonitorPollingOptions): void {
     [appForeground, () => options.enabled()] as const,
     ([foreground, enabled]) => {
       const session = sessions.activeSession;
-      if (foreground && enabled && session?.state === 'connected') {
+      if (foreground && enabled && session?.state === 'connected' && hasCapability(session, 'host_monitoring')) {
         void monitor.collect(session.id);
       }
     },
@@ -109,7 +106,7 @@ export function useMonitorPolling(options: MonitorPollingOptions): void {
     [() => options.enabled(), () => options.withProcesses()] as const,
     ([enabled, withProcesses]) => {
       const session = sessions.activeSession;
-      if (enabled && withProcesses && session?.state === 'connected') {
+      if (enabled && withProcesses && session?.state === 'connected' && hasCapability(session, 'host_monitoring')) {
         void processes.collect(session.id);
       }
     },

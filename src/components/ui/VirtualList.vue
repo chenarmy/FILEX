@@ -30,6 +30,29 @@ function onScroll(event: Event): void {
   if (event.target instanceof HTMLElement) scrollTop.value = event.target.scrollTop;
 }
 
+function scrollToIndex(index: number): void {
+  const el = host.value;
+  if (!el || props.items.length === 0 || props.rowHeight <= 0) return;
+  const clamped = Math.max(0, Math.min(props.items.length - 1, index));
+  const effectiveHeight = el.clientHeight || viewportHeight.value;
+  viewportHeight.value = effectiveHeight;
+  const rowTop = clamped * props.rowHeight;
+  const rowBottom = rowTop + props.rowHeight;
+  const currentTop = el.scrollTop;
+  let nextTop = currentTop;
+  if (rowTop < currentTop) {
+    nextTop = rowTop;
+  } else if (rowBottom > currentTop + effectiveHeight) {
+    nextTop = Math.max(0, rowBottom - effectiveHeight);
+  }
+  if (nextTop !== currentTop || scrollTop.value !== nextTop) {
+    el.scrollTop = nextTop;
+    scrollTop.value = nextTop;
+  }
+}
+
+defineExpose({ scrollToIndex });
+
 onMounted(() => {
   if (!host.value) return;
   viewportHeight.value = host.value.clientHeight || viewportHeight.value;

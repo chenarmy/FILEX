@@ -146,7 +146,8 @@ A typed, inspectable proposal produced by the assistant. It contains the target 
 - Remote file browser bound to the active session.
 - Optional local file pane for deliberate drag/drop and path selection.
 - A keyboard-accessible right-click menu for selection, opening, copy path, upload/download, create file or folder, rename, delete, quick recursive delete, refresh, and permission editing.
-- Native multi-file and folder upload selection. Opening a remote file can use the built-in editor, the OS association, or a user-selected external editor executable.
+- Native multi-file and folder upload selection, drag-and-drop, and clipboard copy/paste (`Ctrl+C`/`Ctrl+V` or `Cmd+C`/`Cmd+V` from the OS file manager or local browser pane into the remote pane). Opening a remote file can use the built-in editor, the OS association, or a user-selected external editor executable.
+- Keyboard letter/prefix typeahead navigation in both local and remote folder panes to locate and focus matching folders or files across standard and virtualized directory listings.
 - Managed external editing copies one remote file into an app-owned cache and watches local saves. A stable local save is atomically uploaded over the original remote path only when the remote revision still matches the version FILEX opened; conflicts stop automatic upload.
 - Remote permission editing with owner/group/other read-write-execute controls, optional bounded recursion, and explicit all/files/directories scope.
 - Transfer queue with pause when technically supported, cancel, retry, conflict policy, partial failure, and restart recovery.

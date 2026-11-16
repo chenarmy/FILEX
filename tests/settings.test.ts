@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { SUPPORTED_TEXT_ENCODINGS } from '@/domain/encodings';
 import { defaultSafeSettings, defaultUiFontFamily, readSafeSettings, writeSafeSettings } from '@/runtime/safeSettingsRepository';
 
 describe('safe settings repository', () => {
@@ -133,5 +134,18 @@ describe('safe settings repository', () => {
       textEditorPreference: 'internal',
       externalEditorPath: null,
     });
+  });
+
+  it('supports all ten terminal and file text encodings cleanly in settings and TextDecoder', () => {
+    expect(SUPPORTED_TEXT_ENCODINGS).toHaveLength(10);
+    for (const item of SUPPORTED_TEXT_ENCODINGS) {
+      writeSafeSettings({ ...defaultSafeSettings, terminalEncoding: item.value });
+      expect(readSafeSettings().terminalEncoding).toBe(item.value);
+      expect(() => new TextDecoder(item.value)).not.toThrow();
+    }
+    localStorage.setItem('filex.safe-settings.v1', JSON.stringify({
+      terminalEncoding: 'iso-8859-99',
+    }));
+    expect(readSafeSettings().terminalEncoding).toBe('utf-8');
   });
 });

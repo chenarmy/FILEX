@@ -120,6 +120,8 @@ export const useConnectionsStore = defineStore('connections', () => {
       tags: [...profile.tags],
       authenticationMethod: profile.authenticationMethod,
       identityFile: profile.identityFile,
+      keyId: profile.keyId ?? null,
+      proxyProfileId: profile.proxyProfileId ?? null,
       proxyJump: profile.proxyJump,
       proxyJumpProfileIds: [...profile.proxyJumpProfileIds],
     });

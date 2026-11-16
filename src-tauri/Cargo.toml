@@ -19,6 +19,7 @@ encoding_rs = "0.8"
 filex-contracts = { path = "../crates/filex-contracts" }
 filex-core = { path = "../crates/filex-core" }
 filex-credentials = { path = "../crates/filex-credentials" }
+filex-local-terminal = { path = "../crates/filex-local-terminal" }
 filex-ssh = { path = "../crates/filex-ssh" }
 filex-storage = { path = "../crates/filex-storage" }
 russh-sftp = "3.0"

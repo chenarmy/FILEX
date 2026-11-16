@@ -192,7 +192,8 @@ The inspector supports:
 Right-clicking a row selects it and opens one floating menu near the pointer, clamped to the viewport. Right-clicking empty pane space opens the non-row actions. The menu uses arrow/Home/End navigation, nested submenus for Open with, Choose text editor and New, Escape/outside-click dismissal, and restores focus to the row or pane. The menu contains:
 
 - Refresh, Open, Open with (text editor/system association), Choose text editor (built-in/external/set external executable), Copy path.
-- Download, Upload file, Upload folder.
+- Download, Upload file, Upload folder, Paste upload (`Ctrl+V` / `Cmd+V`), and Copy for upload (`Ctrl+C` / `Cmd+C` in the local pane).
+- Letter/prefix typeahead navigation (`a-z`, `0-9`, `.`, etc.) and arrow/Home/End row traversal inside focused folder panes with transient locate feedback.
 - New file and new folder in the current or clicked folder.
 - Rename, Delete, Quick recursive delete, and Permissions.
 

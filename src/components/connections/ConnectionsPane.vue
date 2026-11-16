@@ -78,7 +78,10 @@ function recentDate(value: string | null): string {
 async function openProfile(profile: ConnectionProfile): Promise<void> {
   if (sessions.busy) return;
   connections.select(profile.id);
-  const existing = [...sessions.summaries].reverse().find((session) => session.profileId === profile.id && session.state !== 'closed');
+  const currentActive = sessions.activeSession;
+  const existing = currentActive?.profileId === profile.id && currentActive.state !== 'closed'
+    ? currentActive
+    : [...sessions.summaries].reverse().find((session) => session.profileId === profile.id && session.state !== 'closed');
   if (existing) {
     sessions.selectSession(existing.id);
     if (existing.state === 'disconnected' || existing.state === 'failed') await sessions.reconnectActive();

@@ -1,9 +1,19 @@
+mod clipboard_files;
+mod command_history;
+mod elevated_access;
 mod external_editor;
+mod key_proxy_library;
 mod known_hosts;
+mod local_terminal;
+mod path_bookmarks;
 mod profile_export;
+mod remote_jobs;
 mod remote_ops;
+mod remote_relay;
 mod session_runtime;
 mod terminal_logging;
+mod text_encoding;
+mod transfer_resume;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -28,20 +38,24 @@ use filex_contracts::{
     KnownHostsImportPreview, LocalDirectoryListing, LocalFileEntry, LocalTextPreview,
     LocalTextSaveResult, MaintenanceArtifact, NetworkSnapshot, OperationResult, OpsCategory,
     OpsSnapshot, ProcessSignal, ProcessSnapshot, QuickConnectInput, RecordHostTrustInput,
-    RemoteDirectoryListing, RemotePermissionUpdateResult, RemoteState, RemoteTextPreview,
-    RemoteTextSaveResult, RuntimePaths, SafeSettings, SaveCommandSnippetInput,
-    SessionConnectionProgress, SessionSummary, SshConfigImportPreview, SystemMonitorSnapshot,
-    TransferState, TransferTask, TunnelRule, TunnelSummary, UpdateConnectionProfileInput,
-    UpdateRemotePermissionsInput, UpdateStatus, UpdateTunnelRuleInput,
+    RemoteDirectoryListing, RemoteJobOutputChunk, RemoteJobSummary, RemotePermissionUpdateResult,
+    RemoteState, RemoteTextPreview, RemoteTextSaveResult, RuntimePaths, SafeSettings,
+    SaveCommandSnippetInput, SessionConnectionProgress, SessionSummary, SshConfigImportPreview,
+    StartRemoteJobInput, SystemMonitorSnapshot, TransferState, TransferTask, TunnelRule,
+    TunnelSummary, UpdateConnectionProfileInput, UpdateRemotePermissionsInput, UpdateStatus,
+    UpdateTunnelRuleInput,
 };
 use filex_core::{
-    HostTrustService, ProfileService, SettingsService, TransferService, TunnelRuleService,
+    CommandHistoryService, HostTrustService, PathBookmarkService, ProfileService,
+    ProxyProfileService, SettingsService, SshKeyService, TransferService, TunnelRuleService,
     parse_ssh_config, validate_profile,
 };
 use filex_credentials::{CredentialError, CredentialKind, CredentialStore, SystemCredentialStore};
+use filex_local_terminal::LocalTerminalRuntime;
 use filex_ssh::{TerminalOutput, TerminalOutputEvent};
 use filex_storage::SqliteProfileRepository;
 use futures_util::StreamExt;
+use remote_jobs::RemoteJobRuntime;
 use serde::Serialize;
 use session_runtime::{CopyOperationControl, SessionRuntime};
 use tauri::{Emitter, Manager, State, ipc::Channel, webview::PageLoadEvent};
@@ -84,7 +98,7 @@ const ASSISTANT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const ASSISTANT_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 const COMMAND_SNIPPETS_KEY: &str = "command_snippets";
 const AUTO_BACKUP_RETENTION_COUNT: usize = 30;
-const PRIVATE_KEY_PASSPHRASE_MAX_BYTES: usize = 16 * 1024;
+pub(crate) const PRIVATE_KEY_PASSPHRASE_MAX_BYTES: usize = 16 * 1024;
 const QUICK_PASSWORD_MAX_BYTES: usize = 16 * 1024;
 const APP_SHUTDOWN_NOT_STARTED: u8 = 0;
 const APP_SHUTDOWN_RUNNING: u8 = 1;
@@ -2700,8 +2714,18 @@ fn list_connection_profiles(
 #[tauri::command]
 fn create_connection_profile(
     profiles: State<'_, ProfileService>,
+    keys: State<'_, SshKeyService>,
+    proxies: State<'_, ProxyProfileService>,
     input: CreateConnectionProfileInput,
 ) -> OperationResult<ConnectionProfile> {
+    if let Err(error) = validate_key_and_proxy_references(
+        input.key_id.as_deref(),
+        input.proxy_profile_id.as_deref(),
+        &keys,
+        &proxies,
+    ) {
+        return OperationResult::failure(error);
+    }
     match profiles.create(input) {
         Ok(profile) => OperationResult::success(profile),
         Err(error) => OperationResult::failure(error),
@@ -2711,10 +2735,20 @@ fn create_connection_profile(
 #[tauri::command]
 fn update_connection_profile(
     profiles: State<'_, ProfileService>,
+    keys: State<'_, SshKeyService>,
+    proxies: State<'_, ProxyProfileService>,
     credentials: State<'_, SystemCredentialStore>,
     id: String,
     input: UpdateConnectionProfileInput,
 ) -> OperationResult<ConnectionProfile> {
+    if let Err(error) = validate_key_and_proxy_references(
+        input.key_id.as_deref(),
+        input.proxy_profile_id.as_deref(),
+        &keys,
+        &proxies,
+    ) {
+        return OperationResult::failure(error);
+    }
     let previous = match profiles.get(&id) {
         Ok(profile) => profile,
         Err(error) => return OperationResult::failure(error),
@@ -2734,6 +2768,24 @@ fn update_connection_profile(
         }
         Err(error) => OperationResult::failure(error),
     }
+}
+
+fn validate_key_and_proxy_references(
+    key_id: Option<&str>,
+    proxy_profile_id: Option<&str>,
+    keys: &SshKeyService,
+    proxies: &ProxyProfileService,
+) -> Result<(), AppError> {
+    if let Some(id) = key_id.map(str::trim).filter(|value| !value.is_empty()) {
+        let _ = keys.get(id)?;
+    }
+    if let Some(id) = proxy_profile_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let _ = proxies.get(id)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2826,8 +2878,10 @@ fn import_default_ssh_config(
             // require FILEX's supported password flow; keep IdentityFile as inert metadata.
             authentication_method: AuthenticationMethod::Password,
             identity_file: candidate.identity_file,
+            key_id: None,
             proxy_jump: candidate.proxy_jump,
             proxy_jump_profile_ids: Vec::new(),
+            proxy_profile_id: None,
         }) {
             Ok(profile) => imported.push(profile),
             Err(error) => return OperationResult::failure(error),
@@ -2949,6 +3003,7 @@ fn runtime_paths(app: tauri::AppHandle) -> OperationResult<RuntimePaths> {
 fn resolve_profile_route(
     profiles: &ProfileService,
     destination: &ConnectionProfile,
+    keys: &SshKeyService,
 ) -> Result<Vec<ConnectionProfile>, AppError> {
     let all_profiles = profiles.list()?;
     let mut route = Vec::with_capacity(destination.proxy_jump_profile_ids.len() + 1);
@@ -2962,6 +3017,7 @@ fn resolve_profile_route(
         route.push(profile.clone());
     }
     route.push(destination.clone());
+    key_proxy_library::resolve_route_key_paths(&mut route, keys)?;
     Ok(route)
 }
 
@@ -2993,7 +3049,7 @@ async fn probe_quick_session_host_key(
         Err(error) => return Ok(OperationResult::failure(error)),
     };
     let route = vec![profile.clone()];
-    match sessions.probe_route(&profile, &route, &trust).await {
+    match sessions.probe_route(&profile, &route, None, &trust).await {
         Ok(challenge) => {
             let session_id = challenge.session.id.clone();
             match sessions.bind_quick_profile(&session_id, profile) {
@@ -3008,10 +3064,14 @@ async fn probe_quick_session_host_key(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn probe_session_host_key(
     profile_id: String,
     profiles: State<'_, ProfileService>,
+    keys: State<'_, SshKeyService>,
+    proxies: State<'_, ProxyProfileService>,
+    credentials: State<'_, SystemCredentialStore>,
     trust: State<'_, HostTrustService>,
     settings: State<'_, SettingsService>,
     sessions: State<'_, SessionRuntime>,
@@ -3026,20 +3086,40 @@ async fn probe_session_host_key(
         Ok(profile) => profile,
         Err(error) => return Ok(OperationResult::failure(error)),
     };
-    let route = match resolve_profile_route(&profiles, &profile) {
+    let route = match resolve_profile_route(&profiles, &profile, &keys) {
         Ok(route) => route,
         Err(error) => return Ok(OperationResult::failure(error)),
     };
-    Ok(match sessions.probe_route(&profile, &route, &trust).await {
-        Ok(challenge) => OperationResult::success(challenge),
-        Err(error) => OperationResult::failure(error),
-    })
+    let hop0_proxy = match key_proxy_library::resolve_proxy_spec(
+        route
+            .first()
+            .and_then(|hop| hop.proxy_profile_id.as_deref()),
+        &proxies,
+        &credentials,
+    ) {
+        Ok(spec) => spec,
+        Err(error) => return Ok(OperationResult::failure(error)),
+    };
+    let resolved_profile = route.last().unwrap_or(&profile);
+    Ok(
+        match sessions
+            .probe_route(resolved_profile, &route, hop0_proxy.as_ref(), &trust)
+            .await
+        {
+            Ok(challenge) => OperationResult::success(challenge),
+            Err(error) => OperationResult::failure(error),
+        },
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn reprobe_session_host_key(
     session_id: String,
     profiles: State<'_, ProfileService>,
+    keys: State<'_, SshKeyService>,
+    proxies: State<'_, ProxyProfileService>,
+    credentials: State<'_, SystemCredentialStore>,
     trust: State<'_, HostTrustService>,
     settings: State<'_, SettingsService>,
     sessions: State<'_, SessionRuntime>,
@@ -3055,7 +3135,7 @@ async fn reprobe_session_host_key(
             let route = vec![profile.clone()];
             return Ok(
                 match sessions
-                    .reprobe_route(&session_id, &profile, &route, &trust)
+                    .reprobe_route(&session_id, &profile, &route, None, &trust)
                     .await
                 {
                     Ok(challenge) => OperationResult::success(challenge),
@@ -3074,13 +3154,30 @@ async fn reprobe_session_host_key(
         Ok(profile) => profile,
         Err(error) => return Ok(OperationResult::failure(error)),
     };
-    let route = match resolve_profile_route(&profiles, &profile) {
+    let route = match resolve_profile_route(&profiles, &profile, &keys) {
         Ok(route) => route,
         Err(error) => return Ok(OperationResult::failure(error)),
     };
+    let hop0_proxy = match key_proxy_library::resolve_proxy_spec(
+        route
+            .first()
+            .and_then(|hop| hop.proxy_profile_id.as_deref()),
+        &proxies,
+        &credentials,
+    ) {
+        Ok(spec) => spec,
+        Err(error) => return Ok(OperationResult::failure(error)),
+    };
+    let resolved_profile = route.last().unwrap_or(&profile);
     Ok(
         match sessions
-            .reprobe_route(&session_id, &profile, &route, &trust)
+            .reprobe_route(
+                &session_id,
+                resolved_profile,
+                &route,
+                hop0_proxy.as_ref(),
+                &trust,
+            )
             .await
         {
             Ok(challenge) => OperationResult::success(challenge),
@@ -3137,12 +3234,15 @@ fn save_profile_private_key_passphrase(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn connect_password_session(
     app: tauri::AppHandle,
     session_id: String,
     sessions: State<'_, SessionRuntime>,
     profiles: State<'_, ProfileService>,
+    keys: State<'_, SshKeyService>,
+    proxies: State<'_, ProxyProfileService>,
     trust: State<'_, HostTrustService>,
     credentials: State<'_, SystemCredentialStore>,
     settings: State<'_, SettingsService>,
@@ -3153,7 +3253,8 @@ async fn connect_password_session(
             settings.keepalive_seconds,
         );
     }
-    let (route, profile) = match route_auth_context(&session_id, &sessions, &profiles).await {
+    let (route, profile) = match route_auth_context(&session_id, &sessions, &profiles, &keys).await
+    {
         Ok(context) => context,
         Err(error) => return Ok(OperationResult::failure(error)),
     };
@@ -3181,8 +3282,25 @@ async fn connect_password_session(
         Ok(password) => password,
         Err(error) => return Ok(OperationResult::failure(map_credential_error(&error))),
     };
+    let hop0_proxy = match key_proxy_library::resolve_proxy_spec(
+        route
+            .first()
+            .and_then(|hop| hop.proxy_profile_id.as_deref()),
+        &proxies,
+        &credentials,
+    ) {
+        Ok(spec) => spec,
+        Err(error) => return Ok(OperationResult::failure(error)),
+    };
     let result = sessions
-        .connect_route_password(&session_id, &route, &profile, password.expose(), &trust)
+        .connect_route_password(
+            &session_id,
+            &route,
+            &profile,
+            password.expose(),
+            hop0_proxy.as_ref(),
+            &trust,
+        )
         .await;
     Ok(connected_session_result(app, session_id, result, &profiles))
 }
@@ -3230,7 +3348,14 @@ async fn connect_quick_password_session(
         ));
     }
     let result = sessions
-        .connect_route_password(&session_id, &route, &profile, password.as_str(), &trust)
+        .connect_route_password(
+            &session_id,
+            &route,
+            &profile,
+            password.as_str(),
+            None,
+            &trust,
+        )
         .await;
     match result {
         Ok((progress, output)) => {
@@ -3243,12 +3368,15 @@ async fn connect_quick_password_session(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn connect_private_key_session(
     app: tauri::AppHandle,
     session_id: String,
     sessions: State<'_, SessionRuntime>,
     profiles: State<'_, ProfileService>,
+    keys: State<'_, SshKeyService>,
+    proxies: State<'_, ProxyProfileService>,
     trust: State<'_, HostTrustService>,
     credentials: State<'_, SystemCredentialStore>,
     settings: State<'_, SettingsService>,
@@ -3259,7 +3387,8 @@ async fn connect_private_key_session(
             settings.keepalive_seconds,
         );
     }
-    let (route, profile) = match route_auth_context(&session_id, &sessions, &profiles).await {
+    let (route, profile) = match route_auth_context(&session_id, &sessions, &profiles, &keys).await
+    {
         Ok(context) => context,
         Err(error) => return Ok(OperationResult::failure(error)),
     };
@@ -3274,7 +3403,20 @@ async fn connect_private_key_session(
             authentication_method_mismatch_error(),
         ));
     }
-    let passphrase = match profile.credential_ref.as_deref() {
+    let key_passphrase_ref = match profile
+        .key_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(key_id) => match keys.get(key_id) {
+            Ok(entry) => entry.passphrase_ref,
+            Err(error) => return Ok(OperationResult::failure(error)),
+        },
+        None => None,
+    };
+    let effective_passphrase_ref = key_passphrase_ref.or_else(|| profile.credential_ref.clone());
+    let passphrase = match effective_passphrase_ref.as_deref() {
         Some(reference) => {
             if !CredentialKind::PrivateKeyPassphrase.matches_reference(reference) {
                 return Ok(OperationResult::failure(credential_type_mismatch_error()));
@@ -3286,24 +3428,39 @@ async fn connect_private_key_session(
         }
         None => None,
     };
+    let hop0_proxy = match key_proxy_library::resolve_proxy_spec(
+        route
+            .first()
+            .and_then(|hop| hop.proxy_profile_id.as_deref()),
+        &proxies,
+        &credentials,
+    ) {
+        Ok(spec) => spec,
+        Err(error) => return Ok(OperationResult::failure(error)),
+    };
     let result = sessions
         .connect_route_private_key(
             &session_id,
             &route,
             &profile,
             passphrase.as_ref().map(|secret| secret.expose()),
+            hop0_proxy.as_ref(),
             &trust,
         )
         .await;
     Ok(connected_session_result(app, session_id, result, &profiles))
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn connect_agent_session(
     app: tauri::AppHandle,
     session_id: String,
     sessions: State<'_, SessionRuntime>,
     profiles: State<'_, ProfileService>,
+    keys: State<'_, SshKeyService>,
+    proxies: State<'_, ProxyProfileService>,
+    credentials: State<'_, SystemCredentialStore>,
     trust: State<'_, HostTrustService>,
     settings: State<'_, SettingsService>,
 ) -> Result<OperationResult<SessionConnectionProgress>, ()> {
@@ -3313,7 +3470,8 @@ async fn connect_agent_session(
             settings.keepalive_seconds,
         );
     }
-    let (route, profile) = match route_auth_context(&session_id, &sessions, &profiles).await {
+    let (route, profile) = match route_auth_context(&session_id, &sessions, &profiles, &keys).await
+    {
         Ok(context) => context,
         Err(error) => return Ok(OperationResult::failure(error)),
     };
@@ -3328,19 +3486,29 @@ async fn connect_agent_session(
             authentication_method_mismatch_error(),
         ));
     }
+    let hop0_proxy = match key_proxy_library::resolve_proxy_spec(
+        route
+            .first()
+            .and_then(|hop| hop.proxy_profile_id.as_deref()),
+        &proxies,
+        &credentials,
+    ) {
+        Ok(spec) => spec,
+        Err(error) => return Ok(OperationResult::failure(error)),
+    };
     let result = sessions
-        .connect_route_agent(&session_id, &route, &profile, &trust)
+        .connect_route_agent(&session_id, &route, &profile, hop0_proxy.as_ref(), &trust)
         .await;
     Ok(connected_session_result(app, session_id, result, &profiles))
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TerminalEventPayload {
-    session_id: String,
-    kind: &'static str,
-    data: Option<Vec<u8>>,
-    exit_status: Option<u32>,
+pub(crate) struct TerminalEventPayload {
+    pub(crate) session_id: String,
+    pub(crate) kind: &'static str,
+    pub(crate) data: Option<Vec<u8>>,
+    pub(crate) exit_status: Option<u32>,
 }
 
 fn connected_session_result(
@@ -3367,6 +3535,7 @@ async fn route_auth_context(
     session_id: &str,
     sessions: &SessionRuntime,
     profiles: &ProfileService,
+    keys: &SshKeyService,
 ) -> Result<(Vec<ConnectionProfile>, ConnectionProfile), AppError> {
     let summary = sessions.summary(session_id)?;
     let destination = match profiles.get(&summary.profile_id) {
@@ -3376,7 +3545,7 @@ async fn route_auth_context(
             return Err(error);
         }
     };
-    let route = match resolve_profile_route(profiles, &destination) {
+    let route = match resolve_profile_route(profiles, &destination, keys) {
         Ok(route) => route,
         Err(error) => {
             let _ = sessions.cancel_attempt(session_id).await;
@@ -3436,6 +3605,10 @@ fn spawn_terminal_output(app: tauri::AppHandle, session_id: String, mut output: 
             }
             let _ = app.emit("terminal-output", payload);
             if terminal_closed {
+                let _ = app
+                    .state::<RemoteJobRuntime>()
+                    .mark_session_disconnected(Some(&app), &session_id)
+                    .await;
                 let runtime = app.state::<SessionRuntime>();
                 let _ = runtime.remote_closed(&session_id).await;
                 let _ = app
@@ -3454,7 +3627,18 @@ async fn write_terminal(
     data: Vec<u8>,
     encoding: String,
     sessions: State<'_, SessionRuntime>,
+    local_terminals: State<'_, LocalTerminalRuntime>,
 ) -> Result<OperationResult<()>, ()> {
+    if local_terminals.contains(&session_id) {
+        let encoded = match text_encoding::encode_terminal_bytes(&data, &encoding) {
+            Ok(bytes) => bytes,
+            Err(error) => return Ok(OperationResult::failure(error)),
+        };
+        return Ok(match local_terminals.write(&session_id, encoded) {
+            Ok(()) => OperationResult::success(()),
+            Err(error) => OperationResult::failure(error),
+        });
+    }
     Ok(
         match sessions.write_terminal(&session_id, data, &encoding).await {
             Ok(()) => OperationResult::success(()),
@@ -3469,7 +3653,14 @@ async fn resize_terminal(
     columns: u32,
     rows: u32,
     sessions: State<'_, SessionRuntime>,
+    local_terminals: State<'_, LocalTerminalRuntime>,
 ) -> Result<OperationResult<()>, ()> {
+    if local_terminals.contains(&session_id) {
+        return Ok(match local_terminals.resize(&session_id, columns, rows) {
+            Ok(()) => OperationResult::success(()),
+            Err(error) => OperationResult::failure(error),
+        });
+    }
     Ok(
         match sessions.resize_terminal(&session_id, columns, rows).await {
             Ok(()) => OperationResult::success(()),
@@ -3639,7 +3830,7 @@ fn is_supported_local_text(content: &str) -> bool {
     })
 }
 
-fn read_local_text_for_revision(path: &Path) -> Result<String, AppError> {
+fn read_local_text_for_revision(path: &Path, encoding_label: &str) -> Result<String, AppError> {
     let mut bytes = Vec::new();
     fs::File::open(path)
         .and_then(|mut file| file.read_to_end(&mut bytes))
@@ -3647,15 +3838,21 @@ fn read_local_text_for_revision(path: &Path) -> Result<String, AppError> {
     if bytes.len() > LOCAL_TEXT_MAX_BYTES as usize {
         return Err(local_text_error("LOCAL_TEXT_TOO_LARGE"));
     }
-    let text = String::from_utf8(bytes).map_err(|_| local_text_error("LOCAL_TEXT_ENCODING"))?;
-    if !is_supported_local_text(&text) {
-        return Err(local_text_error("LOCAL_TEXT_ENCODING"));
-    }
-    Ok(text)
+    text_encoding::decode_text_bytes(&bytes, encoding_label, false).map_err(|error| {
+        if error.code == "TEXT_ENCODING_UNSUPPORTED" {
+            error
+        } else {
+            local_text_error("LOCAL_TEXT_ENCODING")
+        }
+    })
 }
 
 #[tauri::command]
-fn preview_local_text(path: String) -> OperationResult<LocalTextPreview> {
+fn preview_local_text(path: String, encoding: Option<String>) -> OperationResult<LocalTextPreview> {
+    let selected_encoding = encoding.as_deref().unwrap_or("utf-8");
+    if let Err(error) = text_encoding::resolve_text_encoding(selected_encoding) {
+        return OperationResult::failure(error);
+    }
     let (entry_path, _) = match canonical_local_entry(&path) {
         Ok(paths) => paths,
         Err(error) => return OperationResult::failure(error),
@@ -3680,20 +3877,16 @@ fn preview_local_text(path: String) -> OperationResult<LocalTextPreview> {
     let truncated = bytes.len() > LOCAL_TEXT_MAX_BYTES as usize
         || metadata.len() > u64::from(LOCAL_TEXT_MAX_BYTES);
     bytes.truncate(LOCAL_TEXT_MAX_BYTES as usize);
-    let content = match String::from_utf8(bytes) {
+    let content = match text_encoding::decode_text_bytes(&bytes, selected_encoding, truncated) {
         Ok(content) => content,
-        Err(error) if error.utf8_error().error_len().is_none() && truncated => {
-            let valid_up_to = error.utf8_error().valid_up_to();
-            match String::from_utf8(error.into_bytes()[..valid_up_to].to_vec()) {
-                Ok(content) => content,
-                Err(_) => return OperationResult::failure(local_text_error("LOCAL_TEXT_ENCODING")),
-            }
+        Err(error) => {
+            return OperationResult::failure(if error.code == "TEXT_ENCODING_UNSUPPORTED" {
+                error
+            } else {
+                local_text_error("LOCAL_TEXT_ENCODING")
+            });
         }
-        Err(_) => return OperationResult::failure(local_text_error("LOCAL_TEXT_ENCODING")),
     };
-    if !is_supported_local_text(&content) {
-        return OperationResult::failure(local_text_error("LOCAL_TEXT_ENCODING"));
-    }
     OperationResult::success(LocalTextPreview {
         path: entry_path.to_string_lossy().into_owned(),
         bytes: u32::try_from(content.len()).unwrap_or(LOCAL_TEXT_MAX_BYTES),
@@ -3734,12 +3927,21 @@ fn save_local_text(
     path: String,
     content: String,
     expected_revision: String,
+    encoding: Option<String>,
 ) -> OperationResult<LocalTextSaveResult> {
     if content.len() > LOCAL_TEXT_MAX_BYTES as usize {
         return OperationResult::failure(local_text_error("LOCAL_TEXT_TOO_LARGE"));
     }
     if !is_supported_local_text(&content) {
         return OperationResult::failure(local_text_error("LOCAL_TEXT_ENCODING"));
+    }
+    let selected_encoding = encoding.as_deref().unwrap_or("utf-8");
+    let encoded_bytes = match text_encoding::encode_text_lossless(&content, selected_encoding) {
+        Ok(bytes) => bytes,
+        Err(error) => return OperationResult::failure(error),
+    };
+    if encoded_bytes.len() > LOCAL_TEXT_MAX_BYTES as usize {
+        return OperationResult::failure(local_text_error("LOCAL_TEXT_TOO_LARGE"));
     }
     let (source, parent) = match canonical_local_entry(&path) {
         Ok(paths) => paths,
@@ -3752,7 +3954,7 @@ fn save_local_text(
     if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
         return OperationResult::failure(local_text_error("LOCAL_TEXT_SAVE_FAILED"));
     }
-    let current = match read_local_text_for_revision(&source) {
+    let current = match read_local_text_for_revision(&source, selected_encoding) {
         Ok(current) => current,
         Err(error) => return OperationResult::failure(error),
     };
@@ -3767,7 +3969,7 @@ fn save_local_text(
             .write(true)
             .create_new(true)
             .open(&temporary_path)?;
-        temporary.write_all(content.as_bytes())?;
+        temporary.write_all(&encoded_bytes)?;
         temporary.sync_all()?;
         drop(temporary);
         #[cfg(unix)]
@@ -3787,7 +3989,7 @@ fn save_local_text(
 
     // Re-check the source revision right before swapping so a concurrent edit
     // does not get overwritten by the staged replacement.
-    match read_local_text_for_revision(&source) {
+    match read_local_text_for_revision(&source, selected_encoding) {
         Ok(latest) if session_runtime::text_revision(latest.as_bytes()) == expected_revision => {}
         Ok(_) => {
             let _ = fs::remove_file(&temporary_path);
@@ -4426,7 +4628,9 @@ fn canonical_local_directory(path: &str) -> Result<std::path::PathBuf, AppError>
     }
 }
 
-fn canonical_local_entry(path: &str) -> Result<(std::path::PathBuf, std::path::PathBuf), AppError> {
+pub(crate) fn canonical_local_entry(
+    path: &str,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), AppError> {
     if path.is_empty() || path.len() > 4_096 || path.contains('\0') {
         return Err(local_file_operation_error());
     }
@@ -4460,10 +4664,14 @@ fn validate_local_basename(name: &str) -> Result<(), AppError> {
 async fn preview_remote_text(
     session_id: String,
     path: String,
+    encoding: Option<String>,
     sessions: State<'_, SessionRuntime>,
 ) -> Result<OperationResult<RemoteTextPreview>, ()> {
     Ok(
-        match sessions.preview_remote_text(&session_id, &path).await {
+        match sessions
+            .preview_remote_text(&session_id, &path, encoding.as_deref())
+            .await
+        {
             Ok(preview) => OperationResult::success(preview),
             Err(error) => OperationResult::failure(error),
         },
@@ -4689,11 +4897,18 @@ async fn save_remote_text(
     path: String,
     content: String,
     expected_revision: String,
+    encoding: Option<String>,
     sessions: State<'_, SessionRuntime>,
 ) -> Result<OperationResult<RemoteTextSaveResult>, ()> {
     Ok(
         match sessions
-            .save_remote_text(&session_id, &path, &content, &expected_revision)
+            .save_remote_text(
+                &session_id,
+                &path,
+                &content,
+                &expected_revision,
+                encoding.as_deref(),
+            )
             .await
         {
             Ok(result) => OperationResult::success(result),
@@ -5064,21 +5279,39 @@ async fn disconnect_session(
     app: tauri::AppHandle,
     session_id: String,
     sessions: State<'_, SessionRuntime>,
+    local_terminals: State<'_, LocalTerminalRuntime>,
     logs: State<'_, TerminalLogRuntime>,
+    remote_jobs: State<'_, RemoteJobRuntime>,
 ) -> Result<OperationResult<SessionSummary>, ()> {
-    let result = match sessions.disconnect(&session_id).await {
-        Ok(summary) => OperationResult::success(summary),
-        Err(error) => OperationResult::failure(error),
+    let result = if local_terminals.contains(&session_id) {
+        match local_terminals.close(&session_id) {
+            Ok(summary) => OperationResult::success(summary),
+            Err(error) => OperationResult::failure(error),
+        }
+    } else {
+        let _ = remote_jobs
+            .mark_session_disconnected(Some(&app), &session_id)
+            .await;
+        match sessions.disconnect(&session_id).await {
+            Ok(summary) => OperationResult::success(summary),
+            Err(error) => OperationResult::failure(error),
+        }
     };
     let _ = logs.stop(Some(&app), &session_id).await;
     Ok(result)
 }
 
 #[tauri::command]
-fn list_sessions(sessions: State<'_, SessionRuntime>) -> OperationResult<Vec<SessionSummary>> {
-    match sessions.list() {
-        Ok(summaries) => OperationResult::success(summaries),
-        Err(error) => OperationResult::failure(error),
+fn list_sessions(
+    sessions: State<'_, SessionRuntime>,
+    local_terminals: State<'_, LocalTerminalRuntime>,
+) -> OperationResult<Vec<SessionSummary>> {
+    match (sessions.list(), local_terminals.list()) {
+        (Ok(mut ssh), Ok(local)) => {
+            ssh.extend(local);
+            OperationResult::success(ssh)
+        }
+        (Err(error), _) | (_, Err(error)) => OperationResult::failure(error),
     }
 }
 
@@ -5090,6 +5323,147 @@ fn list_transfers(transfers: State<'_, TransferService>) -> OperationResult<Vec<
     }
 }
 
+fn spawn_transfer_worker(
+    app: tauri::AppHandle,
+    worker_task: TransferTask,
+    session_id: String,
+    destination_session_id: Option<String>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let progress_app = app.clone();
+        let progress_task_id = worker_task.id.clone();
+        let handle_event = move |event: transfer_resume::TransferRuntimeEvent| {
+            let transfers = progress_app.state::<TransferService>();
+            let updated = match event {
+                transfer_resume::TransferRuntimeEvent::Metadata {
+                    source_size_bytes,
+                    source_mtime_ms,
+                    staging_path,
+                    resume_state,
+                } => transfers.record_resume_metadata(
+                    &progress_task_id,
+                    source_size_bytes,
+                    source_mtime_ms,
+                    staging_path,
+                    resume_state,
+                ),
+                transfer_resume::TransferRuntimeEvent::Progress {
+                    bytes_transferred,
+                    total_bytes,
+                } => {
+                    if let Some(total_bytes) = total_bytes {
+                        let _ = transfers.set_total_bytes(&progress_task_id, total_bytes);
+                    }
+                    transfers.progress(&progress_task_id, bytes_transferred)
+                }
+                transfer_resume::TransferRuntimeEvent::IdentityChanged => return,
+            };
+            if let Ok(task) = updated {
+                let _ = progress_app.emit("transfer-updated", task);
+            }
+        };
+        let result = if worker_task.direction == filex_contracts::TransferDirection::RemoteToRemote
+        {
+            let Some(destination_sid) = destination_session_id.as_deref() else {
+                let transfers = app.state::<TransferService>();
+                let sessions = app.state::<SessionRuntime>();
+                let _ = sessions.finish_transfer(&worker_task.id);
+                if let Ok(task) =
+                    transfers.fail(&worker_task.id, transfer_session_unavailable_error())
+                {
+                    let _ = app.emit("transfer-updated", task);
+                }
+                return;
+            };
+            app.state::<SessionRuntime>()
+                .execute_remote_relay_transfer(
+                    &session_id,
+                    destination_sid,
+                    &worker_task,
+                    handle_event,
+                )
+                .await
+        } else {
+            app.state::<SessionRuntime>()
+                .execute_transfer(&session_id, &worker_task, handle_event)
+                .await
+        };
+        let transfers = app.state::<TransferService>();
+        let sessions = app.state::<SessionRuntime>();
+        let updated = match result {
+            Ok(bytes) => transfers.complete(&worker_task.id, bytes),
+            Err(error) if error.code == "TRANSFER_IDENTITY_CHANGED" => {
+                transfers.mark_identity_changed(&worker_task.id, error)
+            }
+            Err(error) if error.code == "TRANSFER_INTERRUPTED" => {
+                let bytes = sessions.transfer_bytes_transferred(&worker_task.id);
+                transfers.interrupt(&worker_task.id, bytes, error)
+            }
+            Err(error) => transfers.fail(&worker_task.id, error),
+        };
+        let _ = sessions.finish_transfer(&worker_task.id);
+        if let Ok(task) = updated {
+            let _ = app.emit("transfer-updated", task);
+        }
+    });
+}
+
+fn connected_session_for_profile(
+    sessions: &SessionRuntime,
+    session_id: Option<&str>,
+    profile_id: &str,
+) -> Option<String> {
+    let sid = session_id?;
+    match sessions.summary(sid) {
+        Ok(session)
+            if session.profile_id == profile_id
+                && session.state == filex_contracts::SessionState::Connected =>
+        {
+            Some(session.id)
+        }
+        _ => None,
+    }
+}
+
+fn try_start_transfer_worker(
+    app: &tauri::AppHandle,
+    sessions: &SessionRuntime,
+    transfers: &TransferService,
+    task: TransferTask,
+    session_id: Option<&str>,
+    destination_session_id: Option<&str>,
+) -> Result<Option<TransferTask>, AppError> {
+    let Some(source_sid) = connected_session_for_profile(sessions, session_id, &task.profile_id)
+    else {
+        return Ok(None);
+    };
+    let dest_sid = if task.direction == filex_contracts::TransferDirection::RemoteToRemote {
+        let Some(dest_profile_id) = task.destination_profile_id.as_deref() else {
+            return Ok(None);
+        };
+        let Some(resolved) =
+            connected_session_for_profile(sessions, destination_session_id, dest_profile_id)
+        else {
+            return Ok(None);
+        };
+        Some(resolved)
+    } else {
+        None
+    };
+
+    sessions.prepare_transfer_with_destination(&task.id, &source_sid, dest_sid.as_deref())?;
+    let running = match transfers.start_with_destination(&task.id, &source_sid, dest_sid.as_deref())
+    {
+        Ok(task) => task,
+        Err(error) => {
+            let _ = sessions.finish_transfer(&task.id);
+            return Err(error);
+        }
+    };
+    spawn_transfer_worker(app.clone(), running.clone(), source_sid, dest_sid);
+    Ok(Some(running))
+}
+
 #[tauri::command]
 fn enqueue_transfer(
     app: tauri::AppHandle,
@@ -5097,64 +5471,24 @@ fn enqueue_transfer(
     transfers: State<'_, TransferService>,
     input: CreateTransferInput,
     session_id: Option<String>,
+    destination_session_id: Option<String>,
 ) -> OperationResult<TransferTask> {
     let task = match transfers.enqueue(input) {
         Ok(task) => task,
         Err(error) => return OperationResult::failure(error),
     };
-    let Some(session_id) = session_id else {
-        return OperationResult::success(task);
-    };
-    let session = match sessions.summary(&session_id) {
-        Ok(session)
-            if session.profile_id == task.profile_id
-                && session.state == filex_contracts::SessionState::Connected =>
-        {
-            session
-        }
-        _ => return OperationResult::success(task),
-    };
-    if let Err(error) = sessions.prepare_transfer(&task.id, &session.id) {
-        return OperationResult::failure(error);
+    match try_start_transfer_worker(
+        &app,
+        &sessions,
+        &transfers,
+        task.clone(),
+        session_id.as_deref(),
+        destination_session_id.as_deref(),
+    ) {
+        Ok(Some(running)) => OperationResult::success(running),
+        Ok(None) => OperationResult::success(task),
+        Err(error) => OperationResult::failure(error),
     }
-    let running = match transfers.start(&task.id, &session.id) {
-        Ok(task) => task,
-        Err(error) => {
-            let _ = sessions.finish_transfer(&task.id);
-            return OperationResult::failure(error);
-        }
-    };
-    let worker_task = running.clone();
-    tauri::async_runtime::spawn(async move {
-        let progress_app = app.clone();
-        let progress_task_id = worker_task.id.clone();
-        let result = app
-            .state::<SessionRuntime>()
-            .execute_transfer(&session_id, &worker_task, move |bytes, total_bytes| {
-                let transfers = progress_app.state::<TransferService>();
-                let updated = if let Some(total_bytes) = total_bytes {
-                    transfers.set_total_bytes(&progress_task_id, total_bytes)
-                } else {
-                    transfers.progress(&progress_task_id, bytes)
-                };
-                if let Ok(task) = updated {
-                    let _ = progress_app.emit("transfer-updated", task);
-                }
-            })
-            .await;
-        let transfers = app.state::<TransferService>();
-        let updated = match result {
-            Ok(bytes) => transfers.complete(&worker_task.id, bytes),
-            Err(error) => transfers.fail(&worker_task.id, error),
-        };
-        let _ = app
-            .state::<SessionRuntime>()
-            .finish_transfer(&worker_task.id);
-        if let Ok(task) = updated {
-            let _ = app.emit("transfer-updated", task);
-        }
-    });
-    OperationResult::success(running)
 }
 
 #[tauri::command]
@@ -5164,30 +5498,52 @@ async fn resume_transfer(
     transfers: State<'_, TransferService>,
     id: String,
     session_id: String,
+    destination_session_id: Option<String>,
 ) -> Result<OperationResult<TransferTask>, ()> {
     Ok(async {
         let existing = match transfers.get(&id) {
             Ok(task) => task,
             Err(error) => return OperationResult::failure(error),
         };
-        let session = match sessions.summary(&session_id) {
-            Ok(session)
-                if session.profile_id == existing.profile_id
-                    && session.state == filex_contracts::SessionState::Connected =>
-            {
-                session
-            }
-            _ => return OperationResult::failure(transfer_session_unavailable_error()),
+        if existing.resume_state == filex_contracts::TransferResumeState::IdentityChanged {
+            return OperationResult::failure(transfer_resume::transfer_identity_changed_error());
+        }
+        let Some(source_sid) =
+            connected_session_for_profile(&sessions, Some(&session_id), &existing.profile_id)
+        else {
+            return OperationResult::failure(transfer_session_unavailable_error());
+        };
+        let dest_sid = if existing.direction == filex_contracts::TransferDirection::RemoteToRemote {
+            let Some(dest_profile_id) = existing.destination_profile_id.as_deref() else {
+                return OperationResult::failure(transfer_session_unavailable_error());
+            };
+            let Some(resolved) = connected_session_for_profile(
+                &sessions,
+                destination_session_id.as_deref(),
+                dest_profile_id,
+            ) else {
+                return OperationResult::failure(transfer_session_unavailable_error());
+            };
+            Some(resolved)
+        } else {
+            None
         };
 
         if existing.state == TransferState::Paused {
-            match sessions.prepare_transfer_resume(&id, &session.id).await {
+            match sessions
+                .prepare_transfer_resume_with_destination(&id, &source_sid, dest_sid.as_deref())
+                .await
+            {
                 Ok(true) => {
                     let resumed = match transfers.resume(&id) {
                         Ok(task) => task,
                         Err(error) => return OperationResult::failure(error),
                     };
-                    match sessions.resume_transfer_control(&id, &session.id) {
+                    match sessions.resume_transfer_control_with_destination(
+                        &id,
+                        &source_sid,
+                        dest_sid.as_deref(),
+                    ) {
                         Ok(true) => {
                             let _ = app.emit("transfer-updated", resumed.clone());
                             return OperationResult::success(resumed);
@@ -5211,50 +5567,21 @@ async fn resume_transfer(
             }
         }
 
-        let queued = match transfers.retry(&id) {
-            Ok(task) => task,
-            Err(error) => return OperationResult::failure(error),
-        };
-        if let Err(error) = sessions.prepare_transfer(&queued.id, &session.id) {
+        let running =
+            match transfers.prepare_checkpoint_resume(&id, &source_sid, dest_sid.as_deref()) {
+                Ok(task) => task,
+                Err(error) => return OperationResult::failure(error),
+            };
+        if let Err(error) = sessions.prepare_transfer_with_destination(
+            &running.id,
+            &source_sid,
+            dest_sid.as_deref(),
+        ) {
+            let bytes = running.bytes_transferred;
+            let _ = transfers.pause(&running.id, bytes);
             return OperationResult::failure(error);
         }
-        let running = match transfers.start(&queued.id, &session.id) {
-            Ok(task) => task,
-            Err(error) => {
-                let _ = sessions.finish_transfer(&queued.id);
-                return OperationResult::failure(error);
-            }
-        };
-        let worker_task = running.clone();
-        tauri::async_runtime::spawn(async move {
-            let progress_app = app.clone();
-            let progress_task_id = worker_task.id.clone();
-            let result = app
-                .state::<SessionRuntime>()
-                .execute_transfer(&session_id, &worker_task, move |bytes, total_bytes| {
-                    let transfers = progress_app.state::<TransferService>();
-                    let updated = if let Some(total_bytes) = total_bytes {
-                        transfers.set_total_bytes(&progress_task_id, total_bytes)
-                    } else {
-                        transfers.progress(&progress_task_id, bytes)
-                    };
-                    if let Ok(task) = updated {
-                        let _ = progress_app.emit("transfer-updated", task);
-                    }
-                })
-                .await;
-            let transfers = app.state::<TransferService>();
-            let updated = match result {
-                Ok(bytes) => transfers.complete(&worker_task.id, bytes),
-                Err(error) => transfers.fail(&worker_task.id, error),
-            };
-            let _ = app
-                .state::<SessionRuntime>()
-                .finish_transfer(&worker_task.id);
-            if let Ok(task) = updated {
-                let _ = app.emit("transfer-updated", task);
-            }
-        });
+        spawn_transfer_worker(app, running.clone(), source_sid, dest_sid);
         OperationResult::success(running)
     }
     .await)
@@ -5288,7 +5615,11 @@ async fn pause_transfer(
             }
             Err(error) => {
                 if let Some(session_id) = current.session_id.as_deref() {
-                    let _ = sessions.resume_transfer_control(&id, session_id);
+                    let _ = sessions.resume_transfer_control_with_destination(
+                        &id,
+                        session_id,
+                        current.destination_session_id.as_deref(),
+                    );
                 }
                 OperationResult::failure(error)
             }
@@ -5297,19 +5628,62 @@ async fn pause_transfer(
     .await)
 }
 
+async fn cleanup_task_staging_file(
+    sessions: &SessionRuntime,
+    task: &TransferTask,
+    fallback_session_id: Option<&str>,
+    fallback_destination_session_id: Option<&str>,
+) {
+    let Some(staging_path) = task.staging_path.as_deref() else {
+        return;
+    };
+    match task.direction {
+        filex_contracts::TransferDirection::Download => {
+            let _ = tokio::fs::remove_file(staging_path).await;
+        }
+        filex_contracts::TransferDirection::Upload => {
+            if let Some(session_id) = task.session_id.as_deref().or(fallback_session_id) {
+                let _ = sessions
+                    .remove_remote_staging_file(session_id, staging_path)
+                    .await;
+            }
+        }
+        filex_contracts::TransferDirection::RemoteToRemote => {
+            if let Some(session_id) = task
+                .destination_session_id
+                .as_deref()
+                .or(fallback_destination_session_id)
+            {
+                let _ = sessions
+                    .remove_remote_staging_file(session_id, staging_path)
+                    .await;
+            }
+        }
+    }
+}
+
 #[tauri::command]
-fn cancel_transfer(
+async fn cancel_transfer(
     sessions: State<'_, SessionRuntime>,
     transfers: State<'_, TransferService>,
     id: String,
-) -> OperationResult<TransferTask> {
-    if let Err(error) = sessions.cancel_transfer(&id) {
-        return OperationResult::failure(error);
+) -> Result<OperationResult<TransferTask>, ()> {
+    Ok(async {
+        let existing = transfers.get(&id).ok();
+        if let Err(error) = sessions.cancel_transfer(&id) {
+            return OperationResult::failure(error);
+        }
+        match transfers.cancel(&id) {
+            Ok(task) => {
+                if let Some(existing) = existing.as_ref() {
+                    cleanup_task_staging_file(&sessions, existing, None, None).await;
+                }
+                OperationResult::success(task)
+            }
+            Err(error) => OperationResult::failure(error),
+        }
     }
-    match transfers.cancel(&id) {
-        Ok(task) => OperationResult::success(task),
-        Err(error) => OperationResult::failure(error),
-    }
+    .await)
 }
 
 #[tauri::command]
@@ -5324,6 +5698,136 @@ fn retry_transfer(
     }
     match transfers.retry(&id) {
         Ok(task) => OperationResult::success(task),
+        Err(error) => OperationResult::failure(error),
+    }
+}
+
+#[tauri::command]
+async fn reset_transfer_staging(
+    app: tauri::AppHandle,
+    sessions: State<'_, SessionRuntime>,
+    transfers: State<'_, TransferService>,
+    id: String,
+    session_id: Option<String>,
+    destination_session_id: Option<String>,
+) -> Result<OperationResult<TransferTask>, ()> {
+    Ok(async {
+        let existing = match transfers.get(&id) {
+            Ok(task) => task,
+            Err(error) => return OperationResult::failure(error),
+        };
+        if let Some(active_session_id) = existing.session_id.as_deref() {
+            let _ = sessions.cancel_transfer(&id);
+            let _ = active_session_id;
+        }
+        cleanup_task_staging_file(
+            &sessions,
+            &existing,
+            session_id.as_deref(),
+            destination_session_id.as_deref(),
+        )
+        .await;
+        let reset = match transfers.reset_staging(&id) {
+            Ok(task) => task,
+            Err(error) => return OperationResult::failure(error),
+        };
+        match try_start_transfer_worker(
+            &app,
+            &sessions,
+            &transfers,
+            reset.clone(),
+            session_id.as_deref(),
+            destination_session_id.as_deref(),
+        ) {
+            Ok(Some(running)) => OperationResult::success(running),
+            Ok(None) => {
+                let _ = app.emit("transfer-updated", reset.clone());
+                OperationResult::success(reset)
+            }
+            Err(error) => OperationResult::failure(error),
+        }
+    }
+    .await)
+}
+
+#[tauri::command]
+fn clear_completed_transfers(
+    transfers: State<'_, TransferService>,
+) -> OperationResult<Vec<TransferTask>> {
+    match transfers.clear_completed() {
+        Ok(tasks) => OperationResult::success(tasks),
+        Err(error) => OperationResult::failure(error),
+    }
+}
+
+#[tauri::command]
+async fn start_remote_job(
+    app: tauri::AppHandle,
+    input: StartRemoteJobInput,
+    sessions: State<'_, SessionRuntime>,
+    remote_jobs: State<'_, RemoteJobRuntime>,
+) -> Result<OperationResult<RemoteJobSummary>, ()> {
+    Ok(match remote_jobs.start_job(app, &sessions, input).await {
+        Ok(summary) => OperationResult::success(summary),
+        Err(error) => OperationResult::failure(error),
+    })
+}
+
+#[tauri::command]
+fn list_remote_jobs(
+    session_id: Option<String>,
+    remote_jobs: State<'_, RemoteJobRuntime>,
+) -> OperationResult<Vec<RemoteJobSummary>> {
+    match remote_jobs.list_jobs(session_id.as_deref()) {
+        Ok(jobs) => OperationResult::success(jobs),
+        Err(error) => OperationResult::failure(error),
+    }
+}
+
+#[tauri::command]
+fn read_remote_job_output(
+    job_id: String,
+    since_offset: Option<u64>,
+    max_bytes: Option<usize>,
+    remote_jobs: State<'_, RemoteJobRuntime>,
+) -> OperationResult<RemoteJobOutputChunk> {
+    match remote_jobs.read_job_output(&job_id, since_offset, max_bytes) {
+        Ok(chunk) => OperationResult::success(chunk),
+        Err(error) => OperationResult::failure(error),
+    }
+}
+
+#[tauri::command]
+async fn cancel_remote_job(
+    app: tauri::AppHandle,
+    job_id: String,
+    remote_jobs: State<'_, RemoteJobRuntime>,
+) -> Result<OperationResult<RemoteJobSummary>, ()> {
+    Ok(match remote_jobs.cancel_job(Some(&app), &job_id).await {
+        Ok(summary) => OperationResult::success(summary),
+        Err(error) => OperationResult::failure(error),
+    })
+}
+
+#[tauri::command]
+async fn terminate_remote_job(
+    app: tauri::AppHandle,
+    job_id: String,
+    remote_jobs: State<'_, RemoteJobRuntime>,
+) -> Result<OperationResult<RemoteJobSummary>, ()> {
+    Ok(match remote_jobs.terminate_job(Some(&app), &job_id).await {
+        Ok(summary) => OperationResult::success(summary),
+        Err(error) => OperationResult::failure(error),
+    })
+}
+
+#[tauri::command]
+fn dismiss_remote_job(
+    job_id: String,
+    remote_jobs: State<'_, RemoteJobRuntime>,
+) -> OperationResult<Vec<RemoteJobSummary>> {
+    match remote_jobs.dismiss_job(&job_id) {
+        Ok(jobs) => OperationResult::success(jobs),
         Err(error) => OperationResult::failure(error),
     }
 }
@@ -5368,6 +5872,12 @@ fn schedule_graceful_exit<R: tauri::Runtime>(
         }
         if let Some(editors) = app.try_state::<ExternalEditorRuntime>() {
             editors.shutdown().await;
+        }
+        if let Some(local_terminals) = app.try_state::<LocalTerminalRuntime>() {
+            local_terminals.shutdown();
+        }
+        if let Some(remote_jobs) = app.try_state::<RemoteJobRuntime>() {
+            remote_jobs.shutdown().await;
         }
         if let Some(sessions) = app.try_state::<SessionRuntime>()
             && let Err(error) = sessions.shutdown().await
@@ -5432,6 +5942,10 @@ pub fn run() {
             );
             app.manage(repository.clone());
             app.manage(ProfileService::new(repository.clone()));
+            app.manage(SshKeyService::new(repository.clone()));
+            app.manage(ProxyProfileService::new(repository.clone()));
+            app.manage(CommandHistoryService::new(repository.clone()));
+            app.manage(PathBookmarkService::new(repository.clone()));
             app.manage(HostTrustService::new(repository.clone()));
             app.manage(SettingsService::new(repository.clone()));
             let transfers = TransferService::new(repository.clone());
@@ -5441,7 +5955,9 @@ pub fn run() {
             app.manage(transfers);
             app.manage(TunnelRuleService::new(repository.clone()));
             app.manage(SystemCredentialStore);
+            app.manage(LocalTerminalRuntime::default());
             app.manage(SessionRuntime::default());
+            app.manage(RemoteJobRuntime::default());
             app.manage(ExternalEditorRuntime::default());
             app.manage(CopyOperationRuntime::default());
             app.manage(Arc::new(UpdateDownloadRuntime::default()));
@@ -5503,6 +6019,25 @@ pub fn run() {
             update_connection_profile,
             duplicate_connection_profile,
             delete_connection_profile,
+            key_proxy_library::commands::list_ssh_keys,
+            key_proxy_library::commands::inspect_ssh_key_file,
+            key_proxy_library::commands::register_ssh_key,
+            key_proxy_library::commands::rotate_ssh_key,
+            key_proxy_library::commands::delete_ssh_key,
+            key_proxy_library::commands::count_ssh_key_references,
+            key_proxy_library::commands::list_proxy_profiles,
+            key_proxy_library::commands::create_proxy_profile,
+            key_proxy_library::commands::update_proxy_profile,
+            key_proxy_library::commands::delete_proxy_profile,
+            key_proxy_library::commands::count_proxy_references,
+            key_proxy_library::commands::test_proxy_profile,
+            command_history::commands::list_profile_command_history,
+            command_history::commands::append_profile_command_history,
+            command_history::commands::delete_profile_command_history_entry,
+            command_history::commands::clear_profile_command_history,
+            path_bookmarks::commands::list_path_bookmarks,
+            path_bookmarks::commands::save_path_bookmark,
+            path_bookmarks::commands::delete_path_bookmark,
             preview_default_ssh_config,
             import_default_ssh_config,
             list_host_trust_records,
@@ -5530,6 +6065,8 @@ pub fn run() {
             list_remote_directory,
             list_local_directory,
             inspect_local_entry,
+            clipboard_files::commands::read_clipboard_file_paths,
+            clipboard_files::commands::write_clipboard_file_paths,
             create_remote_file,
             create_local_file,
             create_local_directory,
@@ -5576,12 +6113,34 @@ pub fn run() {
             delete_tunnel_rule,
             disconnect_session,
             list_sessions,
+            local_terminal::list_local_shell_options,
+            local_terminal::open_local_terminal,
+            local_terminal::close_local_terminal,
+            elevated_access::commands::get_elevated_access_status,
+            elevated_access::commands::acquire_elevated_access,
+            elevated_access::commands::revoke_elevated_access,
+            elevated_access::commands::elevated_list_directory,
+            elevated_access::commands::elevated_create_directory,
+            elevated_access::commands::elevated_create_file,
+            elevated_access::commands::elevated_rename_entry,
+            elevated_access::commands::elevated_delete_entry,
+            elevated_access::commands::elevated_chmod_entry,
+            elevated_access::commands::elevated_preview_text,
+            elevated_access::commands::elevated_save_text,
             list_transfers,
             enqueue_transfer,
             resume_transfer,
             pause_transfer,
             cancel_transfer,
-            retry_transfer
+            retry_transfer,
+            reset_transfer_staging,
+            clear_completed_transfers,
+            start_remote_job,
+            list_remote_jobs,
+            read_remote_job_output,
+            cancel_remote_job,
+            terminate_remote_job,
+            dismiss_remote_job
         ])
         .build(tauri::generate_context!())
         .expect("failed to build FILEX desktop application")
@@ -5600,7 +6159,7 @@ pub fn run() {
         });
 }
 
-fn map_credential_error(error: &CredentialError) -> AppError {
+pub(crate) fn map_credential_error(error: &CredentialError) -> AppError {
     let code = match error {
         CredentialError::InvalidReference => "CREDENTIAL_REFERENCE_INVALID",
         CredentialError::NotFound => "CREDENTIAL_NOT_FOUND",
@@ -5651,7 +6210,7 @@ fn is_profile_credential_reference(reference: &str) -> bool {
         || CredentialKind::PrivateKeyPassphrase.matches_reference(reference)
 }
 
-fn credential_type_mismatch_error() -> AppError {
+pub(crate) fn credential_type_mismatch_error() -> AppError {
     AppError {
         code: "CREDENTIAL_TYPE_MISMATCH".to_owned(),
         message_key: "errors.credentialTypeMismatch".to_owned(),
@@ -5671,7 +6230,7 @@ fn authentication_method_mismatch_error() -> AppError {
     }
 }
 
-fn private_key_passphrase_size_error() -> AppError {
+pub(crate) fn private_key_passphrase_size_error() -> AppError {
     AppError {
         code: "SSH_PRIVATE_KEY_PASSPHRASE_TOO_LARGE".to_owned(),
         message_key: "errors.privateKeyPassphraseTooLong".to_owned(),
@@ -5694,8 +6253,10 @@ fn quick_connection_profile(input: QuickConnectInput) -> Result<ConnectionProfil
         tags: Vec::new(),
         authentication_method: AuthenticationMethod::Password,
         identity_file: None,
+        key_id: None,
         proxy_jump: None,
         proxy_jump_profile_ids: Vec::new(),
+        proxy_profile_id: None,
     };
     validate_profile(&candidate)?;
     if !valid_quick_host(&candidate.host) {
@@ -5733,8 +6294,10 @@ fn quick_connection_profile(input: QuickConnectInput) -> Result<ConnectionProfil
         tags: candidate.tags,
         authentication_method: AuthenticationMethod::Password,
         identity_file: None,
+        key_id: None,
         proxy_jump: None,
         proxy_jump_profile_ids: Vec::new(),
+        proxy_profile_id: None,
         credential_ref: None,
         state: ConnectionState::Idle,
         latency_ms: None,

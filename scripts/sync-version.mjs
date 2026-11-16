@@ -13,6 +13,7 @@ const workspacePackageNames = [
   'filex-core',
   'filex-credentials',
   'filex-desktop',
+  'filex-local-terminal',
   'filex-ssh',
   'filex-storage',
 ];

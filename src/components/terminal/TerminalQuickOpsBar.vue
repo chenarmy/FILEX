@@ -10,6 +10,7 @@ import {
   Radar,
   Route,
   ServerCog,
+  ShieldAlert,
 } from 'lucide-vue-next';
 import { t } from '@/i18n';
 import { useUiStore } from '@/stores/ui';
@@ -25,6 +26,11 @@ const props = defineProps<{
   rows: number;
   cursorCell: { col: number; row: number } | null;
   selectedChars: number;
+  elevatedRemaining?: string | null;
+}>();
+
+const emit = defineEmits<{
+  'revoke-elevation': [];
 }>();
 
 const ui = useUiStore();
@@ -54,6 +60,18 @@ function openOps(category: OpsCategory): void {
       </span>
       <span class="terminal-meta-chip">
         <Circle :size="7" fill="currentColor" />{{ environment }}
+      </span>
+      <span v-if="elevatedRemaining" class="elevated-badge mono" role="status">
+        <ShieldAlert :size="11" />
+        <span>{{ t('elevated.badgeCountdown', { remaining: elevatedRemaining }) }}</span>
+        <button
+          type="button"
+          class="elevated-badge-revoke"
+          :aria-label="t('elevated.revoke')"
+          @click="emit('revoke-elevation')"
+        >
+          {{ t('elevated.revoke') }}
+        </button>
       </span>
       <span class="terminal-meta-chip">{{ sessionStateLabel }}</span>
       <span class="terminal-meta-chip mono">{{ encodingLabel }}</span>

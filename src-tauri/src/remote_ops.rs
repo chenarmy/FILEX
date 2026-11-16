@@ -503,7 +503,7 @@ fn sanitize_log_line(input: &str) -> String {
         .collect()
 }
 
-fn strip_ansi_escape_sequences(input: &str) -> String {
+pub(crate) fn strip_ansi_escape_sequences(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {

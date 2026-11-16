@@ -1,3 +1,10 @@
+pub mod proxy;
+
+pub use proxy::{
+    ProxyConnectionSpec, ProxyProtocolKind, connect_via_proxy, inspect_private_key_file,
+    probe_proxy_endpoint,
+};
+
 use std::{
     future::Future,
     path::Path,
@@ -26,7 +33,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
-const PRIVATE_KEY_MAX_BYTES: usize = 1024 * 1024;
+pub(crate) const PRIVATE_KEY_MAX_BYTES: usize = 1024 * 1024;
 const MAX_AGENT_AUTH_ATTEMPTS: usize = 6;
 
 type RemoteForwardRoutes =
@@ -93,6 +100,16 @@ pub enum SshError {
     DirectoryEntryLimit,
     #[error("SFTP operation was cancelled")]
     Cancelled,
+    #[error("proxy connection failed")]
+    ProxyConnectFailed,
+    #[error("proxy authentication failed")]
+    ProxyAuthenticationFailed,
+    #[error("proxy rejected target connection")]
+    ProxyTargetRejected,
+    #[error("proxy protocol handshake failed")]
+    ProxyHandshakeFailed,
+    #[error("proxy connection timed out")]
+    ProxyTimeout,
     #[error("SSH transport failed")]
     Transport(#[from] russh::Error),
 }
@@ -277,6 +294,83 @@ impl SftpDirectoryReader {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecStreamEvent {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    ExitStatus(u32),
+    ExitSignal {
+        signal_name: String,
+        core_dumped: bool,
+        error_message: String,
+    },
+    Eof,
+    Closed,
+}
+
+pub struct ExecControl {
+    channel: ChannelWriteHalf<client::Msg>,
+}
+
+pub struct ExecOutput {
+    channel: ChannelReadHalf,
+}
+
+impl ExecControl {
+    pub async fn signal_interrupt(&self) -> Result<(), SshError> {
+        self.channel.signal(russh::Sig::INT).await?;
+        Ok(())
+    }
+
+    pub async fn signal_terminate(&self) -> Result<(), SshError> {
+        self.channel.signal(russh::Sig::TERM).await?;
+        Ok(())
+    }
+
+    pub async fn signal_kill(&self) -> Result<(), SshError> {
+        self.channel.signal(russh::Sig::KILL).await?;
+        Ok(())
+    }
+
+    pub async fn close(&self) -> Result<(), SshError> {
+        self.channel.close().await?;
+        Ok(())
+    }
+}
+
+impl ExecOutput {
+    pub async fn next(&mut self) -> ExecStreamEvent {
+        loop {
+            match self.channel.wait().await {
+                Some(ChannelMsg::Data { data }) => {
+                    return ExecStreamEvent::Stdout(data.to_vec());
+                }
+                Some(ChannelMsg::ExtendedData { data, .. }) => {
+                    return ExecStreamEvent::Stderr(data.to_vec());
+                }
+                Some(ChannelMsg::ExitStatus { exit_status }) => {
+                    return ExecStreamEvent::ExitStatus(exit_status);
+                }
+                Some(ChannelMsg::ExitSignal {
+                    signal_name,
+                    core_dumped,
+                    error_message,
+                    ..
+                }) => {
+                    return ExecStreamEvent::ExitSignal {
+                        signal_name: format!("{signal_name:?}"),
+                        core_dumped,
+                        error_message,
+                    };
+                }
+                Some(ChannelMsg::Eof) => return ExecStreamEvent::Eof,
+                Some(ChannelMsg::Close) | None => return ExecStreamEvent::Closed,
+                Some(_) => {}
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalOutputEvent {
     Data(Vec<u8>),
     Exit(u32),
@@ -376,34 +470,38 @@ impl ConnectedSshSession {
     ) -> Result<CommandOutput, SshError> {
         let mut channel = self.handle.channel_open_session().await?;
         channel.exec(true, command.as_bytes()).await?;
-        let operation = async {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            let mut exit_status = None;
-            while let Some(message) = channel.wait().await {
-                match message {
-                    ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
-                    ChannelMsg::ExtendedData { data, .. } => stderr.extend_from_slice(&data),
-                    ChannelMsg::ExitStatus {
-                        exit_status: status,
-                    } => exit_status = Some(status),
-                    ChannelMsg::Close | ChannelMsg::Eof => break,
-                    _ => {}
-                }
-                if stdout.len().saturating_add(stderr.len()) > max_output_bytes {
-                    let _ = channel.close().await;
-                    return Err(SshError::OutputLimit);
-                }
-            }
-            Ok(CommandOutput {
-                stdout,
-                stderr,
-                exit_status,
-            })
-        };
-        tokio::time::timeout(timeout, operation)
-            .await
-            .map_err(|_| SshError::Timeout)?
+        collect_bounded_channel_output(&mut channel, max_output_bytes, timeout).await
+    }
+
+    pub async fn execute_bounded_with_stdin(
+        &self,
+        command: &str,
+        stdin_bytes: &[u8],
+        max_output_bytes: usize,
+        timeout: Duration,
+    ) -> Result<CommandOutput, SshError> {
+        let mut channel = self.handle.channel_open_session().await?;
+        channel.exec(true, command.as_bytes()).await?;
+        if !stdin_bytes.is_empty() {
+            channel.data(stdin_bytes).await?;
+        }
+        channel.eof().await?;
+        collect_bounded_channel_output(&mut channel, max_output_bytes, timeout).await
+    }
+
+    pub async fn open_exec_stream(
+        &self,
+        command: &str,
+    ) -> Result<(ExecControl, ExecOutput), SshError> {
+        let channel = self.handle.channel_open_session().await?;
+        channel.exec(true, command.as_bytes()).await?;
+        let (read_half, write_half) = channel.split();
+        Ok((
+            ExecControl {
+                channel: write_half,
+            },
+            ExecOutput { channel: read_half },
+        ))
     }
 
     pub async fn open_direct_tcpip(
@@ -549,6 +647,10 @@ impl RusshEngine {
             connect_timeout,
             keepalive_interval,
         }
+    }
+
+    pub fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
     }
 
     pub async fn probe_host_key(
@@ -1027,6 +1129,41 @@ async fn connect_agent_client() -> Result<DynamicAgentClient, SshError> {
     }
 }
 
+async fn collect_bounded_channel_output(
+    channel: &mut russh::Channel<client::Msg>,
+    max_output_bytes: usize,
+    timeout: Duration,
+) -> Result<CommandOutput, SshError> {
+    let operation = async {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut exit_status = None;
+        while let Some(message) = channel.wait().await {
+            match message {
+                ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
+                ChannelMsg::ExtendedData { data, .. } => stderr.extend_from_slice(&data),
+                ChannelMsg::ExitStatus {
+                    exit_status: status,
+                } => exit_status = Some(status),
+                ChannelMsg::Close => break,
+                _ => {}
+            }
+            if stdout.len().saturating_add(stderr.len()) > max_output_bytes {
+                let _ = channel.close().await;
+                return Err(SshError::OutputLimit);
+            }
+        }
+        Ok(CommandOutput {
+            stdout,
+            stderr,
+            exit_status,
+        })
+    };
+    tokio::time::timeout(timeout, operation)
+        .await
+        .map_err(|_| SshError::Timeout)?
+}
+
 fn client_config(keepalive_interval: Option<Duration>) -> Arc<Config> {
     Arc::new(Config {
         inactivity_timeout: Some(Duration::from_secs(60)),
@@ -1058,6 +1195,7 @@ mod tests {
 
     struct LifecycleFixtureHandler {
         forward: Arc<tokio::sync::Mutex<Option<ForwardRoute>>>,
+        exec_channels: std::collections::HashMap<ChannelId, (String, Vec<u8>)>,
     }
 
     impl russh::server::Server for LifecycleFixtureServer {
@@ -1066,6 +1204,7 @@ mod tests {
         fn new_client(&mut self, _peer_addr: Option<std::net::SocketAddr>) -> Self::Handler {
             LifecycleFixtureHandler {
                 forward: self.forward.clone(),
+                exec_channels: std::collections::HashMap::new(),
             }
         }
     }
@@ -1121,12 +1260,71 @@ mod tests {
             Ok(())
         }
 
+        async fn exec_request(
+            &mut self,
+            channel: ChannelId,
+            data: &[u8],
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            let command = String::from_utf8_lossy(data).into_owned();
+            session.channel_success(channel)?;
+            if command == "stream:complete" {
+                session.data(channel, b"stdout-chunk\n".to_vec())?;
+                session.extended_data(channel, 1, b"stderr-chunk\n".to_vec())?;
+                session.exit_status_request(channel, 0)?;
+                session.eof(channel)?;
+                session.close(channel)?;
+            } else if command == "stream:follow" {
+                session.data(channel, b"stream-started\n".to_vec())?;
+                self.exec_channels.insert(channel, (command, Vec::new()));
+            } else {
+                self.exec_channels.insert(channel, (command, Vec::new()));
+            }
+            Ok(())
+        }
+
+        async fn signal(
+            &mut self,
+            channel: ChannelId,
+            signal: russh::Sig,
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            if self.exec_channels.remove(&channel).is_some() {
+                let _ = session.exit_signal_request(channel, signal, false, "", "en");
+                let _ = session.eof(channel);
+                let _ = session.close(channel);
+            }
+            Ok(())
+        }
+
+        async fn channel_eof(
+            &mut self,
+            channel: ChannelId,
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            if let Some((command, stdin_bytes)) = self.exec_channels.remove(&channel) {
+                let response = format!(
+                    "cmd={command};stdin={}",
+                    String::from_utf8_lossy(&stdin_bytes)
+                );
+                session.data(channel, response.into_bytes())?;
+                session.exit_status_request(channel, 0)?;
+                session.eof(channel)?;
+                session.close(channel)?;
+            }
+            Ok(())
+        }
+
         async fn data(
             &mut self,
             channel: ChannelId,
             data: &[u8],
             session: &mut Session,
         ) -> Result<(), Self::Error> {
+            if let Some((_cmd, stdin_buf)) = self.exec_channels.get_mut(&channel) {
+                stdin_buf.extend_from_slice(data);
+                return Ok(());
+            }
             let forward = if data == b"trigger-forward" {
                 self.forward.lock().await.clone()
             } else {
@@ -1309,6 +1507,73 @@ mod tests {
             .cancel_remote_forward("127.0.0.1", bound_port)
             .await
             .expect("cancel remote forward");
+        let output = session
+            .execute_bounded_with_stdin(
+                "sudo -S -k -p '' true",
+                b"fixture-sudo\n",
+                8192,
+                Duration::from_secs(2),
+            )
+            .await
+            .expect("execute bounded command with stdin");
+        assert_eq!(output.exit_status, Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "cmd=sudo -S -k -p '' true;stdin=fixture-sudo\n"
+        );
+
+        let (_ctrl_done, mut out_done) = session
+            .open_exec_stream("stream:complete")
+            .await
+            .expect("open completed exec stream");
+        let mut collected_stdout = Vec::new();
+        let mut collected_stderr = Vec::new();
+        let mut collected_exit = None;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), out_done.next())
+                .await
+                .expect("read streaming exec event")
+            {
+                super::ExecStreamEvent::Stdout(bytes) => collected_stdout.extend_from_slice(&bytes),
+                super::ExecStreamEvent::Stderr(bytes) => collected_stderr.extend_from_slice(&bytes),
+                super::ExecStreamEvent::ExitStatus(code) => collected_exit = Some(code),
+                super::ExecStreamEvent::Eof => {}
+                super::ExecStreamEvent::Closed => break,
+                other => panic!("unexpected exec stream event: {other:?}"),
+            }
+        }
+        assert_eq!(collected_stdout, b"stdout-chunk\n");
+        assert_eq!(collected_stderr, b"stderr-chunk\n");
+        assert_eq!(collected_exit, Some(0));
+
+        let (ctrl_sig, mut out_sig) = session
+            .open_exec_stream("stream:follow")
+            .await
+            .expect("open signalled exec stream");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), out_sig.next())
+                .await
+                .expect("read initial stream output"),
+            super::ExecStreamEvent::Stdout(b"stream-started\n".to_vec())
+        );
+        ctrl_sig
+            .signal_terminate()
+            .await
+            .expect("send SIGTERM to exec stream");
+        let mut saw_signal = false;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), out_sig.next())
+                .await
+                .expect("read exit signal event")
+            {
+                super::ExecStreamEvent::ExitSignal { .. } => saw_signal = true,
+                super::ExecStreamEvent::Eof => {}
+                super::ExecStreamEvent::Closed => break,
+                other => panic!("unexpected signalled exec stream event: {other:?}"),
+            }
+        }
+        assert!(saw_signal);
+
         session
             .disconnect()
             .await
@@ -1319,5 +1584,46 @@ mod tests {
             .await
             .expect("stop fixture server")
             .expect("fixture server exits cleanly");
+    }
+
+    pub(crate) struct RunningFixture {
+        pub(crate) port: u16,
+        handle: russh::server::RunningServerHandle,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl RunningFixture {
+        pub(crate) async fn spawn() -> Self {
+            let host_key =
+                russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
+                    .expect("generate fixture host key");
+            let config = Arc::new(russh::server::Config {
+                auth_rejection_time: Duration::ZERO,
+                auth_rejection_time_initial: Some(Duration::ZERO),
+                inactivity_timeout: Some(Duration::from_secs(15)),
+                keys: vec![host_key],
+                ..Default::default()
+            });
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("bind local SSH fixture");
+            let port = listener.local_addr().expect("fixture addr").port();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let mut fixture = LifecycleFixtureServer {
+                    forward: Arc::new(tokio::sync::Mutex::new(None)),
+                };
+                let server = fixture.run_on_socket(config, &listener);
+                let _ = tx.send(server.handle());
+                let _ = server.await;
+            });
+            let handle = rx.await.expect("fixture handle");
+            Self { port, handle, task }
+        }
+
+        pub(crate) async fn shutdown(self) {
+            self.handle.shutdown("fixture completed".to_owned());
+            let _ = tokio::time::timeout(Duration::from_secs(2), self.task).await;
+        }
     }
 }

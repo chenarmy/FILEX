@@ -1,7 +1,7 @@
 export type EnvironmentKind = 'production' | 'staging' | 'development';
 export type ConnectionState = 'idle' | 'connecting' | 'connected' | 'degraded' | 'failed';
 export type InspectorTab = 'files' | 'monitor' | 'session';
-export type TaskTab = 'transfers' | 'tunnels' | 'events';
+export type TaskTab = 'all' | 'transfers' | 'jobs' | 'tunnels' | 'events';
 export type ThemePreference = 'system' | 'dark' | 'light';
 export type TerminalThemePreference =
   | 'match'
@@ -18,7 +18,17 @@ export type TerminalThemePreference =
   | 'solarized-light'
   | 'github-light'
   | 'catppuccin-latte';
-export type TerminalEncoding = 'utf-8' | 'gbk' | 'big5' | 'shift_jis' | 'windows-1252';
+export type TerminalEncoding =
+  | 'utf-8'
+  | 'utf-16le'
+  | 'utf-16be'
+  | 'gbk'
+  | 'gb18030'
+  | 'big5'
+  | 'shift_jis'
+  | 'euc-jp'
+  | 'euc-kr'
+  | 'windows-1252';
 export type LocaleCode = 'zh-CN' | 'en-US';
 export type CredentialStoreStatus = 'available' | 'locked' | 'unavailable' | 'unsupported';
 export type AuthenticationMethod = 'password' | 'private_key' | 'agent';
@@ -65,8 +75,10 @@ export interface ConnectionProfile {
   tags: string[];
   authenticationMethod: AuthenticationMethod;
   identityFile: string | null;
+  keyId?: string | null;
   proxyJump: string | null;
   proxyJumpProfileIds: string[];
+  proxyProfileId?: string | null;
   credentialRef: string | null;
   state: ConnectionState;
   latencyMs: number | null;
@@ -83,8 +95,112 @@ export interface CreateConnectionProfileInput {
   tags: string[];
   authenticationMethod: AuthenticationMethod;
   identityFile: string | null;
+  keyId?: string | null;
   proxyJump: string | null;
   proxyJumpProfileIds: string[];
+  proxyProfileId?: string | null;
+}
+
+export interface SshKeyMetadataInspection {
+  algorithm: string;
+  fingerprintSha256: string;
+  encrypted: boolean;
+  supported: boolean;
+}
+
+export interface SshKeyEntry {
+  id: string;
+  label: string;
+  keyPath: string;
+  algorithm: string;
+  fingerprintSha256: string;
+  hasPassphrase: boolean;
+  passphraseRef: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RegisterSshKeyInput {
+  label: string;
+  keyPath: string;
+  passphrase: string | null;
+  savePassphrase: boolean;
+}
+
+export interface RotateSshKeyInput {
+  keyId: string;
+  label: string | null;
+  newKeyPath: string;
+  passphrase: string | null;
+  savePassphrase: boolean;
+}
+
+export type ProxyKind = 'socks5' | 'http_connect';
+
+export interface ProxyProfile {
+  id: string;
+  label: string;
+  kind: ProxyKind;
+  host: string;
+  port: number;
+  username: string | null;
+  credentialRef: string | null;
+  hasPassword: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateProxyProfileInput {
+  label: string;
+  kind: ProxyKind;
+  host: string;
+  port: number;
+  username: string | null;
+  password: string | null;
+  savePassword: boolean;
+}
+
+export interface UpdateProxyProfileInput {
+  id: string;
+  label: string;
+  kind: ProxyKind;
+  host: string;
+  port: number;
+  username: string | null;
+  password: string | null;
+  savePassword: boolean;
+  clearPassword: boolean;
+}
+
+export interface ProxyPreflightResult {
+  ok: boolean;
+  latencyMs: number;
+  detailCode: string;
+}
+
+export interface ProfileCommandHistoryEntry {
+  id: string;
+  profileId: string;
+  command: string;
+  createdAtMs: number;
+}
+
+export type BookmarkSide = 'local' | 'remote';
+
+export interface PathBookmark {
+  id: string;
+  profileId: string;
+  side: BookmarkSide;
+  label: string;
+  path: string;
+  createdAtMs: number;
+}
+
+export interface CreatePathBookmarkInput {
+  profileId: string;
+  side: BookmarkSide;
+  label: string;
+  path: string;
 }
 
 export interface UpdateConnectionProfileInput extends CreateConnectionProfileInput {
@@ -151,10 +267,74 @@ export type SessionState =
   | 'failed'
   | 'closed';
 
+export type SessionKind = 'ssh' | 'local';
+
+export type CapabilityKind =
+  | 'remote_shell'
+  | 'local_shell'
+  | 'sftp'
+  | 'local_files'
+  | 'remote_edit'
+  | 'host_monitoring'
+  | 'tunneling'
+  | 'remote_jobs'
+  | 'elevated_file_access';
+
+export type LocalShellKind =
+  | 'power_shell_core'
+  | 'windows_power_shell'
+  | 'cmd'
+  | 'bash'
+  | 'zsh'
+  | 'fish'
+  | 'sh';
+
+export interface LocalShellOption {
+  kind: LocalShellKind;
+  label: string;
+  executablePath: string;
+  isDefault: boolean;
+}
+
+export interface OpenLocalTerminalInput {
+  shellKind: LocalShellKind | null;
+  workingDirectory: string | null;
+  columns: number | null;
+  rows: number | null;
+}
+
+export interface OpenLocalTerminalResult {
+  session: SessionSummary;
+  shell: LocalShellOption;
+  workingDirectory: string;
+}
+
+export type PrivilegeState = 'standard' | 'elevated';
+
+export interface ElevatedAccessLeaseSummary {
+  sessionId: string;
+  generation: number;
+  state: PrivilegeState;
+  username: string;
+  host: string;
+  port: number;
+  grantedAtMs: number | null;
+  expiresAtMs: number | null;
+  ttlSeconds: number | null;
+}
+
+export interface AcquireElevatedAccessInput {
+  sessionId: string;
+  password: string | null;
+  ttlSeconds: number;
+}
+
 export interface SessionSummary {
   id: string;
   generation: number;
   profileId: string;
+  sessionKind: SessionKind;
+  capabilities: CapabilityKind[];
   state: SessionState;
   host: string;
   port: number;
@@ -252,9 +432,10 @@ export interface HostTrustRecord {
   lastSeenAt: string;
 }
 
-export type TransferDirection = 'upload' | 'download';
+export type TransferDirection = 'upload' | 'download' | 'remote_to_remote';
 export type TransferState = 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
 export type ConflictPolicy = 'ask' | 'overwrite' | 'skip' | 'rename';
+export type TransferResumeState = 'not_applicable' | 'safe_to_resume' | 'restart_from_beginning' | 'identity_changed';
 
 export interface CreateTransferInput {
   profileId: string;
@@ -263,6 +444,8 @@ export interface CreateTransferInput {
   remotePath: string;
   conflictPolicy: ConflictPolicy;
   totalBytes: number | null;
+  destinationProfileId?: string | null;
+  destinationRemotePath?: string | null;
 }
 
 export interface TransferTask {
@@ -272,10 +455,17 @@ export interface TransferTask {
   direction: TransferDirection;
   localPath: string;
   remotePath: string;
+  destinationProfileId: string | null;
+  destinationSessionId: string | null;
+  destinationRemotePath: string | null;
   state: TransferState;
   bytesTransferred: number;
   totalBytes: number | null;
   conflictPolicy: ConflictPolicy;
+  remoteSizeBytes: number | null;
+  remoteMtimeMs: number | null;
+  stagingPath: string | null;
+  resumeState: TransferResumeState;
   error: AppError | null;
   createdAtMs: number;
   updatedAtMs: number;
@@ -601,6 +791,7 @@ export interface SafeSettings {
   textEditorPreference: TextEditorPreference;
   externalEditorPath: string | null;
   terminalLogging: boolean;
+  compactComposerOpen: boolean;
   backupSchedule: 'off' | 'daily' | 'weekly';
   updateChannel: 'stable' | 'beta';
   shortcuts: KeyboardShortcuts;
@@ -712,4 +903,77 @@ export interface OpsSnapshot {
   kernel?: string | null;
   osRelease?: string | null;
   sections: OpsCommandSection[];
+}
+
+export type RemoteJobState =
+  | 'queued'
+  | 'running'
+  | 'stopping'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'outcome_uncertain';
+
+export type RemoteJobKind =
+  | 'tail_system_log'
+  | 'inspect_disk_usage'
+  | 'check_service_health'
+  | 'inspect_listening_ports'
+  | 'check_system_health';
+
+export type RemoteJobRiskClass = 'read_only' | 'bounded_diagnostic';
+
+export interface StartRemoteJobInput {
+  sessionId: string;
+  kind: RemoteJobKind;
+  targetPath?: string | null;
+  serviceName?: string | null;
+  maxLines?: number | null;
+}
+
+export interface RemoteJobSummary {
+  id: string;
+  sessionId: string;
+  sessionGeneration: number;
+  profileId: string;
+  targetHost: string;
+  targetPort: number;
+  targetUsername: string;
+  kind: RemoteJobKind;
+  commandLabel: string;
+  targetDetail?: string | null;
+  riskClass: RemoteJobRiskClass;
+  state: RemoteJobState;
+  createdAtMs: number;
+  startedAtMs?: number | null;
+  finishedAtMs?: number | null;
+  exitCode?: number | null;
+  exitSignal?: string | null;
+  outputStartOffset: number;
+  outputEndOffset: number;
+  outputRetainedBytes: number;
+  outputTruncated: boolean;
+  error?: AppError | null;
+}
+
+export interface RemoteJobOutputChunk {
+  jobId: string;
+  startOffset: number;
+  endOffset: number;
+  retainedStartOffset: number;
+  retainedEndOffset: number;
+  truncated: boolean;
+  content: string;
+  state: RemoteJobState;
+}
+
+export interface ClipboardFileSnapshot {
+  paths: string[];
+  sequence?: number | null;
+  supported: boolean;
+}
+
+export interface ClipboardFileWriteResult {
+  written: boolean;
+  sequence?: number | null;
 }

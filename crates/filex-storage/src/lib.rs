@@ -1,3 +1,7 @@
+mod command_history;
+mod key_proxy;
+mod path_bookmarks;
+
 use std::{
     collections::HashMap,
     fs,
@@ -9,7 +13,7 @@ use std::{
 use filex_contracts::{
     AppError, AuthenticationMethod, ConflictPolicy, ConnectionProfile, ConnectionState,
     EnvironmentKind, HostTrustRecord, HostTrustSource, RemoteState, SafeSettings,
-    TransferDirection, TransferState, TransferTask, TunnelKind, TunnelRule,
+    TransferDirection, TransferResumeState, TransferState, TransferTask, TunnelKind, TunnelRule,
 };
 use filex_core::{
     HostTrustImportExpectation, HostTrustRepository, ProfileRepository, SettingsRepository,
@@ -188,10 +192,135 @@ const MIGRATIONS: &[Migration] = &[
                 CHECK (auto_start IN (0, 1));
         "#,
     },
+    Migration {
+        version: 8,
+        sql: r#"
+            CREATE TABLE ssh_keys (
+                id TEXT PRIMARY KEY NOT NULL,
+                label TEXT NOT NULL,
+                key_path TEXT NOT NULL,
+                algorithm TEXT NOT NULL,
+                fingerprint_sha256 TEXT NOT NULL,
+                passphrase_ref TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE proxy_profiles (
+                id TEXT PRIMARY KEY NOT NULL,
+                label TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('socks5', 'http_connect')),
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
+                username TEXT,
+                credential_ref TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            ALTER TABLE connection_profiles
+                ADD COLUMN key_id TEXT REFERENCES ssh_keys(id) ON DELETE SET NULL;
+
+            ALTER TABLE connection_profiles
+                ADD COLUMN proxy_profile_id TEXT REFERENCES proxy_profiles(id) ON DELETE SET NULL;
+        "#,
+    },
+    Migration {
+        version: 9,
+        sql: r#"
+            CREATE TABLE profile_command_history (
+                id TEXT PRIMARY KEY NOT NULL,
+                profile_id TEXT NOT NULL REFERENCES connection_profiles(id) ON DELETE CASCADE,
+                command TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            );
+
+            CREATE INDEX profile_command_history_profile_created
+                ON profile_command_history(profile_id, created_at_ms DESC);
+        "#,
+    },
+    Migration {
+        version: 10,
+        sql: r#"
+            CREATE TABLE path_bookmarks (
+                id TEXT PRIMARY KEY NOT NULL,
+                profile_id TEXT NOT NULL REFERENCES connection_profiles(id) ON DELETE CASCADE,
+                side TEXT NOT NULL CHECK (side IN ('local', 'remote')),
+                label TEXT NOT NULL,
+                path TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                UNIQUE(profile_id, side, path)
+            );
+
+            CREATE INDEX path_bookmarks_profile_side_created
+                ON path_bookmarks(profile_id, side, created_at_ms DESC);
+        "#,
+    },
+    Migration {
+        version: 11,
+        sql: r#"
+            ALTER TABLE transfer_tasks
+                ADD COLUMN remote_size_bytes INTEGER CHECK (remote_size_bytes IS NULL OR remote_size_bytes >= 0);
+            ALTER TABLE transfer_tasks
+                ADD COLUMN remote_mtime_ms INTEGER CHECK (remote_mtime_ms IS NULL OR remote_mtime_ms >= 0);
+            ALTER TABLE transfer_tasks
+                ADD COLUMN staging_path TEXT;
+            ALTER TABLE transfer_tasks
+                ADD COLUMN resume_state TEXT NOT NULL DEFAULT 'not_applicable'
+                CHECK (resume_state IN ('not_applicable', 'safe_to_resume', 'restart_from_beginning', 'identity_changed'));
+        "#,
+    },
+    Migration {
+        version: 12,
+        sql: r#"
+            CREATE TABLE transfer_tasks_v12 (
+                id TEXT PRIMARY KEY NOT NULL,
+                profile_id TEXT NOT NULL REFERENCES connection_profiles(id) ON DELETE CASCADE,
+                session_id TEXT,
+                direction TEXT NOT NULL CHECK (direction IN ('upload', 'download', 'remote_to_remote')),
+                local_path TEXT NOT NULL,
+                remote_path TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'paused', 'completed', 'failed', 'cancelled')),
+                bytes_transferred INTEGER NOT NULL DEFAULT 0 CHECK (bytes_transferred >= 0),
+                total_bytes INTEGER CHECK (total_bytes IS NULL OR total_bytes >= 0),
+                conflict_policy TEXT NOT NULL CHECK (conflict_policy IN ('ask', 'overwrite', 'skip', 'rename')),
+                error_json TEXT,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                remote_size_bytes INTEGER CHECK (remote_size_bytes IS NULL OR remote_size_bytes >= 0),
+                remote_mtime_ms INTEGER CHECK (remote_mtime_ms IS NULL OR remote_mtime_ms >= 0),
+                staging_path TEXT,
+                resume_state TEXT NOT NULL DEFAULT 'not_applicable'
+                    CHECK (resume_state IN ('not_applicable', 'safe_to_resume', 'restart_from_beginning', 'identity_changed')),
+                destination_profile_id TEXT REFERENCES connection_profiles(id) ON DELETE CASCADE,
+                destination_session_id TEXT,
+                destination_remote_path TEXT
+            );
+
+            INSERT INTO transfer_tasks_v12 (
+                id, profile_id, session_id, direction, local_path, remote_path, state,
+                bytes_transferred, total_bytes, conflict_policy, error_json, created_at_ms,
+                updated_at_ms, remote_size_bytes, remote_mtime_ms, staging_path, resume_state,
+                destination_profile_id, destination_session_id, destination_remote_path
+            )
+            SELECT
+                id, profile_id, session_id, direction, local_path, remote_path, state,
+                bytes_transferred, total_bytes, conflict_policy, error_json, created_at_ms,
+                updated_at_ms, remote_size_bytes, remote_mtime_ms, staging_path, resume_state,
+                NULL, NULL, NULL
+            FROM transfer_tasks;
+
+            DROP TABLE transfer_tasks;
+            ALTER TABLE transfer_tasks_v12 RENAME TO transfer_tasks;
+
+            CREATE INDEX transfer_tasks_state_created
+                ON transfer_tasks(state, created_at_ms);
+        "#,
+    },
 ];
 
 pub struct SqliteProfileRepository {
-    connection: Mutex<Connection>,
+    pub(crate) connection: Mutex<Connection>,
     database_path: Option<PathBuf>,
 }
 
@@ -476,7 +605,7 @@ impl ProfileRepository for SqliteProfileRepository {
             .prepare(
                 r#"SELECT id, name, group_name, host, port, username, environment, favorite,
                           credential_ref, last_used_at, authentication_method, identity_file,
-                          proxy_jump
+                          proxy_jump, key_id, proxy_profile_id
                    FROM connection_profiles
                    WHERE workspace_id = ?1
                    ORDER BY favorite DESC, name COLLATE NOCASE"#,
@@ -498,8 +627,10 @@ impl ProfileRepository for SqliteProfileRepository {
                     tags: Vec::new(),
                     authentication_method: parse_authentication_method(10, row.get(10)?)?,
                     identity_file: row.get(11)?,
+                    key_id: row.get(13)?,
                     proxy_jump: row.get(12)?,
                     proxy_jump_profile_ids: Vec::new(),
+                    proxy_profile_id: row.get(14)?,
                     credential_ref: row.get(8)?,
                     state: ConnectionState::Idle,
                     latency_ms: None,
@@ -575,8 +706,8 @@ impl ProfileRepository for SqliteProfileRepository {
                 r#"INSERT INTO connection_profiles (
                        id, workspace_id, name, group_name, host, port, username, environment,
                        favorite, credential_ref, last_used_at, authentication_method,
-                       identity_file, proxy_jump
-                   ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"#,
+                       identity_file, proxy_jump, key_id, proxy_profile_id
+                   ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"#,
                 params![
                     profile.id,
                     DEFAULT_WORKSPACE_ID,
@@ -592,6 +723,8 @@ impl ProfileRepository for SqliteProfileRepository {
                     authentication_method_name(&profile.authentication_method),
                     profile.identity_file,
                     profile.proxy_jump,
+                    profile.key_id,
+                    profile.proxy_profile_id,
                 ],
             )
             .map_err(|_| storage_error("PROFILE_WRITE_FAILED"))?;
@@ -630,6 +763,7 @@ impl ProfileRepository for SqliteProfileRepository {
                        name = ?2, group_name = ?3, host = ?4, port = ?5, username = ?6,
                        environment = ?7, favorite = ?8, credential_ref = ?9,
                        authentication_method = ?10, identity_file = ?11, proxy_jump = ?12,
+                       key_id = ?13, proxy_profile_id = ?14,
                        updated_at = CURRENT_TIMESTAMP
                    WHERE id = ?1"#,
                 params![
@@ -645,6 +779,8 @@ impl ProfileRepository for SqliteProfileRepository {
                     authentication_method_name(&profile.authentication_method),
                     profile.identity_file,
                     profile.proxy_jump,
+                    profile.key_id,
+                    profile.proxy_profile_id,
                 ],
             )
             .map_err(|_| storage_error("PROFILE_WRITE_FAILED"))?;
@@ -879,7 +1015,9 @@ impl TransferRepository for SqliteProfileRepository {
             .prepare(
                 r#"SELECT id, profile_id, session_id, direction, local_path, remote_path, state,
                           bytes_transferred, total_bytes, conflict_policy, error_json,
-                          created_at_ms, updated_at_ms
+                          created_at_ms, updated_at_ms, remote_size_bytes, remote_mtime_ms,
+                          staging_path, resume_state, destination_profile_id,
+                          destination_session_id, destination_remote_path
                    FROM transfer_tasks
                    ORDER BY created_at_ms DESC"#,
             )
@@ -900,7 +1038,9 @@ impl TransferRepository for SqliteProfileRepository {
             .prepare(
                 r#"SELECT id, profile_id, session_id, direction, local_path, remote_path, state,
                           bytes_transferred, total_bytes, conflict_policy, error_json,
-                          created_at_ms, updated_at_ms
+                          created_at_ms, updated_at_ms, remote_size_bytes, remote_mtime_ms,
+                          staging_path, resume_state, destination_profile_id,
+                          destination_session_id, destination_remote_path
                    FROM transfer_tasks WHERE id = ?1"#,
             )
             .map_err(|_| storage_error("TRANSFER_QUERY_FAILED"))?;
@@ -921,6 +1061,8 @@ impl TransferRepository for SqliteProfileRepository {
             .map_err(|_| storage_error("DATABASE_LOCK_FAILED"))?;
         let bytes_transferred = to_i64(task.bytes_transferred)?;
         let total_bytes = task.total_bytes.map(to_i64).transpose()?;
+        let remote_size_bytes = task.remote_size_bytes.map(to_i64).transpose()?;
+        let remote_mtime_ms = task.remote_mtime_ms.map(to_i64).transpose()?;
         let created_at_ms = to_i64(task.created_at_ms)?;
         let updated_at_ms = to_i64(task.updated_at_ms)?;
         let error_json = task
@@ -934,8 +1076,10 @@ impl TransferRepository for SqliteProfileRepository {
                 r#"INSERT INTO transfer_tasks (
                        id, profile_id, session_id, direction, local_path, remote_path, state,
                        bytes_transferred, total_bytes, conflict_policy, error_json,
-                       created_at_ms, updated_at_ms
-                   ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"#,
+                       created_at_ms, updated_at_ms, remote_size_bytes, remote_mtime_ms,
+                       staging_path, resume_state, destination_profile_id,
+                       destination_session_id, destination_remote_path
+                   ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)"#,
                 params![
                     task.id,
                     task.profile_id,
@@ -950,6 +1094,13 @@ impl TransferRepository for SqliteProfileRepository {
                     error_json,
                     created_at_ms,
                     updated_at_ms,
+                    remote_size_bytes,
+                    remote_mtime_ms,
+                    task.staging_path,
+                    transfer_resume_state_name(&task.resume_state),
+                    task.destination_profile_id,
+                    task.destination_session_id,
+                    task.destination_remote_path,
                 ],
             )
             .map(|_| ())
@@ -963,6 +1114,8 @@ impl TransferRepository for SqliteProfileRepository {
             .map_err(|_| storage_error("DATABASE_LOCK_FAILED"))?;
         let bytes_transferred = to_i64(task.bytes_transferred)?;
         let total_bytes = task.total_bytes.map(to_i64).transpose()?;
+        let remote_size_bytes = task.remote_size_bytes.map(to_i64).transpose()?;
+        let remote_mtime_ms = task.remote_mtime_ms.map(to_i64).transpose()?;
         let created_at_ms = to_i64(task.created_at_ms)?;
         let updated_at_ms = to_i64(task.updated_at_ms)?;
         let error_json = task
@@ -977,7 +1130,9 @@ impl TransferRepository for SqliteProfileRepository {
                        profile_id = ?2, session_id = ?3, direction = ?4, local_path = ?5,
                        remote_path = ?6, state = ?7, bytes_transferred = ?8, total_bytes = ?9,
                        conflict_policy = ?10, error_json = ?11, created_at_ms = ?12,
-                       updated_at_ms = ?13
+                       updated_at_ms = ?13, remote_size_bytes = ?14, remote_mtime_ms = ?15,
+                       staging_path = ?16, resume_state = ?17, destination_profile_id = ?18,
+                       destination_session_id = ?19, destination_remote_path = ?20
                    WHERE id = ?1"#,
                 params![
                     task.id,
@@ -993,10 +1148,31 @@ impl TransferRepository for SqliteProfileRepository {
                     error_json,
                     created_at_ms,
                     updated_at_ms,
+                    remote_size_bytes,
+                    remote_mtime_ms,
+                    task.staging_path,
+                    transfer_resume_state_name(&task.resume_state),
+                    task.destination_profile_id,
+                    task.destination_session_id,
+                    task.destination_remote_path,
                 ],
             )
             .map(|_| ())
             .map_err(|_| storage_error("TRANSFER_WRITE_FAILED"))
+    }
+
+    fn delete_terminal_transfers(&self) -> Result<u64, AppError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| storage_error("DATABASE_LOCK_FAILED"))?;
+        let deleted = connection
+            .execute(
+                "DELETE FROM transfer_tasks WHERE state IN ('completed', 'failed', 'cancelled')",
+                [],
+            )
+            .map_err(|_| storage_error("TRANSFER_WRITE_FAILED"))?;
+        u64::try_from(deleted).map_err(|_| storage_error("TRANSFER_WRITE_FAILED"))
     }
 }
 
@@ -1136,13 +1312,49 @@ fn map_transfer_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferTask> 
         error,
         created_at_ms: from_i64(11, row.get(11)?)?,
         updated_at_ms: from_i64(12, row.get(12)?)?,
+        remote_size_bytes: row
+            .get::<_, Option<i64>>(13)?
+            .map(|value| from_i64(13, value))
+            .transpose()?,
+        remote_mtime_ms: row
+            .get::<_, Option<i64>>(14)?
+            .map(|value| from_i64(14, value))
+            .transpose()?,
+        staging_path: row.get(15)?,
+        resume_state: parse_transfer_resume_state(16, row.get(16)?)?,
+        destination_profile_id: row.get(17)?,
+        destination_session_id: row.get(18)?,
+        destination_remote_path: row.get(19)?,
     })
+}
+
+fn transfer_resume_state_name(state: &TransferResumeState) -> &'static str {
+    match state {
+        TransferResumeState::NotApplicable => "not_applicable",
+        TransferResumeState::SafeToResume => "safe_to_resume",
+        TransferResumeState::RestartFromBeginning => "restart_from_beginning",
+        TransferResumeState::IdentityChanged => "identity_changed",
+    }
+}
+
+fn parse_transfer_resume_state(
+    index: usize,
+    value: String,
+) -> rusqlite::Result<TransferResumeState> {
+    match value.as_str() {
+        "not_applicable" => Ok(TransferResumeState::NotApplicable),
+        "safe_to_resume" => Ok(TransferResumeState::SafeToResume),
+        "restart_from_beginning" => Ok(TransferResumeState::RestartFromBeginning),
+        "identity_changed" => Ok(TransferResumeState::IdentityChanged),
+        _ => Err(rusqlite::Error::InvalidColumnType(index, value, Type::Text)),
+    }
 }
 
 fn transfer_direction_name(direction: &TransferDirection) -> &'static str {
     match direction {
         TransferDirection::Upload => "upload",
         TransferDirection::Download => "download",
+        TransferDirection::RemoteToRemote => "remote_to_remote",
     }
 }
 
@@ -1150,6 +1362,7 @@ fn parse_transfer_direction(index: usize, value: String) -> rusqlite::Result<Tra
     match value.as_str() {
         "upload" => Ok(TransferDirection::Upload),
         "download" => Ok(TransferDirection::Download),
+        "remote_to_remote" => Ok(TransferDirection::RemoteToRemote),
         _ => Err(rusqlite::Error::InvalidColumnType(index, value, Type::Text)),
     }
 }
@@ -1350,7 +1563,7 @@ fn parse_environment(index: usize, value: String) -> rusqlite::Result<Environmen
     }
 }
 
-fn storage_error(code: &str) -> AppError {
+pub(crate) fn storage_error(code: &str) -> AppError {
     AppError {
         code: code.to_owned(),
         message_key: "errors.profileStorageUnavailable".to_owned(),
@@ -1401,7 +1614,7 @@ mod tests {
     };
     use filex_core::{HostTrustService, ProfileService, TransferService};
 
-    use super::SqliteProfileRepository;
+    use super::{MIGRATIONS, SqliteProfileRepository};
 
     fn input() -> CreateConnectionProfileInput {
         CreateConnectionProfileInput {
@@ -1414,15 +1627,20 @@ mod tests {
             tags: vec!["linux".to_owned(), "edge".to_owned()],
             authentication_method: AuthenticationMethod::Password,
             identity_file: None,
+            key_id: None,
             proxy_jump: None,
             proxy_jump_profile_ids: Vec::new(),
+            proxy_profile_id: None,
         }
     }
 
     #[test]
     fn applies_schema_migrations_once() {
         let repository = SqliteProfileRepository::open_in_memory().expect("database opens");
-        assert_eq!(repository.schema_version().expect("version reads"), 7);
+        assert_eq!(
+            repository.schema_version().expect("version reads"),
+            MIGRATIONS.len() as i64
+        );
     }
 
     #[test]
@@ -1467,6 +1685,8 @@ mod tests {
                     remote_path: "/tmp/archive.tar".to_owned(),
                     conflict_policy: ConflictPolicy::Ask,
                     total_bytes: Some(4096),
+                    destination_profile_id: None,
+                    destination_remote_path: None,
                 })
                 .expect("transfer is queued");
             assert_eq!(task.state, TransferState::Queued);
@@ -1564,8 +1784,10 @@ mod tests {
                     tags: vec!["updated".to_owned()],
                     authentication_method: AuthenticationMethod::Agent,
                     identity_file: None,
+                    key_id: None,
                     proxy_jump: Some("bastion".to_owned()),
                     proxy_jump_profile_ids: Vec::new(),
+                    proxy_profile_id: None,
                 },
             )
             .expect("profile is updated");
@@ -1586,5 +1808,335 @@ mod tests {
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].id, duplicate.id);
         assert_eq!(profiles[0].proxy_jump.as_deref(), Some("bastion"));
+    }
+
+    #[test]
+    fn central_keys_and_proxy_profiles_persist_and_null_references_on_delete() {
+        use filex_contracts::{
+            CreateProxyProfileInput, ProxyKind, RotateSshKeyInput, SshKeyMetadataInspection,
+        };
+        use filex_core::{ProxyProfileService, SshKeyService};
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database_path = directory.path().join("key_proxy.sqlite3");
+        let repo = Arc::new(SqliteProfileRepository::open(&database_path).expect("database opens"));
+        let profiles = ProfileService::new(repo.clone());
+        let keys = SshKeyService::new(repo.clone());
+        let proxies = ProxyProfileService::new(repo.clone());
+
+        let key = keys
+            .register(
+                "Primary Deploy Key",
+                "/keys/deploy_ed25519",
+                &SshKeyMetadataInspection {
+                    algorithm: "ssh-ed25519".to_owned(),
+                    fingerprint_sha256: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                        .to_owned(),
+                    encrypted: false,
+                    supported: true,
+                },
+                None,
+            )
+            .expect("key is registered");
+        let proxy = proxies
+            .create(
+                &CreateProxyProfileInput {
+                    label: "Bastion SOCKS5".to_owned(),
+                    kind: ProxyKind::Socks5,
+                    host: "127.0.0.1".to_owned(),
+                    port: 1080,
+                    username: Some("operator".to_owned()),
+                    password: Some("secret".to_owned()),
+                    save_password: true,
+                },
+                Some("filex-proxy-cred-test".to_owned()),
+            )
+            .expect("proxy profile created");
+
+        let mut profile_input = input();
+        profile_input.authentication_method = AuthenticationMethod::PrivateKey;
+        profile_input.key_id = Some(key.id.clone());
+        profile_input.proxy_profile_id = Some(proxy.id.clone());
+        let profile = profiles
+            .create(profile_input)
+            .expect("profile references key and proxy");
+
+        assert_eq!(keys.count_references(&key.id).expect("key ref count"), 1);
+        assert_eq!(
+            proxies
+                .count_references(&proxy.id)
+                .expect("proxy ref count"),
+            1
+        );
+
+        let rotated = keys
+            .rotate(
+                &RotateSshKeyInput {
+                    key_id: key.id.clone(),
+                    label: None,
+                    new_key_path: "/keys/deploy_ed25519_next".to_owned(),
+                    passphrase: None,
+                    save_passphrase: false,
+                },
+                &SshKeyMetadataInspection {
+                    algorithm: "ssh-ed25519".to_owned(),
+                    fingerprint_sha256: "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+                        .to_owned(),
+                    encrypted: false,
+                    supported: true,
+                },
+                None,
+            )
+            .expect("key rotates");
+        assert_eq!(rotated.key_path, "/keys/deploy_ed25519_next");
+
+        keys.delete(&key.id).expect("key deletes");
+        proxies.delete(&proxy.id).expect("proxy deletes");
+        drop(profiles);
+        drop(keys);
+        drop(proxies);
+        drop(repo);
+
+        let reopened = Arc::new(
+            SqliteProfileRepository::open(&database_path).expect("database reopens after delete"),
+        );
+        let loaded_profile = ProfileService::new(reopened)
+            .get(&profile.id)
+            .expect("profile survives parent deletion");
+        assert!(loaded_profile.key_id.is_none());
+        assert!(loaded_profile.proxy_profile_id.is_none());
+    }
+
+    #[test]
+    fn clear_completed_transfers_preserves_active_and_paused() {
+        let repo = Arc::new(SqliteProfileRepository::open_in_memory().expect("in-memory db"));
+        let profiles = ProfileService::new(repo.clone());
+        let profile = profiles.create(input()).expect("profile creates");
+        let transfers = TransferService::new(repo);
+
+        let queued = transfers
+            .enqueue(CreateTransferInput {
+                profile_id: profile.id.clone(),
+                direction: TransferDirection::Download,
+                local_path: "C:\\tmp\\queued.bin".to_owned(),
+                remote_path: "/tmp/queued.bin".to_owned(),
+                total_bytes: Some(100),
+                conflict_policy: ConflictPolicy::Ask,
+                destination_profile_id: None,
+                destination_remote_path: None,
+            })
+            .expect("queued");
+        let paused = transfers
+            .enqueue(CreateTransferInput {
+                profile_id: profile.id.clone(),
+                direction: TransferDirection::Upload,
+                local_path: "C:\\tmp\\paused.bin".to_owned(),
+                remote_path: "/tmp/paused.bin".to_owned(),
+                total_bytes: Some(200),
+                conflict_policy: ConflictPolicy::Overwrite,
+                destination_profile_id: None,
+                destination_remote_path: None,
+            })
+            .expect("paused enqueued");
+        transfers.pause(&paused.id, 64).expect("paused");
+
+        let done = transfers
+            .enqueue(CreateTransferInput {
+                profile_id: profile.id.clone(),
+                direction: TransferDirection::Download,
+                local_path: "C:\\tmp\\done.bin".to_owned(),
+                remote_path: "/tmp/done.bin".to_owned(),
+                total_bytes: Some(50),
+                conflict_policy: ConflictPolicy::Rename,
+                destination_profile_id: None,
+                destination_remote_path: None,
+            })
+            .expect("done");
+        transfers.start(&done.id, "sess-1").expect("done started");
+        transfers.complete(&done.id, 50).expect("done completed");
+
+        let cancelled = transfers
+            .enqueue(CreateTransferInput {
+                profile_id: profile.id,
+                direction: TransferDirection::Download,
+                local_path: "C:\\tmp\\cancel.bin".to_owned(),
+                remote_path: "/tmp/cancel.bin".to_owned(),
+                total_bytes: None,
+                conflict_policy: ConflictPolicy::Skip,
+                destination_profile_id: None,
+                destination_remote_path: None,
+            })
+            .expect("cancel");
+        transfers.cancel(&cancelled.id).expect("cancelled");
+
+        let remaining = transfers.clear_completed().expect("clears terminal rows");
+        let remaining_ids: Vec<&str> = remaining.iter().map(|item| item.id.as_str()).collect();
+        assert!(remaining_ids.contains(&queued.id.as_str()));
+        assert!(remaining_ids.contains(&paused.id.as_str()));
+        assert!(!remaining_ids.contains(&done.id.as_str()));
+        assert!(!remaining_ids.contains(&cancelled.id.as_str()));
+        assert_eq!(remaining.len(), 2);
+    }
+
+    #[test]
+    fn transfer_checkpoint_identity_persists_across_reopen_and_blocks_changed_resume() {
+        use filex_contracts::TransferResumeState;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database_path = directory.path().join("transfer_resume.sqlite3");
+        let repo = Arc::new(SqliteProfileRepository::open(&database_path).expect("database opens"));
+        let profile = ProfileService::new(repo.clone())
+            .create(input())
+            .expect("profile created");
+        let transfers = TransferService::new(repo.clone());
+
+        let task = transfers
+            .enqueue(CreateTransferInput {
+                profile_id: profile.id,
+                direction: TransferDirection::Download,
+                local_path: "C:\\tmp\\dump.tar.zst".to_owned(),
+                remote_path: "/var/backups/dump.tar.zst".to_owned(),
+                conflict_policy: ConflictPolicy::Overwrite,
+                total_bytes: Some(4096),
+                destination_profile_id: None,
+                destination_remote_path: None,
+            })
+            .expect("transfer queued");
+        transfers
+            .start(&task.id, "sess-active")
+            .expect("transfer starts");
+        transfers
+            .record_resume_metadata(
+                &task.id,
+                Some(4096),
+                Some(1_700_000_000_000),
+                Some("C:\\tmp\\.filex-part-1".to_owned()),
+                TransferResumeState::SafeToResume,
+            )
+            .expect("checkpoint recorded");
+        transfers
+            .progress(&task.id, 1536)
+            .expect("progress updated");
+        drop(transfers);
+        drop(repo);
+
+        let reopened =
+            Arc::new(SqliteProfileRepository::open(&database_path).expect("database reopens"));
+        let recovered_service = TransferService::new(reopened);
+        let recovered = recovered_service
+            .recover_interrupted()
+            .expect("recovers interrupted running transfer");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].state, TransferState::Paused);
+        assert_eq!(recovered[0].bytes_transferred, 1536);
+        assert_eq!(recovered[0].remote_size_bytes, Some(4096));
+        assert_eq!(recovered[0].remote_mtime_ms, Some(1_700_000_000_000));
+        assert_eq!(
+            recovered[0].staging_path.as_deref(),
+            Some("C:\\tmp\\.filex-part-1")
+        );
+        assert_eq!(recovered[0].resume_state, TransferResumeState::SafeToResume);
+
+        let resumed = recovered_service
+            .prepare_checkpoint_resume(&task.id, "sess-next", None)
+            .expect("safe_to_resume preserves progress");
+        assert_eq!(resumed.bytes_transferred, 1536);
+        assert_eq!(
+            resumed.staging_path.as_deref(),
+            Some("C:\\tmp\\.filex-part-1")
+        );
+
+        let changed = recovered_service
+            .mark_identity_changed(
+                &task.id,
+                filex_contracts::AppError {
+                    code: "TRANSFER_IDENTITY_CHANGED".to_owned(),
+                    message_key: "errors.transferIdentityChanged".to_owned(),
+                    retryable: false,
+                    remote_state: filex_contracts::RemoteState::Unchanged,
+                    field: None,
+                },
+            )
+            .expect("identity changed marks task paused");
+        assert_eq!(changed.resume_state, TransferResumeState::IdentityChanged);
+        assert!(
+            recovered_service
+                .prepare_checkpoint_resume(&task.id, "sess-next-2", None)
+                .is_err()
+        );
+
+        let reset = recovered_service
+            .reset_staging(&task.id)
+            .expect("explicit reset re-queues task");
+        assert_eq!(reset.state, TransferState::Queued);
+        assert_eq!(reset.bytes_transferred, 0);
+        assert!(reset.staging_path.is_none());
+        assert_eq!(reset.resume_state, TransferResumeState::NotApplicable);
+    }
+
+    #[test]
+    fn remote_to_remote_transfer_persists_two_endpoints_and_reopens() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database_path = directory.path().join("remote_relay.sqlite3");
+        let repo = Arc::new(SqliteProfileRepository::open(&database_path).expect("database opens"));
+        let source_profile = ProfileService::new(repo.clone())
+            .create(input())
+            .expect("source profile created");
+        let mut destination_input = input();
+        destination_input.name = "Staging Box".to_owned();
+        destination_input.host = "staging.example.net".to_owned();
+        let destination_profile = ProfileService::new(repo.clone())
+            .create(destination_input)
+            .expect("destination profile created");
+
+        let transfers = TransferService::new(repo.clone());
+        let queued = transfers
+            .enqueue(CreateTransferInput {
+                profile_id: source_profile.id.clone(),
+                direction: TransferDirection::RemoteToRemote,
+                local_path: String::new(),
+                remote_path: "/var/log/app.tar.zst".to_owned(),
+                conflict_policy: ConflictPolicy::Overwrite,
+                total_bytes: Some(8192),
+                destination_profile_id: Some(destination_profile.id.clone()),
+                destination_remote_path: Some("/backups/app.tar.zst".to_owned()),
+            })
+            .expect("remote-to-remote transfer queued");
+        assert_eq!(queued.direction, TransferDirection::RemoteToRemote);
+        assert!(queued.local_path.is_empty());
+        assert_eq!(
+            queued.destination_profile_id.as_deref(),
+            Some(destination_profile.id.as_str())
+        );
+        assert_eq!(
+            queued.destination_remote_path.as_deref(),
+            Some("/backups/app.tar.zst")
+        );
+
+        let started = transfers
+            .start_with_destination(&queued.id, "sess-src", Some("sess-dst"))
+            .expect("relay starts");
+        assert_eq!(started.session_id.as_deref(), Some("sess-src"));
+        assert_eq!(started.destination_session_id.as_deref(), Some("sess-dst"));
+        drop(transfers);
+        drop(repo);
+
+        let reopened =
+            Arc::new(SqliteProfileRepository::open(&database_path).expect("database reopens"));
+        let recovered = TransferService::new(reopened)
+            .recover_interrupted()
+            .expect("recovers interrupted relay");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].direction, TransferDirection::RemoteToRemote);
+        assert!(recovered[0].session_id.is_none());
+        assert!(recovered[0].destination_session_id.is_none());
+        assert_eq!(
+            recovered[0].destination_profile_id.as_deref(),
+            Some(destination_profile.id.as_str())
+        );
+        assert_eq!(
+            recovered[0].destination_remote_path.as_deref(),
+            Some("/backups/app.tar.zst")
+        );
     }
 }

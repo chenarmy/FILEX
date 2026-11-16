@@ -9,6 +9,10 @@ import PasswordDialog from '@/components/dialogs/PasswordDialog.vue';
 import PrivateKeyPassphraseDialog from '@/components/dialogs/PrivateKeyPassphraseDialog.vue';
 import TransferDialog from '@/components/dialogs/TransferDialog.vue';
 import TunnelDialog from '@/components/dialogs/TunnelDialog.vue';
+import LocalTerminalDialog from '@/components/dialogs/LocalTerminalDialog.vue';
+import OverviewDialog from '@/components/dialogs/OverviewDialog.vue';
+import ElevatedAccessDialog from '@/components/dialogs/ElevatedAccessDialog.vue';
+import KeyAndProxyLibraryDialog from '@/components/dialogs/KeyAndProxyLibraryDialog.vue';
 import ConfirmDialog from '@/components/dialogs/ConfirmDialog.vue';
 import RemoteTextPreviewDialog from '@/components/dialogs/RemoteTextPreviewDialog.vue';
 import UpdateAvailableDialog from '@/components/dialogs/UpdateAvailableDialog.vue';
@@ -18,6 +22,7 @@ import { useUpdateScheduling } from '@/composables/useUpdateScheduling';
 import { useConnectionsStore } from '@/stores/connections';
 import { useUiStore } from '@/stores/ui';
 import { useSessionsStore } from '@/stores/sessions';
+import { useRemoteJobsStore } from '@/stores/remoteJobs';
 import { useTransfersStore } from '@/stores/transfers';
 import { useTunnelsStore } from '@/stores/tunnels';
 import { useSettingsStore } from '@/stores/settings';
@@ -28,6 +33,7 @@ import { useUpdatesStore } from '@/stores/updates';
 const connections = useConnectionsStore();
 const ui = useUiStore();
 const sessions = useSessionsStore();
+const remoteJobs = useRemoteJobsStore();
 const transfers = useTransfersStore();
 const tunnels = useTunnelsStore();
 const settings = useSettingsStore();
@@ -42,15 +48,21 @@ onMounted(async () => {
   await sessions.initializeTerminalEvents();
   await terminalLogs.initializeEvents();
   await transfers.initializeEvents();
+  await remoteJobs.initializeEvents();
   await connections.load();
   await transfers.load();
   await tunnels.load();
+  await remoteJobs.load();
 });
 </script>
 
 <template>
   <WorkbenchShell />
+  <OverviewDialog v-if="ui.overviewOpen" />
   <QuickConnectDialog v-if="ui.quickConnectOpen" />
+  <LocalTerminalDialog v-if="ui.localTerminalDialogOpen" />
+  <ElevatedAccessDialog v-if="ui.elevatedAccessSessionId" />
+  <KeyAndProxyLibraryDialog v-if="ui.keyProxyLibraryOpen" />
   <AddProfileDialog v-if="ui.addProfileOpen" />
   <SshImportDialog v-if="ui.sshImportOpen" />
   <HostKeyDialog v-if="sessions.challenge && sessions.challenge.trust !== 'trusted'" />

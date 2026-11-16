@@ -10,11 +10,13 @@ import {
   FolderOpen,
   Info,
   KeyRound,
+  ListChecks,
   Maximize2,
   Minus,
   Plus,
   Search,
   Settings,
+  Shield,
   ShieldCheck,
   Square,
   Terminal,
@@ -50,6 +52,10 @@ import { useOpsStore } from '@/stores/ops';
 import { useProcessesStore } from '@/stores/processes';
 import { useSettingsStore } from '@/stores/settings';
 import { useSessionsStore } from '@/stores/sessions';
+import { useSftpStore } from '@/stores/sftp';
+import { useRemoteJobsStore } from '@/stores/remoteJobs';
+import { useTransfersStore } from '@/stores/transfers';
+import { useTunnelsStore } from '@/stores/tunnels';
 import { useUiStore } from '@/stores/ui';
 import { useUpdatesStore } from '@/stores/updates';
 import type { CommandPaletteCommand, CommandPaletteCommandId } from '@/types/commandPalette';
@@ -58,6 +64,7 @@ import {
   matchesKeyboardShortcut,
   type KeyboardShortcutAction,
 } from '@/utils/keyboardShortcuts';
+import { hasCapability, isLocalSession } from '@/domain/sessionCapabilities';
 
 const connections = useConnectionsStore();
 const docker = useDockerStore();
@@ -68,21 +75,48 @@ const processes = useProcessesStore();
 const settings = useSettingsStore();
 const ui = useUiStore();
 const sessions = useSessionsStore();
+const sftp = useSftpStore();
+const transfers = useTransfersStore();
+const tunnels = useTunnelsStore();
+const remoteJobs = useRemoteJobsStore();
 const updates = useUpdatesStore();
+
+const activeActivityCount = computed(() => (
+  transfers.activeTasks.length
+  + tunnels.tunnels.filter((item) => item.state === 'starting' || item.state === 'listening' || item.state === 'stopping').length
+  + remoteJobs.activeJobs.length
+));
 
 watch(
   () => sessions.activeSessionId,
-  () => {
+  (nextSessionId) => {
     ui.closeMonitorDetails();
     ui.closeDockerDialog();
     ui.closeOpsDialog();
-    monitor.clear();
-    processes.clear();
-    network.clear();
-    docker.clear();
-    ops.clear();
+    monitor.activateSession(nextSessionId ?? null);
+    processes.activateSession(nextSessionId ?? null);
+    network.activateSession(nextSessionId ?? null);
+    docker.activateSession(nextSessionId ?? null);
+    ops.activateSession(nextSessionId ?? null);
   },
   { flush: 'sync' },
+);
+
+watch(
+  () => sessions.summaries.map((item) => item.id),
+  (nextIds, previousIds) => {
+    if (!previousIds) return;
+    const valid = new Set(nextIds);
+    for (const removedId of previousIds) {
+      if (valid.has(removedId)) continue;
+      sftp.dropSession(removedId);
+      monitor.dropSession(removedId);
+      processes.dropSession(removedId);
+      network.dropSession(removedId);
+      docker.dropSession(removedId);
+      ops.dropSession(removedId);
+    }
+  },
 );
 const desktopWindowControls = desktopWindowControlsAvailable();
 const windowMaximized = ref(false);
@@ -114,13 +148,16 @@ const commandPaletteCommands = computed<CommandPaletteCommand[]>(() => {
   const canDisconnect = activeSession?.state === 'connected' && !sessions.busy;
   return [
     { id: 'quickConnect', label: t('commands.quickConnect'), shortcut: shortcuts.quickConnect, disabled: sessions.busy || Boolean(sessions.challenge) || Boolean(sessions.passwordProfileId) },
+    { id: 'openLocalTerminal', label: t('commands.openLocalTerminal'), disabled: sessions.busy || Boolean(sessions.challenge) || Boolean(sessions.passwordProfileId) },
+    { id: 'openKeyProxyLibrary', label: t('commands.openKeyProxyLibrary') },
     { id: 'newSession', label: t('commands.newSession'), shortcut: shortcuts.newSession, disabled: sessions.busy || Boolean(sessions.challenge) },
     { id: 'closeActiveTab', label: t('commands.closeActiveTab'), shortcut: shortcuts.closeActiveTab, disabled: !activeSession || sessions.busy },
     { id: 'nextSession', label: t('commands.nextSession'), shortcut: shortcuts.nextSession, disabled: sessions.summaries.length < 2 },
     { id: 'previousSession', label: t('commands.previousSession'), shortcut: shortcuts.previousSession, disabled: sessions.summaries.length < 2 },
     { id: 'terminalSearch', label: t('commands.terminalSearch'), shortcut: shortcuts.terminalSearch, disabled: !activeSession },
+    { id: 'toggleCompactComposer', label: t('commands.toggleCompactComposer') },
     { id: 'toggleFiles', label: t('commands.showFiles'), shortcut: shortcuts.toggleFiles },
-    { id: 'showMonitor', label: t('commands.showMonitor') },
+    { id: 'showMonitor', label: t('commands.showMonitor'), disabled: activeSession?.state !== 'connected' || !hasCapability(activeSession, 'host_monitoring') },
     { id: 'toggleFocusMode', label: t('commands.toggleFocusMode'), shortcut: shortcuts.toggleFocusMode },
     { id: 'toggleTaskDrawer', label: t('commands.toggleTaskDrawer'), shortcut: shortcuts.toggleTaskDrawer },
     { id: 'showEvents', label: t('commands.showEvents'), shortcut: shortcuts.showEvents },
@@ -128,6 +165,7 @@ const commandPaletteCommands = computed<CommandPaletteCommand[]>(() => {
     { id: 'focusConnections', label: t('commands.focusConnections'), shortcut: shortcuts.focusConnections },
     { id: 'focusTerminal', label: t('commands.focusTerminal'), shortcut: shortcuts.focusTerminal },
     { id: 'focusInspector', label: t('commands.focusInspector'), shortcut: shortcuts.focusInspector },
+    { id: 'openOverview', label: t('commands.openOverview') },
     { id: 'openSettings', label: t('commands.openSettings'), shortcut: shortcuts.openSettings },
     { id: 'disconnectActiveSession', label: t('commands.disconnectActiveSession'), disabled: !canDisconnect },
   ];
@@ -216,8 +254,26 @@ function runShortcutAction(action: KeyboardShortcutAction): void {
 }
 
 function runCommand(commandId: CommandPaletteCommandId): void {
+  if (commandId === 'openOverview') {
+    ui.openOverview();
+    return;
+  }
+  if (commandId === 'openLocalTerminal') {
+    if (!sessions.busy && !sessions.challenge && !sessions.passwordProfileId) {
+      ui.openLocalTerminalDialog();
+    }
+    return;
+  }
+  if (commandId === 'openKeyProxyLibrary') {
+    ui.openKeyProxyLibrary();
+    return;
+  }
+  if (commandId === 'toggleCompactComposer') {
+    settings.value.compactComposerOpen = !settings.value.compactComposerOpen;
+    return;
+  }
   if (commandId === 'showMonitor') {
-    if (sessions.activeSession?.state === 'connected') {
+    if (sessions.activeSession?.state === 'connected' && hasCapability(sessions.activeSession, 'host_monitoring')) {
       ui.openMonitorDetails('overview');
     }
     return;
@@ -343,6 +399,8 @@ function handleShortcut(event: KeyboardEvent): void {
   if (
     ui.addProfileOpen
     || ui.quickConnectOpen
+    || ui.localTerminalDialogOpen
+    || ui.keyProxyLibraryOpen
     || ui.sshImportOpen
     || ui.transferDialog
     || ui.tunnelDialogOpen
@@ -428,10 +486,17 @@ onBeforeUnmount(() => {
       @pointerdown="handleTitlebarPointerDown"
       @dblclick="handleTitlebarDoubleClick"
     >
-      <div class="brand" aria-label="FILEX">
+      <button
+        type="button"
+        class="brand brand-button"
+        :aria-label="t('overview.openButton')"
+        :title="t('overview.openButton')"
+        @pointerdown.stop
+        @click="ui.openOverview()"
+      >
         <span class="brand-mark"><Terminal :size="15" /></span>
         <span>FILEX</span>
-      </div>
+      </button>
       <label class="global-search">
         <Search :size="14" aria-hidden="true" />
         <span class="sr-only">{{ t('app.searchPlaceholder') }}</span>
@@ -452,6 +517,16 @@ onBeforeUnmount(() => {
         >
           <Zap :size="15" />
         </button>
+        <button
+          type="button"
+          class="icon-button"
+          :aria-label="t('localTerminal.title')"
+          :title="t('localTerminal.title')"
+          :disabled="sessions.busy || Boolean(sessions.challenge) || Boolean(sessions.passwordProfileId)"
+          @click="ui.openLocalTerminalDialog"
+        >
+          <Terminal :size="15" />
+        </button>
         <span class="toolbar-divider" />
         <button
           type="button"
@@ -471,10 +546,21 @@ onBeforeUnmount(() => {
           :aria-pressed="ui.monitorDetailsView !== null"
           :aria-label="t('terminal.monitor')"
           :title="t('terminal.monitor')"
-          :disabled="sessions.activeSession?.state !== 'connected'"
+          :disabled="sessions.activeSession?.state !== 'connected' || isLocalSession(sessions.activeSession)"
           @click="ui.openMonitorDetails('overview')"
         >
           <Activity :size="15" />
+        </button>
+        <button
+          type="button"
+          class="icon-button"
+          :class="{ active: ui.keyProxyLibraryOpen }"
+          :aria-pressed="ui.keyProxyLibraryOpen"
+          :aria-label="t('keyProxyLibrary.openButton')"
+          :title="t('keyProxyLibrary.openButton')"
+          @click="ui.openKeyProxyLibrary()"
+        >
+          <Shield :size="15" />
         </button>
         <button
           type="button"
@@ -496,6 +582,18 @@ onBeforeUnmount(() => {
           @click="ui.toggleAssistant"
         >
           <Bot :size="15" />
+        </button>
+        <button
+          type="button"
+          class="icon-button activity-toggle-button"
+          :class="{ active: settings.value.taskDrawerOpen }"
+          :aria-pressed="settings.value.taskDrawerOpen"
+          :aria-label="t('tasks.activityLabel')"
+          :title="`${t('tasks.activityLabel')} · ${formatKeyboardShortcut(settings.value.shortcuts.toggleTaskDrawer)}`"
+          @click="settings.value.taskDrawerOpen = !settings.value.taskDrawerOpen"
+        >
+          <ListChecks :size="15" />
+          <span v-if="activeActivityCount > 0" class="activity-badge">{{ activeActivityCount }}</span>
         </button>
         <button
           type="button"

@@ -6,6 +6,7 @@ import type {
   RemotePermissionUpdateResult,
   RemoteTextPreview,
   RemoteTextSaveResult,
+  TerminalEncoding,
   UpdateRemotePermissionsInput,
 } from '@/types/contracts';
 
@@ -31,6 +32,7 @@ export async function listRemoteDirectory(
 export async function previewRemoteText(
   sessionId: string,
   path: string,
+  encoding?: TerminalEncoding | null,
 ): Promise<OperationResult<RemoteTextPreview>> {
   if (!isTauriRuntime()) {
     return failure({
@@ -41,7 +43,11 @@ export async function previewRemoteText(
     });
   }
   try {
-    return await invoke<OperationResult<RemoteTextPreview>>('preview_remote_text', { sessionId, path });
+    return await invoke<OperationResult<RemoteTextPreview>>('preview_remote_text', {
+      sessionId,
+      path,
+      encoding: encoding ?? null,
+    });
   } catch (error: unknown) {
     return failure(normalizeUnknownError(error, 'SFTP_PREVIEW_FAILED'));
   }
@@ -71,6 +77,7 @@ export async function saveRemoteText(
   path: string,
   content: string,
   expectedRevision: string,
+  encoding?: TerminalEncoding | null,
 ): Promise<OperationResult<RemoteTextSaveResult>> {
   if (!isTauriRuntime()) {
     return failure({
@@ -86,6 +93,7 @@ export async function saveRemoteText(
       path,
       content,
       expectedRevision,
+      encoding: encoding ?? null,
     });
   } catch (error: unknown) {
     return failure(normalizeUnknownError(error, 'SFTP_SAVE_FAILED'));

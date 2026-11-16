@@ -1615,3 +1615,1658 @@ test('renders semantic terminal colors, monospace grid alignment, and transparen
   await expect(rows.nth(8)).toContainText('keking/kkfileview:v4.1.0');
   await page.screenshot({ path: 'test-results/terminal-color-and-selection-1440.png' });
 });
+
+test('opens local terminal dialog with desktop notice and restores focus on Escape', async ({ page }) => {
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 960, height: 640 },
+  ]) {
+    await page.setViewportSize(viewport);
+    const trigger = page.locator('.context-actions button[aria-label="本地终端"]');
+    await expect(trigger).toBeVisible();
+    await trigger.focus();
+    await trigger.click();
+
+    const dialog = page.getByRole('dialog', { name: '本地终端' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('status')).toContainText('本地 PTY 终端仅在 FILEX 桌面应用中可用。');
+    await expect(dialog.getByRole('button', { name: '打开本地终端' })).toBeDisabled();
+
+    const dialogBox = await dialog.boundingBox();
+    expect(dialogBox).not.toBeNull();
+    expect(dialogBox!.x).toBeGreaterThanOrEqual(0);
+    expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(viewport.width);
+    expect(dialogBox!.y + dialogBox!.height).toBeLessThanOrEqual(viewport.height);
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+  }
+});
+
+test('opens elevated access dialog, renders amber lease badge with countdown, and revokes on click', async ({ page }) => {
+  await page.evaluate(() => {
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__?.config.globalProperties.$pinia;
+    const sessions = pinia?._s.get('sessions') as {
+      summaries: Array<Record<string, unknown>>;
+      activeSessionId: string | null;
+      isQuickProfile: (id?: string | null) => boolean;
+      resizeSession: () => Promise<void>;
+    } | undefined;
+    const sftp = pinia?._s.get('sftp') as { sessionId: string | null; path: string } | undefined;
+    const settings = pinia?._s.get('settings') as { value: Record<string, unknown> } | undefined;
+    if (!sessions || !sftp || !settings) throw new Error('Stores unavailable');
+
+    settings.value.fileBrowserOpen = true;
+    settings.value.focusMode = false;
+    sessions.isQuickProfile = () => false;
+    sessions.resizeSession = () => Promise.resolve();
+    sessions.summaries = [{
+      id: 'sess-elevated-e2e',
+      generation: 1,
+      profileId: 'prof-elevated-e2e',
+      sessionKind: 'ssh',
+      capabilities: ['remote_shell', 'sftp', 'remote_edit', 'host_monitoring', 'tunneling', 'remote_jobs'],
+      state: 'connected',
+      host: '10.24.0.8',
+      port: 22,
+      username: 'ops',
+      lastError: null,
+    }];
+    sessions.activeSessionId = 'sess-elevated-e2e';
+    sftp.sessionId = 'sess-elevated-e2e';
+    sftp.path = '/etc';
+  });
+
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 960, height: 640 },
+  ]) {
+    await page.setViewportSize(viewport);
+    const trigger = page.locator('.file-browser-panel button[aria-label="启用文件提权"]');
+    await expect(trigger).toBeVisible();
+    await expect(trigger).toBeEnabled();
+    await trigger.focus();
+    await trigger.click();
+
+    const dialog = page.getByRole('dialog', { name: '临时文件提权访问' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.locator('input[readonly]')).toHaveValue('ops@10.24.0.8:22');
+    await expect(dialog.locator('select option')).toHaveCount(3);
+    await expect(dialog.getByRole('note')).toContainText('提权租约');
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+  }
+
+  await page.evaluate(() => {
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__?.config.globalProperties.$pinia;
+    const privilege = pinia?._s.get('privilege') as {
+      leases: Record<string, unknown>;
+    } | undefined;
+    if (!privilege) throw new Error('Privilege store unavailable');
+    const now = Date.now();
+    privilege.leases = {
+      'sess-elevated-e2e': {
+        sessionId: 'sess-elevated-e2e',
+        generation: 1,
+        state: 'elevated',
+        username: 'ops',
+        host: '10.24.0.8',
+        port: 22,
+        grantedAtMs: now,
+        expiresAtMs: now + 300_000,
+        ttlSeconds: 300,
+      },
+    };
+  });
+
+  await expect(page.locator('.terminal-pane .elevated-badge')).toBeVisible();
+  await expect(page.locator('.file-browser-panel .elevated-badge')).toBeVisible();
+  await expect(page.locator('.terminal-pane .elevated-badge')).toContainText('提权');
+
+  await page.locator('.file-browser-panel .elevated-badge-revoke').click();
+  await expect(page.locator('.terminal-pane .elevated-badge')).toHaveCount(0);
+  await expect(page.locator('.file-browser-panel .elevated-badge')).toHaveCount(0);
+});
+
+test('central SSH key and outbound proxy library modal and profile selectors are keyboard accessible across viewports and themes', async ({ page }) => {
+  await page.goto('/');
+  await page.evaluate(() => {
+    localStorage.clear();
+  });
+  await page.reload();
+
+  for (const [theme, viewport] of [
+    ['dark', { width: 1440, height: 900 }],
+    ['light', { width: 960, height: 640 }],
+  ] as const) {
+    await page.evaluate((targetTheme) => {
+      type Root = HTMLElement & {
+        __vue_app__?: {
+          config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+        };
+      };
+      const pinia = (document.querySelector('#app') as Root).__vue_app__?.config.globalProperties.$pinia;
+      const settings = pinia?._s.get('settings') as { value: Record<string, unknown> } | undefined;
+      if (settings) settings.value.theme = targetTheme;
+    }, theme);
+    await page.setViewportSize(viewport);
+
+    const libraryTrigger = page.locator('.context-actions button[aria-label="密钥与代理库"]');
+    await expect(libraryTrigger).toBeVisible();
+    await libraryTrigger.focus();
+    await libraryTrigger.click();
+
+    const dialog = page.getByRole('dialog', { name: 'SSH 密钥与出站代理库' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('tab', { name: /SSH 密钥/ })).toHaveAttribute('aria-selected', 'true');
+
+    await dialog.getByRole('tab', { name: /出站代理/ }).click();
+    await expect(dialog.getByRole('tab', { name: /出站代理/ })).toHaveAttribute('aria-selected', 'true');
+    await expect(dialog.locator('select option')).toHaveCount(2);
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(libraryTrigger).toBeFocused();
+  }
+
+  // Verify AddProfileDialog displays central key and outbound proxy selectors and keeps compact composer closed by default.
+  await expect(page.locator('.command-input-bar')).toHaveCount(0);
+  await page.getByRole('button', { name: '添加连接' }).click();
+  const profileDialog = page.getByRole('dialog', { name: '添加连接资料' });
+  await expect(profileDialog).toBeVisible();
+  await expect(profileDialog.locator('label:has-text("出站网络代理")')).toBeVisible();
+  await profileDialog.locator('select').first().selectOption('private_key');
+  await expect(profileDialog.locator('#profile-central-key')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(profileDialog).toHaveCount(0);
+});
+
+test('compact command composer stays hidden by default and manages confirmed replay and secret exclusion when enabled', async ({ page }) => {
+  await page.goto('/');
+  await page.evaluate(() => {
+    localStorage.clear();
+  });
+  await page.reload();
+
+  // Hidden on default initial load
+  await expect(page.locator('.command-input-bar')).toHaveCount(0);
+
+  // Inject a connected saved SSH session in browser preview
+  await page.evaluate(() => {
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__?.config.globalProperties.$pinia;
+    const sessions = pinia?._s.get('sessions') as {
+      summaries: Array<Record<string, unknown>>;
+      activeSessionId: string | null;
+      isQuickProfile: (id: string) => boolean;
+      resizeSession: () => Promise<void>;
+      writeToSession: () => Promise<boolean>;
+    } | undefined;
+    if (!sessions) throw new Error('Sessions store unavailable');
+
+    sessions.isQuickProfile = () => false;
+    sessions.resizeSession = () => Promise.resolve();
+    sessions.writeToSession = () => Promise.resolve(true);
+    sessions.summaries = [{
+      id: 'sess-composer-e2e',
+      generation: 1,
+      profileId: 'prof-composer-e2e',
+      sessionKind: 'ssh',
+      capabilities: ['remote_shell', 'sftp', 'remote_edit', 'host_monitoring', 'tunneling', 'remote_jobs'],
+      state: 'connected',
+      host: '10.90.0.12',
+      port: 22,
+      username: 'ops',
+      lastError: null,
+    }];
+    sessions.activeSessionId = 'sess-composer-e2e';
+  });
+
+  // Enable compact composer in Settings -> Terminal
+  await page.locator('.context-actions button[aria-label="设置"]').click();
+  const settingsDialog = page.getByRole('dialog', { name: '设置' });
+  await settingsDialog.getByRole('button', { name: '终端' }).click();
+  const composerToggle = settingsDialog.locator('.setting-row:has-text("紧凑命令输入栏") input[type="checkbox"]');
+  await composerToggle.check();
+  await settingsDialog.getByRole('button', { name: '应用并保存' }).click();
+  await expect(settingsDialog).toHaveCount(0);
+
+  for (const [theme, viewport] of [
+    ['dark', { width: 1440, height: 900 }],
+    ['light', { width: 960, height: 640 }],
+  ] as const) {
+    await page.evaluate((targetTheme) => {
+      type Root = HTMLElement & {
+        __vue_app__?: {
+          config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+        };
+      };
+      const pinia = (document.querySelector('#app') as Root).__vue_app__?.config.globalProperties.$pinia;
+      const settings = pinia?._s.get('settings') as { value: Record<string, unknown> } | undefined;
+      if (settings) settings.value.theme = targetTheme;
+    }, theme);
+    await page.setViewportSize(viewport);
+    await expect(page.locator('.command-input-bar')).toBeVisible();
+  }
+
+  const input = page.locator('.command-input-bar textarea');
+  await input.fill('systemctl status nginx');
+  await input.press('Enter');
+
+  // Sensitive command is sent but never saved to history
+  await input.fill('export API_TOKEN=supersecret123');
+  await input.press('Enter');
+
+  await page.locator('.command-input-bar button[aria-label="历史"]').click();
+  const historyPanel = page.locator('.command-history-panel');
+  await expect(historyPanel).toBeVisible();
+  await expect(historyPanel).toContainText('systemctl status nginx');
+  await expect(historyPanel).not.toContainText('supersecret123');
+  await expect(historyPanel).toContainText('最多 200 条');
+
+  // Direct execution requires explicit confirmation
+  await historyPanel.locator('button[aria-label="立即执行"]').first().click();
+  const confirmDialog = page.getByRole('alertdialog', { name: '确认重新执行历史命令' });
+  await expect(confirmDialog).toBeVisible();
+  await expect(confirmDialog).toContainText('ops@10.90.0.12:22');
+  await page.keyboard.press('Escape');
+  await expect(confirmDialog).toHaveCount(0);
+
+  // Toggle closed cleanly from tab bar button
+  await page.locator('.terminal-tabs button[aria-label="显示或隐藏命令输入栏"]').click();
+  await expect(page.locator('.command-input-bar')).toHaveCount(0);
+});
+
+test('per-profile path bookmarks and transfer history filter are keyboard accessible', async ({ page }) => {
+  await page.goto('/');
+  await page.evaluate(() => {
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__?.config.globalProperties.$pinia;
+    const settings = pinia?._s.get('settings') as { value: Record<string, unknown> } | undefined;
+    const sessions = pinia?._s.get('sessions');
+    if (!settings || !sessions) throw new Error('Base stores unavailable');
+
+    settings.value.inspectorTab = 'files';
+    settings.value.fileBrowserOpen = true;
+    settings.value.dualPaneSftp = true;
+    settings.value.taskDrawerOpen = true;
+    settings.value.taskTab = 'transfers';
+    sessions.isQuickProfile = () => false;
+    sessions.summaries = [{
+      id: 'sess-bookmark-e2e',
+      generation: 1,
+      profileId: 'prof-bookmark-e2e',
+      sessionKind: 'ssh',
+      capabilities: ['remote_shell', 'sftp', 'remote_edit', 'host_monitoring', 'tunneling', 'remote_jobs'],
+      state: 'connected',
+      host: '10.90.0.18',
+      port: 22,
+      username: 'ops',
+      lastError: null,
+    }];
+    sessions.activeSessionId = 'sess-bookmark-e2e';
+  });
+
+  await page.locator('.task-drawer').waitFor({ state: 'visible' });
+  await page.locator('.file-browser-pane').first().waitFor({ state: 'visible' });
+
+  await page.evaluate(() => {
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__?.config.globalProperties.$pinia;
+    const transfers = pinia?._s.get('transfers');
+    const localFiles = pinia?._s.get('local-files');
+    if (!transfers || !localFiles) throw new Error('Drawer/file stores unavailable');
+
+    localFiles.listing = {
+      path: 'C:\\deploy',
+      parentPath: 'C:\\',
+      entries: [],
+      truncated: false,
+    };
+    transfers.tasks = [
+      {
+        id: 't-active',
+        profileId: 'prof-bookmark-e2e',
+        sessionId: 'sess-bookmark-e2e',
+        direction: 'upload',
+        localPath: 'C:\\deploy\\app.tar.gz',
+        remotePath: '/srv/app.tar.gz',
+        destinationProfileId: null,
+        destinationSessionId: null,
+        destinationRemotePath: null,
+        state: 'paused',
+        bytesTransferred: 128,
+        totalBytes: 1024,
+        conflictPolicy: 'ask',
+        remoteSizeBytes: 1024,
+        remoteMtimeMs: 1700000000000,
+        stagingPath: 'C:\\deploy\\.filex-part-t-active',
+        resumeState: 'safe_to_resume',
+        error: null,
+        createdAtMs: 1000,
+        updatedAtMs: 2000,
+      },
+      {
+        id: 't-history',
+        profileId: 'prof-bookmark-e2e',
+        sessionId: null,
+        direction: 'download',
+        localPath: 'C:\\deploy\\nginx.conf',
+        remotePath: '/etc/nginx/nginx.conf',
+        destinationProfileId: null,
+        destinationSessionId: null,
+        destinationRemotePath: null,
+        state: 'completed',
+        bytesTransferred: 512,
+        totalBytes: 512,
+        conflictPolicy: 'ask',
+        remoteSizeBytes: 512,
+        remoteMtimeMs: 1700000000000,
+        stagingPath: null,
+        resumeState: 'not_applicable',
+        error: null,
+        createdAtMs: 500,
+        updatedAtMs: 1500,
+      },
+    ];
+  });
+
+  // Transfer filter separates Active Queue (paused/resumable) vs Transfer History (completed)
+  await page.getByRole('button', { name: /传输历史/ }).click();
+  await expect(page.locator('.transfer-row')).toHaveCount(1);
+  await expect(page.locator('.transfer-row').first()).toContainText('/etc/nginx/nginx.conf');
+
+  await page.getByRole('button', { name: /进行中队列/ }).click();
+  await expect(page.locator('.transfer-row')).toHaveCount(1);
+  await expect(page.locator('.transfer-row').first()).toContainText('app.tar.gz');
+
+  // Toggle dual-pane local bookmark and inspect bookmarks popover
+  const localAddBtn = page.locator('.file-browser-pane').first().getByRole('button', { name: '收藏当前路径' });
+  await expect(localAddBtn).toBeEnabled();
+  await localAddBtn.click();
+  await page.locator('.file-browser-pane').first().getByRole('button', { name: '路径书签列表' }).click();
+  const popover = page.locator('.path-bookmarks-popover');
+  await expect(popover).toBeVisible();
+  await expect(popover).toContainText('deploy');
+  await page.keyboard.press('Escape');
+  await expect(popover).toHaveCount(0);
+});
+
+test('supports remote-to-remote SFTP relay dialog with endpoint disclosure and confirmation', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.evaluate(() => {
+    const profiles = [
+      {
+        id: 'prof-relay-a',
+        name: 'prod-a',
+        group: '生产环境',
+        host: '10.10.0.10',
+        port: 22,
+        username: 'deploy',
+        environment: 'production',
+        favorite: true,
+        tags: ['relay'],
+        authenticationMethod: 'agent',
+        identityFile: null,
+        sshKeyId: null,
+        proxyJump: null,
+        proxyJumpProfileIds: [],
+        proxyProfileId: null,
+        credentialRef: null,
+        state: 'idle',
+        latencyMs: null,
+        lastUsedAt: String(Date.now()),
+      },
+      {
+        id: 'prof-relay-b',
+        name: 'prod-b',
+        group: '生产环境',
+        host: '10.10.0.20',
+        port: 2222,
+        username: 'ops',
+        environment: 'production',
+        favorite: false,
+        tags: ['relay'],
+        authenticationMethod: 'agent',
+        identityFile: null,
+        sshKeyId: null,
+        proxyJump: null,
+        proxyJumpProfileIds: [],
+        proxyProfileId: null,
+        credentialRef: null,
+        state: 'idle',
+        latencyMs: null,
+        lastUsedAt: String(Date.now() - 10_000),
+      },
+    ];
+    localStorage.setItem('filex.connection-profiles.v1', JSON.stringify(profiles));
+  });
+  await page.reload();
+  await page.waitForFunction(() => Boolean(
+    (document.querySelector('#app') as HTMLElement & { __vue_app__?: unknown }).__vue_app__,
+  ));
+
+  await page.evaluate(() => {
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__?.config.globalProperties.$pinia;
+    const settings = pinia?._s.get('settings') as { value: Record<string, unknown> } | undefined;
+    const sessions = pinia?._s.get('sessions');
+    const sftp = pinia?._s.get('sftp');
+    const transfers = pinia?._s.get('transfers');
+    if (!settings || !sessions || !sftp || !transfers) throw new Error('Relay stores unavailable');
+
+    settings.value.inspectorTab = 'files';
+    settings.value.fileBrowserOpen = true;
+    settings.value.dualPaneSftp = false;
+    sessions.isQuickProfile = () => false;
+    sessions.summaries = [
+      {
+        id: 'sess-relay-a',
+        generation: 1,
+        profileId: 'prof-relay-a',
+        sessionKind: 'ssh',
+        capabilities: ['remote_shell', 'sftp', 'remote_edit', 'host_monitoring', 'tunneling', 'remote_jobs'],
+        state: 'connected',
+        host: '10.10.0.10',
+        port: 22,
+        username: 'deploy',
+        lastError: null,
+      },
+      {
+        id: 'sess-relay-b',
+        generation: 1,
+        profileId: 'prof-relay-b',
+        sessionKind: 'ssh',
+        capabilities: ['remote_shell', 'sftp', 'remote_edit', 'host_monitoring', 'tunneling', 'remote_jobs'],
+        state: 'connected',
+        host: '10.10.0.20',
+        port: 2222,
+        username: 'ops',
+        lastError: null,
+      },
+    ];
+    sessions.activeSessionId = 'sess-relay-a';
+    sessions.sessionCwds = {
+      'sess-relay-a': '/srv/releases',
+      'sess-relay-b': '/srv/incoming',
+    };
+    sftp.load = () => Promise.resolve();
+    sftp.error = null;
+    sftp.sessionId = 'sess-relay-a';
+    sftp.path = '/srv/releases';
+    sftp.entries = [
+      {
+        name: 'bundle.tar.gz',
+        path: '/srv/releases/bundle.tar.gz',
+        isDirectory: false,
+        isSymlink: false,
+        size: 8192,
+        modifiedAtMs: Date.now(),
+        permissionsMode: 0o644,
+        uid: 0,
+        gid: 0,
+      },
+    ];
+    transfers.tasks = [
+      {
+        id: 't-relay-1',
+        profileId: 'prof-relay-a',
+        sessionId: 'sess-relay-a',
+        direction: 'remote_to_remote',
+        localPath: '',
+        remotePath: '/srv/releases/bundle.tar.gz',
+        destinationProfileId: 'prof-relay-b',
+        destinationSessionId: 'sess-relay-b',
+        destinationRemotePath: '/srv/incoming/bundle.tar.gz',
+        state: 'running',
+        bytesTransferred: 2048,
+        totalBytes: 8192,
+        conflictPolicy: 'ask',
+        remoteSizeBytes: 8192,
+        remoteMtimeMs: 1700000000000,
+        stagingPath: '/srv/incoming/.filex-part-t-relay-1',
+        resumeState: 'not_applicable',
+        error: null,
+        createdAtMs: 1000,
+        updatedAtMs: 2000,
+      },
+    ];
+  });
+
+  const remoteRow = page.locator('.file-row', { hasText: 'bundle.tar.gz' });
+  await expect(remoteRow).toBeVisible();
+  await remoteRow.click({ button: 'right' });
+
+  const menu = page.getByRole('menu', { name: '文件操作' });
+  await expect(menu).toBeVisible();
+  await menu.getByRole('menuitem', { name: '中转至其他主机…' }).click();
+
+  const dialog = page.getByRole('dialog', { name: '远端主机间中转传输' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('.relay-note')).toContainText('不经过本地磁盘落盘');
+  await expect(dialog).toContainText('prod-a (deploy@10.10.0.10:22)');
+  await expect(dialog.locator('input').nth(1)).toHaveValue('/srv/releases/bundle.tar.gz');
+  await expect(dialog.locator('input').nth(2)).toHaveValue('/srv/incoming/bundle.tar.gz');
+
+  const submitBtn = dialog.getByRole('button', { name: '加入队列' });
+  await expect(submitBtn).toBeDisabled();
+
+  // Choosing identical host and identical path blocks submission explicitly
+  await dialog.locator('select').first().selectOption('prof-relay-a');
+  await dialog.locator('input').nth(2).fill('/srv/releases/bundle.tar.gz');
+  await expect(dialog.getByRole('alert')).toContainText('源端点与目标端点（主机与路径）不能相同。');
+  await expect(submitBtn).toBeDisabled();
+
+  // Switch back to distinct destination host and confirm endpoint notice
+  await dialog.locator('select').first().selectOption('prof-relay-b');
+  await dialog.locator('input').nth(2).fill('/srv/incoming/bundle.tar.gz');
+  await dialog.getByLabel(/我确认将文件从/).check();
+  await expect(submitBtn).toBeEnabled();
+  await page.screenshot({ path: 'test-results/remote-relay-dialog-1440.png' });
+
+  await submitBtn.click();
+  await expect(dialog.getByRole('alert')).toContainText('传输队列仅可在 FILEX 桌面应用中使用。');
+  await dialog.getByRole('button', { name: '取消' }).click();
+  await expect(dialog).toHaveCount(0);
+
+  // Verify relay badge and both endpoints appear cleanly in the Activity drawer
+  await page.getByRole('button', { name: '活动中心' }).click();
+  const drawer = page.locator('.task-drawer');
+  await expect(drawer).toBeVisible();
+  await expect(drawer.locator('.transfer-relay-badge')).toContainText('中转');
+  await expect(drawer).toContainText('prod-a:/srv/releases/bundle.tar.gz');
+  await expect(drawer).toContainText('prod-b:/srv/incoming/bundle.tar.gz');
+});
+
+test('renders workbench overview, unified activity center, and bounded remote jobs across themes and viewports', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.evaluate(() => {
+    const profiles = [
+      {
+        id: 'prof-ov-1',
+        name: 'edge-gateway',
+        group: '生产环境',
+        host: '10.80.1.15',
+        port: 22,
+        username: 'ops',
+        environment: 'production',
+        favorite: true,
+        tags: ['edge'],
+        authenticationMethod: 'agent',
+        identityFile: null,
+        sshKeyId: null,
+        proxyJump: null,
+        proxyJumpProfileIds: [],
+        proxyProfileId: null,
+        credentialRef: null,
+        state: 'idle',
+        latencyMs: null,
+        lastUsedAt: String(Date.now()),
+      },
+    ];
+    localStorage.setItem('filex.connection-profiles.v1', JSON.stringify(profiles));
+  });
+  await page.reload();
+
+  await page.evaluate(() => {
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__?.config.globalProperties.$pinia;
+    const settings = pinia?._s.get('settings') as { value: Record<string, unknown> } | undefined;
+    const sessions = pinia?._s.get('sessions');
+    const transfers = pinia?._s.get('transfers');
+    const tunnels = pinia?._s.get('tunnels');
+    const remoteJobs = pinia?._s.get('remoteJobs');
+    const events = pinia?._s.get('events');
+    if (!settings || !sessions || !transfers || !tunnels || !remoteJobs || !events) {
+      throw new Error('Activity/Overview stores unavailable');
+    }
+
+    settings.value.theme = 'dark';
+    sessions.isQuickProfile = () => false;
+    sessions.summaries = [
+      {
+        id: 'sess-ov-1',
+        generation: 3,
+        profileId: 'prof-ov-1',
+        sessionKind: 'ssh',
+        capabilities: ['remote_shell', 'sftp', 'remote_edit', 'host_monitoring', 'tunneling', 'remote_jobs'],
+        state: 'connected',
+        host: '10.80.1.15',
+        port: 22,
+        username: 'ops',
+        lastError: null,
+      },
+    ];
+    sessions.activeSessionId = 'sess-ov-1';
+    transfers.tasks = [
+      {
+        id: 't-act-1',
+        profileId: 'prof-ov-1',
+        sessionId: 'sess-ov-1',
+        direction: 'download',
+        localPath: 'C:\\logs\\edge.log',
+        remotePath: '/var/log/edge.log',
+        destinationProfileId: null,
+        destinationSessionId: null,
+        destinationRemotePath: null,
+        state: 'completed',
+        bytesTransferred: 1024,
+        totalBytes: 1024,
+        conflictPolicy: 'ask',
+        remoteSizeBytes: 1024,
+        remoteMtimeMs: 1700000000000,
+        stagingPath: null,
+        resumeState: 'not_applicable',
+        error: null,
+        createdAtMs: Date.now() - 12_000,
+        updatedAtMs: Date.now() - 8_000,
+      },
+    ];
+    tunnels.rules = [
+      {
+        id: 'rule-ov-1',
+        profileId: 'prof-ov-1',
+        name: 'metrics',
+        kind: 'local',
+        bindHost: '127.0.0.1',
+        bindPort: 9100,
+        targetHost: '127.0.0.1',
+        targetPort: 9100,
+        autoStart: false,
+      },
+    ];
+    tunnels.tunnels = [
+      {
+        id: 'tun-act-1',
+        sessionId: 'sess-ov-1',
+        profileId: 'prof-ov-1',
+        name: 'metrics',
+        kind: 'local',
+        bindHost: '127.0.0.1',
+        bindPort: 9100,
+        targetHost: '127.0.0.1',
+        targetPort: 9100,
+        allowNonLoopback: false,
+        state: 'listening',
+        lastError: null,
+      },
+    ];
+    remoteJobs.jobs = [
+      {
+        id: 'job-run-1',
+        sessionId: 'sess-ov-1',
+        sessionGeneration: 3,
+        profileId: 'prof-ov-1',
+        targetHost: '10.80.1.15',
+        targetPort: 22,
+        targetUsername: 'ops',
+        kind: 'tail_system_log',
+        commandLabel: 'journalctl -n 100',
+        targetDetail: null,
+        riskClass: 'read_only',
+        state: 'running',
+        createdAtMs: Date.now() - 5_000,
+        startedAtMs: Date.now() - 4_800,
+        finishedAtMs: null,
+        exitCode: null,
+        exitSignal: null,
+        outputStartOffset: 128,
+        outputEndOffset: 262272,
+        outputRetainedBytes: 262144,
+        outputTruncated: true,
+        error: null,
+      },
+      {
+        id: 'job-uncertain-2',
+        sessionId: 'sess-ov-1',
+        sessionGeneration: 3,
+        profileId: 'prof-ov-1',
+        targetHost: '10.80.1.15',
+        targetPort: 22,
+        targetUsername: 'ops',
+        kind: 'check_system_health',
+        commandLabel: 'system-health-check',
+        targetDetail: null,
+        riskClass: 'read_only',
+        state: 'outcome_uncertain',
+        createdAtMs: Date.now() - 25_000,
+        startedAtMs: Date.now() - 24_000,
+        finishedAtMs: Date.now() - 18_000,
+        exitCode: null,
+        exitSignal: null,
+        outputStartOffset: 0,
+        outputEndOffset: 42,
+        outputRetainedBytes: 42,
+        outputTruncated: false,
+        error: {
+          code: 'REMOTE_JOB_OUTCOME_UNCERTAIN',
+          messageKey: 'errors.remoteJobOutcomeUncertain',
+          retryable: false,
+          remoteState: 'unknown',
+        },
+      },
+    ];
+    remoteJobs.outputByJob = {
+      'job-run-1': {
+        jobId: 'job-run-1',
+        startOffset: 128,
+        endOffset: 262272,
+        retainedStartOffset: 128,
+        retainedEndOffset: 262272,
+        truncated: true,
+        content: '2026-11-15T12:00:00Z edge systemd: nginx worker ready\n',
+        state: 'running',
+      },
+      'job-uncertain-2': {
+        jobId: 'job-uncertain-2',
+        startOffset: 0,
+        endOffset: 42,
+        retainedStartOffset: 0,
+        retainedEndOffset: 42,
+        truncated: false,
+        content: 'Linux edge 6.8.0-generic\n',
+        state: 'outcome_uncertain',
+      },
+    };
+    events.entries = [
+      {
+        id: 'evt-act-1',
+        occurredAt: new Date().toISOString(),
+        category: 'session',
+        severity: 'warning',
+        code: 'remote_job.outcome_uncertain',
+        details: { host: '10.80.1.15', command: 'system-health-check' },
+      },
+    ];
+  });
+
+  // Open Workbench Overview from the FILEX product mark
+  await page.getByRole('button', { name: '打开工作台概览' }).click();
+  const overview = page.getByRole('dialog', { name: '工作台概览' });
+  await expect(overview).toBeVisible();
+  await expect(overview).toContainText('edge-gateway');
+  await expect(overview).toContainText('ops@10.80.1.15:22');
+  await page.screenshot({ path: 'test-results/overview-1440-dark.png' });
+  await page.keyboard.press('Escape');
+  await expect(overview).toHaveCount(0);
+
+  // Also reachable from Command Palette
+  await page.getByRole('button', { name: '命令面板' }).click();
+  await page.getByRole('option', { name: '打开工作台概览' }).click();
+  await expect(overview).toBeVisible();
+  await overview.getByRole('button', { name: '打开活动中心' }).click();
+  await expect(overview).toHaveCount(0);
+
+  // Unified Activity drawer stays visible without replacing the terminal workspace
+  const drawer = page.locator('.task-drawer');
+  await expect(drawer).toBeVisible();
+  await expect(drawer.locator('.activity-row')).toHaveCount(5);
+
+  // Selecting uncertain job opens details pane without hiding terminal
+  await drawer.locator('.activity-row-button', { hasText: 'system-health-check' }).click();
+  await expect(page.locator('.terminal-workspace')).toBeVisible();
+  const detail = drawer.locator('.activity-detail-pane');
+  await expect(detail).toBeVisible();
+  await expect(detail).toContainText('结果未知');
+  await expect(detail).toContainText('REMOTE_JOB_OUTCOME_UNCERTAIN');
+
+  // Selecting running streaming job displays ring-buffer truncation notice & output
+  await drawer.locator('.activity-row-button', { hasText: 'journalctl -n 100' }).click();
+  await expect(detail).toContainText('256 KiB');
+  await expect(detail.locator('.activity-output-pre')).toContainText('nginx worker ready');
+
+  // Active-only filter narrows unified list cleanly
+  await drawer.getByRole('button', { name: '仅看进行中' }).click();
+  await expect(drawer.locator('.activity-row')).toHaveCount(2);
+
+  // Switch to Remote Jobs tab and verify bounded structured preset controls
+  await drawer.getByRole('tab', { name: /远程作业/ }).click();
+  const launcherSelect = drawer.locator('#remote-job-kind');
+  await launcherSelect.selectOption('inspect_disk_usage');
+  await expect(drawer.getByPlaceholder('目录路径（例如 /var/log）')).toBeVisible();
+  await expect(drawer.locator('.transfer-row')).toHaveCount(2);
+
+  // Light theme + compact 960x640 layout check
+  await page.setViewportSize({ width: 960, height: 640 });
+  await page.evaluate(() => {
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__?.config.globalProperties.$pinia;
+    const settings = pinia?._s.get('settings') as {
+      value: Record<string, unknown>;
+      apply?: () => void;
+    } | undefined;
+    if (settings) {
+      settings.value.theme = 'light';
+      settings.apply?.();
+    }
+  });
+  await expect(drawer).toBeVisible();
+  await expect.poll(() => page.evaluate(() => document.documentElement.classList.contains('light'))).toBe(true);
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(960);
+  await page.screenshot({ path: 'test-results/activity-960-light.png', animations: 'disabled' });
+
+  await page.getByRole('button', { name: '打开工作台概览' }).click();
+  await expect(overview).toBeVisible();
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(960);
+  await page.screenshot({ path: 'test-results/overview-960-light.png', animations: 'disabled' });
+  await page.keyboard.press('Escape');
+});
+
+test('locates folders and files by typing letters in virtualized and standard folder lists', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => Boolean(
+    (document.querySelector('#app') as HTMLElement & { __vue_app__?: unknown }).__vue_app__,
+  ));
+  await page.evaluate(() => {
+    type Store = Record<string, unknown>;
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Store> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__
+      ?.config.globalProperties.$pinia;
+    const sessions = pinia?._s.get('sessions');
+    const sftp = pinia?._s.get('sftp');
+    const settings = pinia?._s.get('settings');
+    if (!sessions || !sftp || !settings) throw new Error('File browser fixture stores unavailable');
+
+    const now = Date.now();
+    const entries: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < 230; i += 1) {
+      const code = String(i).padStart(3, '0');
+      entries.push({
+        name: `dir-${code}`,
+        path: `/srv/releases/dir-${code}`,
+        isDirectory: true,
+        isSymlink: false,
+        size: null,
+        modifiedAtMs: now,
+        permissionsMode: 0o755,
+        uid: 0,
+        gid: 0,
+      });
+    }
+    entries.push(
+      {
+        name: 'zebra-dir',
+        path: '/srv/releases/zebra-dir',
+        isDirectory: true,
+        isSymlink: false,
+        size: null,
+        modifiedAtMs: now,
+        permissionsMode: 0o755,
+        uid: 0,
+        gid: 0,
+      },
+      {
+        name: 'alpha.txt',
+        path: '/srv/releases/alpha.txt',
+        isDirectory: false,
+        isSymlink: false,
+        size: 64,
+        modifiedAtMs: now,
+        permissionsMode: 0o644,
+        uid: 0,
+        gid: 0,
+      },
+      {
+        name: 'readme.md',
+        path: '/srv/releases/readme.md',
+        isDirectory: false,
+        isSymlink: false,
+        size: 128,
+        modifiedAtMs: now,
+        permissionsMode: 0o644,
+        uid: 0,
+        gid: 0,
+      },
+      {
+        name: 'release.env',
+        path: '/srv/releases/release.env',
+        isDirectory: false,
+        isSymlink: false,
+        size: 256,
+        modifiedAtMs: now,
+        permissionsMode: 0o640,
+        uid: 0,
+        gid: 0,
+      },
+      {
+        name: 'zeta.log',
+        path: '/srv/releases/zeta.log',
+        isDirectory: false,
+        isSymlink: false,
+        size: 512,
+        modifiedAtMs: now,
+        permissionsMode: 0o644,
+        uid: 0,
+        gid: 0,
+      },
+    );
+
+    const session = {
+      id: 'session-typeahead-e2e',
+      generation: 1,
+      profileId: 'profile-typeahead-e2e',
+      sessionKind: 'ssh',
+      capabilities: ['remote_shell', 'sftp', 'remote_edit'],
+      state: 'connected',
+      host: '10.24.1.42',
+      port: 22,
+      username: 'operator',
+      lastError: null,
+    };
+    sessions.summaries = [session];
+    sessions.activeSessionId = session.id;
+    sessions.isQuickProfile = () => false;
+    sftp.load = () => Promise.resolve(true);
+    sftp.sessionId = session.id;
+    sftp.path = '/srv/releases';
+    sftp.entries = entries;
+    Object.assign(settings.value as Record<string, unknown>, {
+      theme: 'dark',
+      fileBrowserOpen: true,
+      focusMode: false,
+      dualPaneSftp: false,
+      locale: 'zh-CN',
+      fileBrowserHeight: 260,
+    });
+    (settings as { apply?: () => void }).apply?.();
+  });
+
+  await expect.poll(() => page.evaluate(() => document.documentElement.classList.contains('dark'))).toBe(true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // Focus the file list area (clicking the non-row column header focuses .file-list)
+  const fileList = page.locator('.file-browser-panel .file-list').first();
+  await fileList.locator('.file-table-header').click();
+
+  // Single-letter jump in a >200 virtualized list locates zebra-dir far below initial viewport
+  await page.keyboard.press('z');
+  const zebraRow = page.locator('.file-row', { hasText: 'zebra-dir' });
+  await expect(zebraRow).toBeVisible();
+  await expect(zebraRow).toHaveClass(/selected/);
+  await expect(zebraRow).toBeFocused();
+  await expect(fileList.locator('.file-typeahead-pill')).toContainText('定位: z');
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1440);
+  await page.screenshot({ path: 'test-results/file-typeahead-1440-dark.png', animations: 'disabled' });
+
+  // Repeated same-letter press cycles to zeta.log
+  await page.keyboard.press('z');
+  const zetaRow = page.locator('.file-row', { hasText: 'zeta.log' });
+  await expect(zetaRow).toBeVisible();
+  await expect(zetaRow).toHaveClass(/selected/);
+  await expect(zetaRow).toBeFocused();
+
+  // Escape dismisses the typeahead pill cleanly
+  await page.keyboard.press('Escape');
+  await expect(fileList.locator('.file-typeahead-pill')).toHaveCount(0);
+
+  // Rapid multi-letter prefix jumps from readme.md -> release.env
+  await page.keyboard.type('rel', { delay: 30 });
+  const releaseRow = page.locator('.file-row', { hasText: 'release.env' });
+  await expect(releaseRow).toBeVisible();
+  await expect(releaseRow).toHaveClass(/selected/);
+  await expect(releaseRow).toBeFocused();
+  await expect(fileList.locator('.file-typeahead-pill')).toContainText('定位: rel');
+
+  // ArrowUp navigates cleanly to the previous entry (readme.md)
+  await page.keyboard.press('ArrowUp');
+  const readmeRow = page.locator('.file-row', { hasText: 'readme.md' });
+  await expect(readmeRow).toHaveClass(/selected/);
+  await expect(readmeRow).toBeFocused();
+
+  // Typing inside the path input does NOT trigger file list typeahead
+  const pathInput = page.getByLabel('当前目录路径');
+  await pathInput.click();
+  await pathInput.press('a');
+  await expect(readmeRow).toHaveClass(/selected/);
+});
+
+test('supports Ctrl+C and Ctrl+V upload from local pane and desktop clipboard', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => Boolean(
+    (document.querySelector('#app') as HTMLElement & { __vue_app__?: unknown }).__vue_app__,
+  ));
+  await page.evaluate(() => {
+    type Store = Record<string, unknown>;
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Store> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__
+      ?.config.globalProperties.$pinia;
+    const sessions = pinia?._s.get('sessions');
+    const sftp = pinia?._s.get('sftp');
+    const settings = pinia?._s.get('settings');
+    const localFiles = pinia?._s.get('local-files');
+    if (!sessions || !sftp || !settings || !localFiles) {
+      throw new Error('File browser fixture stores unavailable');
+    }
+    const now = Date.now();
+    const session = {
+      id: 'session-copy-upload-e2e',
+      generation: 1,
+      profileId: 'profile-copy-upload-e2e',
+      sessionKind: 'ssh',
+      capabilities: ['remote_shell', 'sftp', 'remote_edit'],
+      state: 'connected',
+      host: '10.24.1.50',
+      port: 22,
+      username: 'deploy',
+      lastError: null,
+    };
+    sessions.summaries = [session];
+    sessions.activeSessionId = session.id;
+    sessions.isQuickProfile = () => false;
+    sftp.load = () => Promise.resolve(true);
+    sftp.sessionId = session.id;
+    sftp.path = '/srv/www';
+    sftp.entries = [
+      {
+        name: 'current',
+        path: '/srv/www/current',
+        isDirectory: true,
+        isSymlink: false,
+        size: null,
+        modifiedAtMs: now,
+        permissionsMode: 0o755,
+        uid: 0,
+        gid: 0,
+      },
+    ];
+    localFiles.load = () => Promise.resolve(true);
+    localFiles.listing = {
+      path: 'C:\\workspace',
+      parentPath: 'C:\\',
+      truncated: false,
+      entries: [
+        {
+          name: 'dist',
+          path: 'C:\\workspace\\dist',
+          isDirectory: true,
+          isSymlink: false,
+          size: null,
+          modifiedAtMs: now,
+          permissionsMode: null,
+        },
+        {
+          name: 'bundle.zip',
+          path: 'C:\\workspace\\bundle.zip',
+          isDirectory: false,
+          isSymlink: false,
+          size: 2048,
+          modifiedAtMs: now,
+          permissionsMode: null,
+        },
+      ],
+    };
+    Object.assign(settings.value as Record<string, unknown>, {
+      fileBrowserOpen: true,
+      focusMode: false,
+      dualPaneSftp: true,
+      taskDrawerOpen: false,
+      locale: 'zh-CN',
+      fileBrowserHeight: 260,
+    });
+  });
+
+  const localPane = page.getByRole('region', { name: '本机目录' });
+  const remotePane = page.getByRole('region', { name: '远端目录' });
+  await expect(localPane).toBeVisible();
+  await expect(remotePane).toBeVisible();
+
+  // Context menus expose copyForUpload on local and pasteUpload on remote
+  const distRow = localPane.locator('.file-row', { hasText: 'dist' });
+  await distRow.click({ button: 'right' });
+  const menu = page.getByRole('menu', { name: '文件操作' });
+  await expect(menu.getByRole('menuitem', { name: '复制以供上传' })).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  await remotePane.locator('.file-table-header').click({ button: 'right' });
+  await expect(menu.getByRole('menuitem', { name: '粘贴上传' })).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  // Ctrl+C on local entry + Ctrl+V on remote pane hits the desktop boundary cleanly in browser mode
+  await distRow.click();
+  await page.keyboard.press('Control+c');
+  await expect(page.locator('.toast')).toContainText('已复制「dist」，可在远端目录按 Ctrl+V 上传。');
+
+  await remotePane.locator('.file-table-header').click();
+  await page.keyboard.press('Control+v');
+  await expect(page.locator('.toast')).toContainText('仅在 FILEX 桌面应用中可用');
+
+  // Mock desktop IPC to verify full OS clipboard Ctrl+V upload queueing end-to-end
+  await page.evaluate(() => {
+    const enqueued: Array<Record<string, unknown>> = [];
+    const win = window as Window & {
+      __TEST_ENQUEUED__?: Array<Record<string, unknown>>;
+      __TAURI_INTERNALS__?: { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> };
+    };
+    win.__TEST_ENQUEUED__ = enqueued;
+    win.__TAURI_INTERNALS__ = {
+      invoke(cmd: string, args?: Record<string, unknown>) {
+        if (cmd === 'read_clipboard_file_paths') {
+          return Promise.resolve({
+            ok: true,
+            requestId: 'req-clip',
+            data: {
+              paths: ['C:\\workspace\\dist', 'C:\\workspace\\bundle.zip'],
+              sequence: 99,
+              supported: true,
+            },
+          });
+        }
+        if (cmd === 'inspect_local_entry') {
+          const path = typeof args?.path === 'string' ? args.path : '';
+          if (path.endsWith('dist')) {
+            return Promise.resolve({
+              ok: true,
+              requestId: 'req-inspect-1',
+              data: {
+                name: 'dist',
+                path: 'C:\\workspace\\dist',
+                isDirectory: true,
+                isSymlink: false,
+                size: null,
+                modifiedAtMs: Date.now(),
+                permissionsMode: null,
+              },
+            });
+          }
+          return Promise.resolve({
+            ok: true,
+            requestId: 'req-inspect-2',
+            data: {
+              name: 'bundle.zip',
+              path: 'C:\\workspace\\bundle.zip',
+              isDirectory: false,
+              isSymlink: false,
+              size: 2048,
+              modifiedAtMs: Date.now(),
+              permissionsMode: null,
+            },
+          });
+        }
+        if (cmd === 'enqueue_transfer') {
+          const input = (args?.input ?? {}) as Record<string, unknown>;
+          enqueued.push(input);
+          const idx = enqueued.length;
+          return Promise.resolve({
+            ok: true,
+            requestId: `req-xfer-${idx}`,
+            data: {
+              id: `xfer-${idx}`,
+              profileId: input.profileId,
+              sessionId: args?.sessionId ?? null,
+              direction: input.direction,
+              localPath: input.localPath,
+              remotePath: input.remotePath,
+              destinationProfileId: null,
+              destinationSessionId: null,
+              destinationRemotePath: null,
+              state: 'queued',
+              bytesTransferred: 0,
+              totalBytes: input.totalBytes ?? null,
+              conflictPolicy: input.conflictPolicy ?? 'ask',
+              remoteSizeBytes: null,
+              remoteMtimeMs: null,
+              stagingPath: null,
+              resumeState: 'not_applicable',
+              error: null,
+              createdAtMs: Date.now(),
+              updatedAtMs: Date.now(),
+            },
+          });
+        }
+        if (cmd === 'save_safe_settings') {
+          return Promise.resolve({ ok: true, requestId: 'req-save', data: args?.settings ?? {} });
+        }
+        return Promise.resolve({ ok: true, requestId: 'req-noop', data: null });
+      },
+    };
+  });
+
+  await remotePane.locator('.file-table-header').click();
+  await page.keyboard.press('Control+v');
+  await expect(page.locator('.toast')).toContainText('已将 2 个粘贴上传任务加入传输队列。');
+  await expect(page.locator('.task-drawer')).toBeVisible();
+  await expect(page.locator('.transfer-row')).toHaveCount(2);
+  await expect(page.locator('.task-drawer')).toContainText('/srv/www/dist');
+  await expect(page.locator('.task-drawer')).toContainText('/srv/www/bundle.zip');
+
+  // Compact 960x640 light-theme visual & overflow check
+  await page.setViewportSize({ width: 960, height: 640 });
+  await page.evaluate(() => {
+    const root = document.querySelector('#app') as HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const settings = root.__vue_app__?.config.globalProperties.$pinia?._s.get('settings') as ({
+      value?: Record<string, unknown>;
+      apply?: () => void;
+    } | undefined);
+    if (settings?.value) {
+      settings.value.theme = 'light';
+      settings.apply?.call(settings);
+    }
+  });
+  await expect.poll(() => page.evaluate(() => document.documentElement.classList.contains('light'))).toBe(true);
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(960);
+  await page.screenshot({ path: 'test-results/file-clipboard-upload-960-light.png', animations: 'disabled' });
+
+  await page.evaluate(() => {
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  });
+});
+
+test('preserves terminal, SFTP, composer draft, and monitor state when duplicating and switching sessions', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.evaluate(() => {
+    const profiles = [
+      {
+        id: 'prof-persist-a',
+        name: 'prod-persist',
+        group: '生产环境',
+        host: '10.90.0.10',
+        port: 22,
+        username: 'deploy',
+        environment: 'production',
+        favorite: true,
+        tags: ['persist'],
+        authenticationMethod: 'agent',
+        identityFile: null,
+        sshKeyId: null,
+        proxyJump: null,
+        proxyJumpProfileIds: [],
+        proxyProfileId: null,
+        credentialRef: null,
+        state: 'idle',
+        latencyMs: null,
+        lastUsedAt: String(Date.now()),
+      },
+      {
+        id: 'prof-persist-b',
+        name: 'other-host',
+        group: '生产环境',
+        host: '10.90.0.20',
+        port: 22,
+        username: 'ops',
+        environment: 'staging',
+        favorite: false,
+        tags: [],
+        authenticationMethod: 'agent',
+        identityFile: null,
+        sshKeyId: null,
+        proxyJump: null,
+        proxyJumpProfileIds: [],
+        proxyProfileId: null,
+        credentialRef: null,
+        state: 'idle',
+        latencyMs: null,
+        lastUsedAt: String(Date.now() - 5_000),
+      },
+    ];
+    localStorage.setItem('filex.connection-profiles.v1', JSON.stringify(profiles));
+  });
+  await page.reload();
+  await page.waitForFunction(() => Boolean(
+    (document.querySelector('#app') as HTMLElement & { __vue_app__?: unknown }).__vue_app__,
+  ));
+
+  await page.evaluate(() => {
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } };
+      };
+    };
+    const w = window as unknown as {
+      __sftpLoads: Array<{ sessionId: string; path: string }>;
+      __resizeCalls: string[];
+    };
+    w.__sftpLoads = [];
+    w.__resizeCalls = [];
+
+    const pinia = (document.querySelector('#app') as Root).__vue_app__?.config.globalProperties.$pinia;
+    const settings = pinia?._s.get('settings') as { value: Record<string, unknown>; apply?: () => void } | undefined;
+    const sessions = pinia?._s.get('sessions') as {
+      summaries: Array<Record<string, unknown>>;
+      activeSessionId: string | null;
+      outputBuffers: Record<string, Uint8Array[]>;
+      outputBufferStarts: Record<string, number>;
+      outputRevision: number;
+      sessionCwds: Record<string, string>;
+      isQuickProfile: (id?: string | null) => boolean;
+      resizeSession: (id: string, cols: number, rows: number) => Promise<void>;
+      begin: (profile: Record<string, unknown>) => Promise<void>;
+      selectSession: (id: string) => void;
+    } | undefined;
+    const sftp = pinia?._s.get('sftp') as {
+      sessionId: string | null;
+      path: string;
+      entries: Array<Record<string, unknown>>;
+      directoryChildren: Record<string, Array<{ name: string; path: string }>>;
+      loading: boolean;
+      error: unknown;
+      selectedPath: string | null;
+      load: (sessionId: string, path: string) => Promise<boolean>;
+      loadTreeDirectory: (treePath: string) => Promise<void>;
+      select: (entry: Record<string, unknown>) => void;
+    } | undefined;
+    const monitor = pinia?._s.get('monitor') as {
+      snapshot: Record<string, unknown> | null;
+      collect: () => Promise<void>;
+    } | undefined;
+    if (!settings || !sessions || !sftp || !monitor) {
+      throw new Error('Persistence E2E stores unavailable');
+    }
+
+    Object.assign(settings.value, {
+      theme: 'dark',
+      locale: 'zh-CN',
+      fileBrowserOpen: true,
+      compactComposerOpen: true,
+      followTerminalCwd: true,
+      dualPaneSftp: false,
+      focusMode: false,
+    });
+    settings.apply?.();
+
+    const fsBySession: Record<string, Record<string, Array<{ name: string; path: string; isDirectory: boolean }>>> = {
+      'sess-orig': {
+        '/': [
+          { name: 'srv', path: '/srv', isDirectory: true },
+          { name: 'var', path: '/var', isDirectory: true },
+        ],
+        '/srv': [{ name: 'app', path: '/srv/app', isDirectory: true }],
+        '/srv/app': [{ name: 'README.md', path: '/srv/app/README.md', isDirectory: false }],
+        '/var': [{ name: 'log', path: '/var/log', isDirectory: true }],
+        '/var/log': [{ name: 'nginx', path: '/var/log/nginx', isDirectory: true }],
+        '/var/log/nginx': [{ name: 'access.log', path: '/var/log/nginx/access.log', isDirectory: false }],
+      },
+      'sess-dup': {
+        '/': [{ name: 'root', path: '/root', isDirectory: true }],
+        '/root': [{ name: 'dup-home.txt', path: '/root/dup-home.txt', isDirectory: false }],
+      },
+      'sess-other': {
+        '/': [{ name: 'opt', path: '/opt', isDirectory: true }],
+        '/opt': [{ name: 'service.conf', path: '/opt/service.conf', isDirectory: false }],
+      },
+    };
+
+    const originalLoad = sftp.load.bind(sftp);
+    void originalLoad;
+    sftp.load = (sessionId: string, requestedPath: string) => {
+      w.__sftpLoads.push({ sessionId, path: requestedPath });
+      const resolved = requestedPath === '.'
+        ? (sessionId === 'sess-orig' ? '/srv/app' : sessionId === 'sess-dup' ? '/root' : '/opt')
+        : requestedPath;
+      const map = fsBySession[sessionId] ?? {};
+      const items = (map[resolved] ?? []).map((item) => ({
+        name: item.name,
+        path: item.path,
+        isDirectory: item.isDirectory,
+        isSymlink: false,
+        size: item.isDirectory ? null : 256,
+        modifiedAtMs: 1_700_000_000_000,
+        permissionsMode: item.isDirectory ? 0o755 : 0o644,
+        uid: 0,
+        gid: 0,
+      }));
+      sftp.loading = false;
+      sftp.error = null;
+      sftp.sessionId = sessionId;
+      sftp.path = resolved;
+      sftp.entries = items;
+      sftp.selectedPath = null;
+      sftp.directoryChildren = {
+        ...sftp.directoryChildren,
+        [resolved]: items.filter((item) => item.isDirectory).map((item) => ({ name: item.name, path: item.path })),
+      };
+      return Promise.resolve(true);
+    };
+    sftp.loadTreeDirectory = (treePath: string) => {
+      const sid = sftp.sessionId ?? '';
+      const map = fsBySession[sid] ?? {};
+      const dirs = (map[treePath] ?? []).filter((item) => item.isDirectory).map((item) => ({ name: item.name, path: item.path }));
+      sftp.directoryChildren = { ...sftp.directoryChildren, [treePath]: dirs };
+      return Promise.resolve();
+    };
+
+    monitor.collect = () => Promise.resolve();
+    sessions.isQuickProfile = () => false;
+    sessions.resizeSession = (id: string, cols: number, rows: number) => {
+      w.__resizeCalls.push(`${id}:${cols}x${rows}`);
+      return Promise.resolve();
+    };
+    sessions.begin = () => {
+      const dup = {
+        id: 'sess-dup',
+        generation: 1,
+        profileId: 'prof-persist-a',
+        sessionKind: 'ssh',
+        capabilities: ['remote_shell', 'sftp', 'remote_edit', 'host_monitoring', 'tunneling', 'remote_jobs'],
+        state: 'connected',
+        host: '10.90.0.10',
+        port: 22,
+        username: 'deploy',
+        lastError: null,
+      };
+      sessions.summaries = [...sessions.summaries, dup];
+      sessions.activeSessionId = 'sess-dup';
+      const bytes = new TextEncoder().encode('DUP_SESSION_READY\r\n');
+      sessions.outputBuffers = { ...sessions.outputBuffers, 'sess-dup': [bytes] };
+      sessions.outputBufferStarts = { ...sessions.outputBufferStarts, 'sess-dup': 0 };
+      sessions.outputRevision += 1;
+      return Promise.resolve();
+    };
+
+    sessions.summaries = [
+      {
+        id: 'sess-orig',
+        generation: 1,
+        profileId: 'prof-persist-a',
+        sessionKind: 'ssh',
+        capabilities: ['remote_shell', 'sftp', 'remote_edit', 'host_monitoring', 'tunneling', 'remote_jobs'],
+        state: 'connected',
+        host: '10.90.0.10',
+        port: 22,
+        username: 'deploy',
+        lastError: null,
+      },
+      {
+        id: 'sess-other',
+        generation: 1,
+        profileId: 'prof-persist-b',
+        sessionKind: 'ssh',
+        capabilities: ['remote_shell', 'sftp', 'remote_edit', 'host_monitoring', 'tunneling', 'remote_jobs'],
+        state: 'connected',
+        host: '10.90.0.20',
+        port: 22,
+        username: 'ops',
+        lastError: null,
+      },
+    ];
+    sessions.activeSessionId = 'sess-orig';
+    sessions.sessionCwds = { 'sess-orig': '/srv/app' };
+    sessions.outputBuffers = {
+      'sess-orig': [new TextEncoder().encode('ALPHA_MARKER_OUTPUT\r\n')],
+      'sess-other': [new TextEncoder().encode('OTHER_HOST_OUTPUT\r\n')],
+    };
+    sessions.outputBufferStarts = { 'sess-orig': 0, 'sess-other': 0 };
+    sessions.outputRevision += 1;
+    monitor.snapshot = {
+      state: 'live',
+      collectedAtMs: Date.now(),
+      hostname: 'alpha-prod-01',
+      osName: 'Ubuntu 24.04',
+      uptimeSeconds: 3600,
+      loadOne: 0.2,
+      cpuPercent: 10,
+      memoryTotalKib: 4096,
+      memoryAvailableKib: 2048,
+      swapTotalKib: 1024,
+      swapUsedKib: 0,
+      rootTotalKib: 10000,
+      rootAvailableKib: 5000,
+      networkReceiveBytesPerSecond: 120,
+      networkTransmitBytesPerSecond: 40,
+    };
+  });
+
+  // 1) Prepare Session A state: navigate manually to /var/log/nginx, select access.log,
+  //    open terminal search, type composer draft, and tag the live xterm DOM node.
+  const remotePane = page.locator('.file-browser-pane');
+  await expect(remotePane.locator('.file-row', { hasText: 'README.md' })).toBeVisible();
+  const pathInput = remotePane.getByLabel('当前目录路径');
+  await pathInput.fill('/var/log/nginx');
+  await pathInput.press('Enter');
+  const accessRow = remotePane.locator('.file-row', { hasText: 'access.log' });
+  await expect(accessRow).toBeVisible();
+  await accessRow.click();
+  await expect(accessRow).toHaveClass(/selected/);
+
+  await expect(page.locator('.terminal-pane:visible .xterm-rows')).toContainText('ALPHA_MARKER_OUTPUT');
+  await page.locator('.terminal-tabs button[aria-label="搜索终端"]').click();
+  const searchInput = page.locator('.terminal-search input');
+  await searchInput.fill('ALPHA_MARKER_OUTPUT');
+  await expect(page.locator('.terminal-search-position')).toContainText('1 / 1');
+
+  const composer = page.locator('.command-input-bar textarea');
+  await composer.fill('sudo systemctl status nginx');
+  await page.evaluate(() => document.fonts?.ready);
+  await page.waitForTimeout(160);
+
+  await page.evaluate(() => {
+    const visibleXterm = document.querySelector<HTMLElement>('.terminal-pane:not([style*="display: none"]) .xterm');
+    if (!visibleXterm) throw new Error('Expected visible xterm for sess-orig');
+    visibleXterm.dataset.persistToken = 'orig-xterm-instance';
+  });
+
+  // 2) Duplicate session (`复制会话`) -> opens sess-dup and populates its independent state
+  await page.locator('button[aria-label="复制会话"]').click();
+  await expect(page.locator('.terminal-tab')).toHaveCount(3);
+  await expect(page.locator('.terminal-pane:visible .xterm-rows')).toContainText('DUP_SESSION_READY');
+  await expect(remotePane.locator('.file-row', { hasText: 'dup-home.txt' })).toBeVisible();
+  await expect(composer).toHaveValue('');
+  await composer.fill('tail -n 50 /var/log/syslog');
+  await expect(page.evaluate(() => {
+    type Root = HTMLElement & {
+      __vue_app__?: { config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } } };
+    };
+    const monitor = (document.querySelector('#app') as Root).__vue_app__?.config.globalProperties.$pinia?._s.get('monitor');
+    return (monitor as { snapshot: unknown } | undefined)?.snapshot;
+  })).resolves.toBeNull();
+
+  // 3) Also switch to a different host tab (sess-other)
+  await page.locator('.terminal-tab', { hasText: 'other-host' }).click();
+  await expect(page.locator('.terminal-pane:visible .xterm-rows')).toContainText('OTHER_HOST_OUTPUT');
+  await expect(remotePane.locator('.file-row', { hasText: 'service.conf' })).toBeVisible();
+  await page.waitForTimeout(160);
+
+  // Record call counters right before returning to Session A and Session B
+  const countsBeforeSwitchBack = await page.evaluate(() => {
+    const w = window as unknown as {
+      __sftpLoads: Array<{ sessionId: string; path: string }>;
+      __resizeCalls: string[];
+    };
+    return {
+      sftpLoadCount: w.__sftpLoads.length,
+      resizeCalls: [...w.__resizeCalls],
+    };
+  });
+
+  // 4) Switch back to original Session A (`prod-persist` first tab)
+  await page.locator('.terminal-tab').nth(0).click();
+  await expect(page.locator('.terminal-pane:visible .xterm-rows')).toContainText('ALPHA_MARKER_OUTPUT');
+  await expect(accessRow).toBeVisible();
+  await expect(accessRow).toHaveClass(/selected/);
+  await expect(pathInput).toHaveValue('/var/log/nginx');
+  await expect(composer).toHaveValue('sudo systemctl status nginx');
+  await expect(page.locator('.terminal-search input')).toHaveValue('ALPHA_MARKER_OUTPUT');
+  await expect(page.locator('.terminal-search-position')).toContainText('1 / 1');
+
+  await page.waitForTimeout(200);
+  const restoredOrigCheck = await page.evaluate(() => {
+    type Root = HTMLElement & {
+      __vue_app__?: { config: { globalProperties: { $pinia?: { _s: Map<string, Record<string, unknown>> } } } };
+    };
+    const w = window as unknown as {
+      __sftpLoads: Array<{ sessionId: string; path: string }>;
+      __resizeCalls: string[];
+    };
+    const monitor = (document.querySelector('#app') as Root).__vue_app__?.config.globalProperties.$pinia?._s.get('monitor') as {
+      snapshot: { hostname?: string } | null;
+    } | undefined;
+    const visibleXterm = document.querySelector<HTMLElement>('.terminal-pane:not([style*="display: none"]) .xterm');
+    return {
+      persistToken: visibleXterm?.dataset.persistToken ?? null,
+      monitorHostname: monitor?.snapshot?.hostname ?? null,
+      sftpLoadCount: w.__sftpLoads.length,
+      resizeCalls: [...w.__resizeCalls],
+    };
+  });
+  expect(restoredOrigCheck.persistToken).toBe('orig-xterm-instance');
+  expect(restoredOrigCheck.monitorHostname).toBe('alpha-prod-01');
+  expect(restoredOrigCheck.sftpLoadCount).toBe(countsBeforeSwitchBack.sftpLoadCount);
+  expect(restoredOrigCheck.resizeCalls).toEqual(countsBeforeSwitchBack.resizeCalls);
+
+  // 5) Switch back to duplicated session (`sess-dup`, third tab) -> also preserved without reloading
+  await page.locator('.terminal-tab').nth(2).click();
+  await expect(page.locator('.terminal-pane:visible .xterm-rows')).toContainText('DUP_SESSION_READY');
+  await expect(remotePane.locator('.file-row', { hasText: 'dup-home.txt' })).toBeVisible();
+  await expect(composer).toHaveValue('tail -n 50 /var/log/syslog');
+  await page.waitForTimeout(200);
+  const afterDupSwitchCounts = await page.evaluate(() => {
+    const w = window as unknown as {
+      __sftpLoads: Array<{ sessionId: string; path: string }>;
+      __resizeCalls: string[];
+    };
+    return {
+      sftpLoadCount: w.__sftpLoads.length,
+      resizeCalls: [...w.__resizeCalls],
+    };
+  });
+  expect(afterDupSwitchCounts.sftpLoadCount).toBe(countsBeforeSwitchBack.sftpLoadCount);
+  expect(afterDupSwitchCounts.resizeCalls).toEqual(countsBeforeSwitchBack.resizeCalls);
+});

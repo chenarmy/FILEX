@@ -6,6 +6,7 @@ import type {
   LocalTextPreview,
   LocalTextSaveResult,
   OperationResult,
+  TerminalEncoding,
 } from '@/types/contracts';
 
 export async function listLocalDirectory(path?: string): Promise<OperationResult<LocalDirectoryListing>> {
@@ -86,6 +87,7 @@ export function deleteLocalEntry(path: string): Promise<OperationResult<void>> {
 
 export async function previewLocalText(
   path: string,
+  encoding?: TerminalEncoding | null,
 ): Promise<OperationResult<LocalTextPreview>> {
   if (!isTauriRuntime()) {
     return failure({
@@ -96,7 +98,10 @@ export async function previewLocalText(
     });
   }
   try {
-    return await invoke<OperationResult<LocalTextPreview>>('preview_local_text', { path });
+    return await invoke<OperationResult<LocalTextPreview>>('preview_local_text', {
+      path,
+      encoding: encoding ?? null,
+    });
   } catch (error: unknown) {
     return failure(normalizeUnknownError(error, 'LOCAL_TEXT_PREVIEW_FAILED'));
   }
@@ -106,6 +111,7 @@ export async function saveLocalText(
   path: string,
   content: string,
   expectedRevision: string,
+  encoding?: TerminalEncoding | null,
 ): Promise<OperationResult<LocalTextSaveResult>> {
   if (!isTauriRuntime()) {
     return failure({
@@ -120,6 +126,7 @@ export async function saveLocalText(
       path,
       content,
       expectedRevision,
+      encoding: encoding ?? null,
     });
   } catch (error: unknown) {
     return failure(normalizeUnknownError(error, 'LOCAL_TEXT_SAVE_FAILED'));

@@ -3,13 +3,14 @@ import { defineStore } from 'pinia';
 import { previewLocalText, saveLocalText } from '@/api/domain/localFilesApi';
 import { previewRemoteText, saveRemoteText } from '@/api/domain/sftpApi';
 import { useSessionsStore } from '@/stores/sessions';
-import type { AppError } from '@/types/contracts';
+import type { AppError, TerminalEncoding } from '@/types/contracts';
 
 export interface EditorTab {
   id: string;
   side: 'local' | 'remote';
   path: string;
   name: string;
+  encoding: TerminalEncoding;
   content: string;
   revision: string;
   truncated: boolean;
@@ -78,6 +79,7 @@ export const useEditorStore = defineStore('editor', () => {
       side,
       path,
       name: path.split('/').pop() || path,
+      encoding: 'utf-8',
       content: '',
       revision: '',
       truncated: false,
@@ -119,8 +121,8 @@ export const useEditorStore = defineStore('editor', () => {
         return;
       }
       const result = tab.side === 'remote'
-        ? await previewRemoteText(sessionId as string, tab.path)
-        : await previewLocalText(tab.path);
+        ? await previewRemoteText(sessionId as string, tab.path, tab.encoding)
+        : await previewLocalText(tab.path, tab.encoding);
       if ((loadGeneration.get(tabId) ?? 0) !== generation) return;
       if (!result.ok) {
         tab.error = result.error;
@@ -163,8 +165,8 @@ export const useEditorStore = defineStore('editor', () => {
         return false;
       }
       const result = tab.side === 'remote'
-        ? await saveRemoteText(sessionId as string, tab.path, tab.content, tab.revision)
-        : await saveLocalText(tab.path, tab.content, tab.revision);
+        ? await saveRemoteText(sessionId as string, tab.path, tab.content, tab.revision, tab.encoding)
+        : await saveLocalText(tab.path, tab.content, tab.revision, tab.encoding);
       if (!result.ok) {
         tab.error = result.error;
         return false;
@@ -174,6 +176,15 @@ export const useEditorStore = defineStore('editor', () => {
       return true;
     } finally {
       tab.saving = false;
+    }
+  }
+
+  async function setEncoding(tabId: string, encoding: TerminalEncoding): Promise<void> {
+    const tab = tabs.value.find((candidate) => candidate.id === tabId);
+    if (!tab || tab.encoding === encoding || tab.loading || tab.saving) return;
+    tab.encoding = encoding;
+    if (!tab.dirty) {
+      await loadTab(tabId);
     }
   }
 
@@ -191,6 +202,6 @@ export const useEditorStore = defineStore('editor', () => {
 
   return {
     tabs, activeTabId, activeTab, busy,
-    open, reload, updateContent, save, close, clear,
+    open, reload, updateContent, setEncoding, save, close, clear,
   };
 });

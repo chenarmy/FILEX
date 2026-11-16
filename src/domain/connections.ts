@@ -28,6 +28,10 @@ export function validateConnectionProfile(input: CreateConnectionProfileInput): 
     return validationError('profile.proxyJumpRouteInvalid', 'proxyJumpProfileIds');
   }
 
+  if (input.proxyProfileId?.trim() && (input.proxyJumpProfileIds.length > 0 || Boolean(input.proxyJump?.trim()))) {
+    return validationError('profile.proxyAndJumpConflict', 'proxyProfileId');
+  }
+
   return null;
 }
 

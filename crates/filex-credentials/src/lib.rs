@@ -12,6 +12,7 @@ pub enum CredentialKind {
     Password,
     PrivateKeyPassphrase,
     ProviderToken,
+    ProxyPassword,
 }
 
 impl CredentialKind {
@@ -20,6 +21,7 @@ impl CredentialKind {
             Self::Password => "password",
             Self::PrivateKeyPassphrase => "key-passphrase",
             Self::ProviderToken => "provider-token",
+            Self::ProxyPassword => "proxy-password",
         }
     }
 
@@ -114,8 +116,10 @@ fn validate_reference(reference: &str) -> Result<(), CredentialError> {
     let Some((kind, id)) = reference.split_once(':') else {
         return Err(CredentialError::InvalidReference);
     };
-    if !matches!(kind, "password" | "key-passphrase" | "provider-token")
-        || uuid::Uuid::parse_str(id).is_err()
+    if !matches!(
+        kind,
+        "password" | "key-passphrase" | "provider-token" | "proxy-password"
+    ) || uuid::Uuid::parse_str(id).is_err()
     {
         return Err(CredentialError::InvalidReference);
     }
@@ -139,7 +143,7 @@ fn map_keyring_error_ref(error: &KeyringError) -> CredentialError {
 
 #[cfg(test)]
 mod tests {
-    use super::{CredentialError, SecretLease, validate_reference};
+    use super::{CredentialError, CredentialKind, SecretLease, validate_reference};
     use zeroize::Zeroizing;
 
     #[test]
@@ -148,6 +152,13 @@ mod tests {
             validate_reference("../../settings.json"),
             Err(CredentialError::InvalidReference)
         );
+    }
+
+    #[test]
+    fn accepts_proxy_password_credential_reference() {
+        let reference = format!("proxy-password:{}", uuid::Uuid::new_v4());
+        assert!(CredentialKind::ProxyPassword.matches_reference(&reference));
+        assert_eq!(validate_reference(&reference), Ok(()));
     }
 
     #[test]

@@ -16,20 +16,25 @@ import { getTerminalLogColorPalette, TerminalLogColorizer } from '@/domain/termi
 import { resolveTerminalPalette, resolveTerminalThemeAppearance } from '@/domain/terminalThemes';
 import { clampTerminalMenuPosition, resolveTerminalFontFamily } from '@/domain/terminalInteractions';
 import { resolveCdCommand } from '@/domain/terminalCwd';
+import { hasCapability, isLocalSession } from '@/domain/sessionCapabilities';
 import TerminalQuickOpsBar from '@/components/terminal/TerminalQuickOpsBar.vue';
+import { formatRemainingTtl, usePrivilegeStore } from '@/stores/privilege';
 import { useSessionsStore } from '@/stores/sessions';
 import { useSettingsStore } from '@/stores/settings';
 import { useUiStore } from '@/stores/ui';
 import { t } from '@/i18n';
-import type { TerminalEncoding } from '@/types/contracts';
+import { TEXT_ENCODING_LABELS } from '@/domain/encodings';
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   sessionId: string | null;
+  visible?: boolean;
   focused: boolean;
   searchOpen: boolean;
   focusSearchToken: number;
   canClose: boolean;
-}>();
+}>(), {
+  visible: true,
+});
 
 const emit = defineEmits<{
   focus: [];
@@ -39,11 +44,28 @@ const emit = defineEmits<{
 }>();
 
 const sessions = useSessionsStore();
+const privilege = usePrivilegeStore();
 const settings = useSettingsStore();
 const ui = useUiStore();
 const session = computed(() => sessions.summaries.find((item) => item.id === props.sessionId) ?? null);
+const localSession = computed(() => isLocalSession(session.value));
+const localMetadata = computed(() => sessions.localMetadataForSession(session.value?.id));
 const profile = computed(() => sessions.profileForSession(session.value));
-const sessionName = computed(() => profile.value?.name ?? t('terminal.noSession'));
+const elevatedLease = computed(() => (session.value && !localSession.value ? privilege.getLease(session.value.id) : null));
+const elevatedRemaining = computed(() => (elevatedLease.value
+  ? formatRemainingTtl(privilege.remainingSeconds(elevatedLease.value.sessionId))
+  : ''));
+
+async function revokeElevation(): Promise<void> {
+  if (!elevatedLease.value) return;
+  if (await privilege.revoke(elevatedLease.value.sessionId)) {
+    ui.notify(t('elevated.revokedNotice'));
+  }
+}
+const sessionName = computed(() => {
+  if (localSession.value) return localMetadata.value?.shellLabel ?? t('localTerminal.defaultTitle');
+  return profile.value?.name ?? t('terminal.noSession');
+});
 const terminalHost = ref<HTMLElement | null>(null);
 const terminalSurface = ref<HTMLElement | null>(null);
 const terminalMenu = ref<HTMLElement | null>(null);
@@ -81,6 +103,7 @@ const terminalAppearance = computed(() => resolveTerminalThemeAppearance(
 ));
 const minimumContrastRatio = computed(() => (terminalAppearance.value === 'light' ? 4.5 : 4.5));
 const connected = computed(() => session.value?.state === 'connected');
+const remoteOpsConnected = computed(() => connected.value && hasCapability(session.value, 'host_monitoring'));
 const terminalPalette = computed(() => {
   return resolveTerminalPalette(
     settings.value.terminalTheme,
@@ -88,16 +111,7 @@ const terminalPalette = computed(() => {
     systemColorScheme.value,
   );
 });
-const terminalEncodingLabel = computed(() => {
-  const labels: Record<TerminalEncoding, string> = {
-    'utf-8': 'UTF-8',
-    gbk: 'GBK',
-    big5: 'Big5',
-    shift_jis: 'Shift_JIS',
-    'windows-1252': 'Windows-1252',
-  };
-  return labels[settings.value.terminalEncoding];
-});
+const terminalEncodingLabel = computed(() => TEXT_ENCODING_LABELS[settings.value.terminalEncoding]);
 
 let terminal: XTerm | null = null;
 let fitAddon: FitAddon | null = null;
@@ -123,6 +137,7 @@ let outputOffset = 0;
 let outputDecoder = new TextDecoder(settings.value.terminalEncoding);
 let lastResizeSignature: string | null = null;
 let fontFallbackNotified = false;
+let pendingFontRefit = false;
 let terminalInputBuffer = '';
 let bannerStage: 'none' | 'connecting' | 'connected' = 'none';
 
@@ -545,13 +560,18 @@ function applyTerminalFont(notifyFallback = false): void {
   );
   activeFontFamily.value = resolution.fontFamily;
   terminal.options.fontSize = settings.value.terminalFontSize;
-  pulseTerminalFontMetrics(terminal, resolution.fontFamily);
   if (resolution.fellBack && notifyFallback && !fontFallbackNotified) {
     fontFallbackNotified = true;
     ui.notify(t('terminal.fontFallback'));
   }
   if (!resolution.fellBack) fontFallbackNotified = false;
-  refitTerminalAfterLayout(true);
+  if (!props.visible || !terminalHost.value || terminalHost.value.clientWidth < 2) {
+    pendingFontRefit = true;
+    return;
+  }
+  pendingFontRefit = false;
+  pulseTerminalFontMetrics(terminal, resolution.fontFamily);
+  refitTerminalAfterLayout(lastResizeSignature === null);
 }
 
 function handleFontsLoaded(): void {
@@ -679,14 +699,17 @@ onMounted(async () => {
   resizeObserver = new ResizeObserver(fitTerminal);
   if (terminalHost.value) resizeObserver.observe(terminalHost.value);
   replaySession();
-  fitTerminal();
-  if (props.focused) terminal.focus();
+  if (props.visible) {
+    fitTerminal();
+    if (props.focused) terminal.focus();
+  }
   void document.fonts?.ready.then(() => applyTerminalFont(true));
 });
 
 watch(
   () => props.sessionId,
-  () => {
+  (nextSessionId, prevSessionId) => {
+    if (nextSessionId === prevSessionId) return;
     terminalInputBuffer = '';
     if (resizeTimer !== null) {
       window.clearTimeout(resizeTimer);
@@ -700,9 +723,29 @@ watch(
 );
 
 watch(
-  () => props.focused,
-  (focused) => {
-    if (focused && !props.searchOpen) void nextTick(() => terminal?.focus());
+  () => props.visible,
+  (visible, wasVisible) => {
+    if (!visible) {
+      closeContextMenu();
+      return;
+    }
+    if (wasVisible !== false) return;
+    void nextTick(() => window.requestAnimationFrame(() => {
+      if (!props.visible) return;
+      if (terminal) {
+        terminal.refresh(0, Math.max(0, terminal.rows - 1));
+      }
+      if (pendingFontRefit) applyTerminalFont(false);
+      else fitTerminal();
+      if (props.focused && !props.searchOpen) terminal?.focus();
+    }));
+  },
+);
+
+watch(
+  () => [props.visible, props.focused] as const,
+  ([visible, focused]) => {
+    if (visible && focused && !props.searchOpen) void nextTick(() => terminal?.focus());
   },
 );
 
@@ -823,7 +866,7 @@ function activateTerminal(): void {
   terminal?.focus();
 }
 
-defineExpose({ focusTerminal });
+defineExpose({ focusTerminal, sessionId: computed(() => props.sessionId) });
 </script>
 
 <template>
@@ -837,7 +880,9 @@ defineExpose({ focusTerminal });
       <div class="terminal-pane-heading">
         <span v-if="session" class="state-dot" :class="session.state" />
         <strong>{{ sessionName }}</strong>
-        <span v-if="session" class="mono terminal-pane-host">{{ session.username }}@{{ session.host }}:{{ session.port }}</span>
+        <span v-if="session && localSession" class="terminal-pane-kind">{{ t('localTerminal.badge') }}</span>
+        <span v-if="session && localSession" class="mono terminal-pane-host">{{ localMetadata?.workingDirectory ?? session.host }}</span>
+        <span v-else-if="session" class="mono terminal-pane-host">{{ session.username }}@{{ session.host }}:{{ session.port }}</span>
       </div>
       <div class="terminal-pane-actions">
         <button type="button" class="icon-button" :aria-label="t('terminal.search')" :title="t('terminal.search')" :disabled="!session" @click="openSearch">
@@ -854,7 +899,7 @@ defineExpose({ focusTerminal });
           <Bot :size="13" />
         </button>
         <button
-          v-if="session && ['disconnected', 'failed'].includes(session.state)"
+          v-if="session && !localSession && ['disconnected', 'failed'].includes(session.state)"
           type="button"
           class="pane-reconnect"
           :disabled="sessions.busy"
@@ -875,7 +920,7 @@ defineExpose({ focusTerminal });
       </div>
     </header>
 
-    <div v-if="searchOpen" class="terminal-search" role="search">
+    <div v-if="visible && searchOpen" class="terminal-search" role="search">
       <Search :size="13" aria-hidden="true" />
       <input
         ref="searchInput"
@@ -960,15 +1005,18 @@ defineExpose({ focusTerminal });
     </div>
 
     <TerminalQuickOpsBar
+      v-if="visible"
       :focused="focused"
-      :connected="connected"
-      :environment="profile?.environment ?? 'local'"
+      :connected="remoteOpsConnected"
+      :environment="localSession ? t('localTerminal.badge') : (profile?.environment ?? 'local')"
       :session-state-label="session?.state ?? t('terminal.noSession')"
       :encoding-label="terminalEncodingLabel"
       :columns="columns"
       :rows="rows"
       :cursor-cell="clickedCell ? { col: clickedCell.col, row: clickedCell.row } : null"
       :selected-chars="selectedChars"
+      :elevated-remaining="elevatedLease ? elevatedRemaining : null"
+      @revoke-elevation="revokeElevation"
     />
   </section>
 </template>
@@ -1025,6 +1073,17 @@ defineExpose({ focusTerminal });
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 0.6875rem;
+}
+
+.terminal-pane-kind {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 2px;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.625rem;
+  font-weight: 600;
+  line-height: 1.3;
 }
 
 .terminal-pane-actions {

@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    io::SeekFrom,
     net::IpAddr,
     path::PathBuf,
     sync::{
@@ -15,8 +16,13 @@ use crate::remote_ops::{
     docker_probe_error, ops_probe_command, parse_docker_logs, parse_docker_snapshot,
     parse_ops_snapshot, posix_signal_flag,
 };
+use crate::transfer_resume::{
+    ResumePlan, TransferRuntimeEvent, deterministic_local_staging_path,
+    deterministic_remote_staging_path, evaluate_resume_plan, should_preserve_staging_on_error,
+    source_identity_matches, system_time_to_ms, transfer_identity_changed_error,
+    transfer_interrupted_error, transfer_size_mismatch_error,
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use encoding_rs::Encoding;
 use filex_contracts::{
     AppError, AuthenticationMethod, ConflictPolicy, ConnectionProfile, CreateLocalTunnelInput,
     DirectorySyncChangeKind, DirectorySyncEntryKind, DirectorySyncPreview,
@@ -25,18 +31,18 @@ use filex_contracts::{
     NetworkEndpoint, NetworkInterface, NetworkPlatform, NetworkSnapshot, OpsCategory, OpsSnapshot,
     ProcessEntry, ProcessPlatform, ProcessSignal, ProcessSnapshot, RemoteDirectoryListing,
     RemoteFileEntry, RemotePermissionScope, RemotePermissionUpdateResult, RemoteState,
-    RemoteTextPreview, RemoteTextSaveResult, RouteEntry, SessionConnectionProgress, SessionState,
-    SessionSummary, SystemMonitorSnapshot, TransferDirection, TransferTask, TunnelKind,
-    TunnelState, TunnelSummary,
+    RemoteTextPreview, RemoteTextSaveResult, RouteEntry, SessionConnectionProgress, SessionKind,
+    SessionState, SessionSummary, SystemMonitorSnapshot, TransferDirection, TransferResumeState,
+    TransferTask, TunnelKind, TunnelState, TunnelSummary, capabilities_for_ssh,
 };
 use filex_core::{HostTrustService, SessionMachine, parse_monitor_probe};
 use filex_ssh::{
-    ConnectedSshSession, PreparedPrivateKey, PresentedHostKey, RusshEngine, SftpDirectoryReader,
-    SshError, TerminalInput, TerminalOutput,
+    ConnectedSshSession, PreparedPrivateKey, PresentedHostKey, ProxyConnectionSpec, RusshEngine,
+    SftpDirectoryReader, SshError, TerminalInput, TerminalOutput, connect_via_proxy,
 };
 use russh_sftp::protocol::{FileAttributes, OpenFlags};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt, copy};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio::{io::copy_bidirectional, net::TcpListener};
 use tokio_util::sync::CancellationToken;
@@ -69,6 +75,7 @@ pub struct SessionRuntime {
     process_snapshots: Mutex<HashMap<String, CachedProcessSnapshot>>,
     checksum_cancellations: Mutex<HashMap<String, CancellationToken>>,
     sync_preview_cancellations: Mutex<HashMap<String, CancellationToken>>,
+    elevated_access: crate::elevated_access::ElevatedAccessManager,
 }
 
 struct RuntimeConnection {
@@ -113,7 +120,9 @@ struct RouteProfileSnapshot {
     username: String,
     authentication_method: AuthenticationMethod,
     identity_file: Option<String>,
+    key_id: Option<String>,
     proxy_jump_profile_ids: Vec<String>,
+    proxy_profile_id: Option<String>,
 }
 
 impl From<&ConnectionProfile> for RouteProfileSnapshot {
@@ -126,7 +135,9 @@ impl From<&ConnectionProfile> for RouteProfileSnapshot {
             username: profile.username.clone(),
             authentication_method: profile.authentication_method.clone(),
             identity_file: profile.identity_file.clone(),
+            key_id: profile.key_id.clone(),
             proxy_jump_profile_ids: profile.proxy_jump_profile_ids.clone(),
+            proxy_profile_id: profile.proxy_profile_id.clone(),
         }
     }
 }
@@ -153,16 +164,18 @@ enum TransferExecutionState {
     Running,
     Paused,
     Committing,
+    Interrupted,
     Cancelled,
     Finished,
 }
 
-struct TransferControl {
+pub(crate) struct TransferControl {
     session_id: String,
+    destination_session_id: Option<String>,
     state: Mutex<TransferExecutionState>,
     changed: Notify,
-    cancellation: CancellationToken,
-    bytes_transferred: AtomicU64,
+    pub(crate) cancellation: CancellationToken,
+    pub(crate) bytes_transferred: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -238,14 +251,24 @@ impl CopyOperationControl {
 }
 
 impl TransferControl {
-    fn new(session_id: String) -> Self {
+    fn new(session_id: String, destination_session_id: Option<String>) -> Self {
         Self {
             session_id,
+            destination_session_id,
             state: Mutex::new(TransferExecutionState::Running),
             changed: Notify::new(),
             cancellation: CancellationToken::new(),
             bytes_transferred: AtomicU64::new(0),
         }
+    }
+
+    fn matches_sessions(&self, session_id: &str, destination_session_id: Option<&str>) -> bool {
+        self.session_id == session_id
+            && self.destination_session_id.as_deref() == destination_session_id
+    }
+
+    fn involves_session(&self, session_id: &str) -> bool {
+        self.session_id == session_id || self.destination_session_id.as_deref() == Some(session_id)
     }
 
     fn pause(&self) -> Result<(), AppError> {
@@ -257,6 +280,7 @@ impl TransferControl {
             }
             TransferExecutionState::Paused => Ok(()),
             TransferExecutionState::Committing
+            | TransferExecutionState::Interrupted
             | TransferExecutionState::Cancelled
             | TransferExecutionState::Finished => Err(transfer_control_transition_error()),
         }
@@ -275,7 +299,9 @@ impl TransferControl {
     fn cancel(&self) -> Result<(), AppError> {
         let mut state = self.state.lock().map_err(|_| session_lock_error())?;
         match *state {
-            TransferExecutionState::Running | TransferExecutionState::Paused => {
+            TransferExecutionState::Running
+            | TransferExecutionState::Paused
+            | TransferExecutionState::Interrupted => {
                 *state = TransferExecutionState::Cancelled;
                 self.cancellation.cancel();
                 self.changed.notify_one();
@@ -288,7 +314,32 @@ impl TransferControl {
         }
     }
 
-    async fn wait_until_running(&self) -> Result<(), AppError> {
+    fn interrupt(&self) -> Result<(), AppError> {
+        let mut state = self.state.lock().map_err(|_| session_lock_error())?;
+        match *state {
+            TransferExecutionState::Running | TransferExecutionState::Paused => {
+                *state = TransferExecutionState::Interrupted;
+                self.cancellation.cancel();
+                self.changed.notify_one();
+                Ok(())
+            }
+            TransferExecutionState::Interrupted
+            | TransferExecutionState::Cancelled
+            | TransferExecutionState::Finished => Ok(()),
+            TransferExecutionState::Committing => Err(transfer_control_transition_error()),
+        }
+    }
+
+    pub(crate) fn cancellation_error(&self) -> AppError {
+        if let Ok(state) = self.state.lock()
+            && *state == TransferExecutionState::Interrupted
+        {
+            return transfer_interrupted_error();
+        }
+        transfer_cancelled_error()
+    }
+
+    pub(crate) async fn wait_until_running(&self) -> Result<(), AppError> {
         loop {
             let notified = self.changed.notified();
             let wait_for_resume = {
@@ -296,6 +347,7 @@ impl TransferControl {
                 match *state {
                     TransferExecutionState::Running => return Ok(()),
                     TransferExecutionState::Paused => true,
+                    TransferExecutionState::Interrupted => return Err(transfer_interrupted_error()),
                     TransferExecutionState::Cancelled => return Err(transfer_cancelled_error()),
                     TransferExecutionState::Committing | TransferExecutionState::Finished => {
                         return Err(transfer_control_transition_error());
@@ -308,7 +360,7 @@ impl TransferControl {
         }
     }
 
-    async fn begin_commit(&self) -> Result<(), AppError> {
+    pub(crate) async fn begin_commit(&self) -> Result<(), AppError> {
         loop {
             let notified = self.changed.notified();
             let wait_for_resume = {
@@ -319,6 +371,7 @@ impl TransferControl {
                         return Ok(());
                     }
                     TransferExecutionState::Paused => true,
+                    TransferExecutionState::Interrupted => return Err(transfer_interrupted_error()),
                     TransferExecutionState::Cancelled => return Err(transfer_cancelled_error()),
                     TransferExecutionState::Committing | TransferExecutionState::Finished => {
                         return Err(transfer_control_transition_error());
@@ -331,7 +384,7 @@ impl TransferControl {
         }
     }
 
-    fn end_commit(&self) -> Result<(), AppError> {
+    pub(crate) fn end_commit(&self) -> Result<(), AppError> {
         let mut state = self.state.lock().map_err(|_| session_lock_error())?;
         if *state != TransferExecutionState::Committing {
             return Err(transfer_control_transition_error());
@@ -343,7 +396,10 @@ impl TransferControl {
 
     fn finish(&self) -> Result<(), AppError> {
         let mut state = self.state.lock().map_err(|_| session_lock_error())?;
-        if *state != TransferExecutionState::Cancelled {
+        if !matches!(
+            *state,
+            TransferExecutionState::Cancelled | TransferExecutionState::Interrupted
+        ) {
             *state = TransferExecutionState::Finished;
         }
         self.changed.notify_one();
@@ -354,11 +410,17 @@ impl TransferControl {
         let state = self.state.lock().map_err(|_| session_lock_error())?;
         Ok(matches!(
             *state,
-            TransferExecutionState::Cancelled | TransferExecutionState::Finished
+            TransferExecutionState::Interrupted
+                | TransferExecutionState::Cancelled
+                | TransferExecutionState::Finished
         ))
     }
 
-    fn bytes_transferred(&self) -> u64 {
+    pub(crate) fn set_bytes_transferred(&self, bytes: u64) {
+        self.bytes_transferred.store(bytes, Ordering::Release);
+    }
+
+    pub(crate) fn bytes_transferred(&self) -> u64 {
         self.bytes_transferred.load(Ordering::Acquire)
     }
 }
@@ -377,12 +439,12 @@ struct LocalTransferEntry {
     size: u64,
 }
 
-struct RemoteTransferEntry {
-    remote_path: String,
-    relative_path: String,
-    is_directory: bool,
-    size: Option<u64>,
-    permissions: Option<u32>,
+pub(crate) struct RemoteTransferEntry {
+    pub(crate) remote_path: String,
+    pub(crate) relative_path: String,
+    pub(crate) is_directory: bool,
+    pub(crate) size: Option<u64>,
+    pub(crate) permissions: Option<u32>,
 }
 
 struct ParsedProcesses {
@@ -423,11 +485,35 @@ impl Default for SessionRuntime {
             process_snapshots: Mutex::new(HashMap::new()),
             checksum_cancellations: Mutex::new(HashMap::new()),
             sync_preview_cancellations: Mutex::new(HashMap::new()),
+            elevated_access: crate::elevated_access::ElevatedAccessManager::default(),
         }
     }
 }
 
 impl SessionRuntime {
+    pub fn elevated_access(&self) -> &crate::elevated_access::ElevatedAccessManager {
+        &self.elevated_access
+    }
+
+    pub(crate) async fn connected_ssh_target(
+        &self,
+        session_id: &str,
+    ) -> Result<(SessionSummary, Arc<ConnectedSshSession>), AppError> {
+        let summary = self.summary(session_id)?;
+        let session = self.session_handle(session_id).await?;
+        Ok((summary, session))
+    }
+
+    fn decorate_summary(&self, mut summary: SessionSummary) -> SessionSummary {
+        if summary.session_kind == SessionKind::Ssh {
+            let elevated = self
+                .elevated_access
+                .is_active(&summary, crate::elevated_access::current_epoch_ms());
+            summary.capabilities = capabilities_for_ssh(elevated);
+        }
+        summary
+    }
+
     async fn session_handle(&self, session_id: &str) -> Result<Arc<ConnectedSshSession>, AppError> {
         let connections = self.connections.lock().await;
         connections
@@ -456,6 +542,10 @@ impl SessionRuntime {
                 .identity_file
                 .as_deref()
                 .is_none_or(|path| path.trim().is_empty())
+            && profile
+                .key_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
         {
             return Err(private_key_path_required_error());
         }
@@ -478,6 +568,18 @@ impl SessionRuntime {
             && profile.proxy_jump_profile_ids.is_empty()
         {
             return Err(proxy_jump_mapping_required_error());
+        }
+        if profile
+            .proxy_profile_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+            && (!profile.proxy_jump_profile_ids.is_empty()
+                || profile
+                    .proxy_jump
+                    .as_deref()
+                    .is_some_and(|proxy_jump| !proxy_jump.trim().is_empty()))
+        {
+            return Err(proxy_jump_route_error());
         }
         Ok(())
     }
@@ -874,6 +976,7 @@ impl SessionRuntime {
         &self,
         profile: &ConnectionProfile,
         route_profiles: &[ConnectionProfile],
+        hop0_proxy: Option<&ProxyConnectionSpec>,
         trust_service: &HostTrustService,
     ) -> Result<HostKeyChallenge, AppError> {
         validate_route_profiles(profile, route_profiles)?;
@@ -905,7 +1008,7 @@ impl SessionRuntime {
         }
         self.transition(&session_id, SessionState::VerifyingHost)?;
         match self
-            .probe_current_route_hop(&session_id, route_profiles, trust_service)
+            .probe_current_route_hop(&session_id, route_profiles, hop0_proxy, trust_service)
             .await
         {
             Ok(challenge) => Ok(challenge),
@@ -926,6 +1029,7 @@ impl SessionRuntime {
         session_id: &str,
         profile: &ConnectionProfile,
         route_profiles: &[ConnectionProfile],
+        hop0_proxy: Option<&ProxyConnectionSpec>,
         trust_service: &HostTrustService,
     ) -> Result<HostKeyChallenge, AppError> {
         self.abort_route(session_id).await;
@@ -958,7 +1062,7 @@ impl SessionRuntime {
         );
         self.transition(session_id, SessionState::VerifyingHost)?;
         match self
-            .probe_current_route_hop(session_id, route_profiles, trust_service)
+            .probe_current_route_hop(session_id, route_profiles, hop0_proxy, trust_service)
             .await
         {
             Ok(challenge) => Ok(challenge),
@@ -1041,6 +1145,7 @@ impl SessionRuntime {
         route_profiles: &[ConnectionProfile],
         profile: &ConnectionProfile,
         password: &str,
+        hop0_proxy: Option<&ProxyConnectionSpec>,
         trust_service: &HostTrustService,
     ) -> Result<(SessionConnectionProgress, Option<TerminalOutput>), AppError> {
         if profile.authentication_method != AuthenticationMethod::Password {
@@ -1051,6 +1156,7 @@ impl SessionRuntime {
             route_profiles,
             profile,
             RouteAuthentication::Password(password),
+            hop0_proxy,
             trust_service,
         )
         .await
@@ -1062,6 +1168,7 @@ impl SessionRuntime {
         route_profiles: &[ConnectionProfile],
         profile: &ConnectionProfile,
         passphrase: Option<&str>,
+        hop0_proxy: Option<&ProxyConnectionSpec>,
         trust_service: &HostTrustService,
     ) -> Result<(SessionConnectionProgress, Option<TerminalOutput>), AppError> {
         if profile.authentication_method != AuthenticationMethod::PrivateKey {
@@ -1072,6 +1179,7 @@ impl SessionRuntime {
             route_profiles,
             profile,
             RouteAuthentication::PrivateKey(passphrase),
+            hop0_proxy,
             trust_service,
         )
         .await
@@ -1082,6 +1190,7 @@ impl SessionRuntime {
         session_id: &str,
         route_profiles: &[ConnectionProfile],
         profile: &ConnectionProfile,
+        hop0_proxy: Option<&ProxyConnectionSpec>,
         trust_service: &HostTrustService,
     ) -> Result<(SessionConnectionProgress, Option<TerminalOutput>), AppError> {
         if profile.authentication_method != AuthenticationMethod::Agent {
@@ -1092,6 +1201,7 @@ impl SessionRuntime {
             route_profiles,
             profile,
             RouteAuthentication::Agent,
+            hop0_proxy,
             trust_service,
         )
         .await
@@ -1142,6 +1252,7 @@ impl SessionRuntime {
         route_profiles: &[ConnectionProfile],
         profile: &ConnectionProfile,
         authentication: RouteAuthentication<'_>,
+        hop0_proxy: Option<&ProxyConnectionSpec>,
         trust_service: &HostTrustService,
     ) -> Result<(SessionConnectionProgress, Option<TerminalOutput>), AppError> {
         let destination = route_profiles.last().ok_or_else(proxy_jump_route_error)?;
@@ -1230,8 +1341,65 @@ impl SessionRuntime {
             machine.transition(SessionState::Authenticating)?;
         }
 
-        let stream = if current_index == 0 {
-            None
+        let connected_result = if current_index == 0 {
+            if let Some(proxy_spec) = hop0_proxy {
+                match connect_via_proxy(
+                    proxy_spec,
+                    &profile.host,
+                    profile.port,
+                    engine.connect_timeout(),
+                )
+                .await
+                {
+                    Ok(stream) => {
+                        authenticate_stream(
+                            &engine,
+                            stream,
+                            &profile.username,
+                            authentication,
+                            prepared_key,
+                            presented,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                match authentication {
+                    RouteAuthentication::Password(password) => {
+                        engine
+                            .connect_password(
+                                &profile.host,
+                                profile.port,
+                                &profile.username,
+                                password,
+                                presented,
+                            )
+                            .await
+                    }
+                    RouteAuthentication::PrivateKey(_) => {
+                        engine
+                            .connect_private_key(
+                                &profile.host,
+                                profile.port,
+                                &profile.username,
+                                prepared_key.ok_or_else(private_key_path_required_error)?,
+                                presented,
+                            )
+                            .await
+                    }
+                    RouteAuthentication::Agent => {
+                        engine
+                            .connect_agent(
+                                &profile.host,
+                                profile.port,
+                                &profile.username,
+                                presented,
+                            )
+                            .await
+                    }
+                }
+            }
         } else {
             let upstream = {
                 let routes = self.routes.lock().await;
@@ -1245,63 +1413,18 @@ impl SessionRuntime {
                 .open_direct_tcpip(&profile.host, u32::from(profile.port), "127.0.0.1", 0)
                 .await
             {
-                Ok(stream) => Some(stream),
-                Err(error) => {
-                    let app_error = ssh_error(&error);
-                    self.abort_route(session_id).await;
-                    self.fail(session_id, app_error.clone())?;
-                    return Err(app_error);
-                }
-            }
-        };
-
-        let connected_result = match (authentication, stream) {
-            (RouteAuthentication::Password(password), None) => {
-                engine
-                    .connect_password(
-                        &profile.host,
-                        profile.port,
-                        &profile.username,
-                        password,
-                        presented,
-                    )
-                    .await
-            }
-            (RouteAuthentication::Password(password), Some(stream)) => {
-                engine
-                    .connect_password_stream(stream, &profile.username, password, presented)
-                    .await
-            }
-            (RouteAuthentication::PrivateKey(_), None) => {
-                engine
-                    .connect_private_key(
-                        &profile.host,
-                        profile.port,
-                        &profile.username,
-                        prepared_key.ok_or_else(private_key_path_required_error)?,
-                        presented,
-                    )
-                    .await
-            }
-            (RouteAuthentication::PrivateKey(_), Some(stream)) => {
-                engine
-                    .connect_private_key_stream(
+                Ok(stream) => {
+                    authenticate_stream(
+                        &engine,
                         stream,
                         &profile.username,
-                        prepared_key.ok_or_else(private_key_path_required_error)?,
+                        authentication,
+                        prepared_key,
                         presented,
                     )
                     .await
-            }
-            (RouteAuthentication::Agent, None) => {
-                engine
-                    .connect_agent(&profile.host, profile.port, &profile.username, presented)
-                    .await
-            }
-            (RouteAuthentication::Agent, Some(stream)) => {
-                engine
-                    .connect_agent_stream(stream, &profile.username, presented)
-                    .await
+                }
+                Err(error) => Err(error),
             }
         };
         let connected = match connected_result {
@@ -1337,7 +1460,7 @@ impl SessionRuntime {
             self.transition(session_id, SessionState::Connecting)?;
             self.transition(session_id, SessionState::VerifyingHost)?;
             return match self
-                .probe_current_route_hop(session_id, route_profiles, trust_service)
+                .probe_current_route_hop(session_id, route_profiles, None, trust_service)
                 .await
             {
                 Ok(challenge) => Ok((
@@ -1415,6 +1538,7 @@ impl SessionRuntime {
         &self,
         session_id: &str,
         route_profiles: &[ConnectionProfile],
+        hop0_proxy: Option<&ProxyConnectionSpec>,
         trust_service: &HostTrustService,
     ) -> Result<HostKeyChallenge, AppError> {
         let (index, upstream) = {
@@ -1446,23 +1570,31 @@ impl SessionRuntime {
         let profile = route_profiles
             .get(index)
             .ok_or_else(proxy_jump_route_error)?;
-        let stream = match upstream {
-            Some(upstream) => Some(
-                upstream
-                    .open_direct_tcpip(&profile.host, u32::from(profile.port), "127.0.0.1", 0)
-                    .await
-                    .map_err(|error| ssh_error(&error))?,
-            ),
-            None => None,
-        };
         let engine = self
             .engine
             .read()
             .map_err(|_| session_lock_error())?
             .clone();
-        let presented = match stream {
-            Some(stream) => engine.probe_host_key_stream(stream).await,
-            None => engine.probe_host_key(&profile.host, profile.port).await,
+        let presented = match (upstream, hop0_proxy) {
+            (Some(upstream), _) => {
+                let stream = upstream
+                    .open_direct_tcpip(&profile.host, u32::from(profile.port), "127.0.0.1", 0)
+                    .await
+                    .map_err(|error| ssh_error(&error))?;
+                engine.probe_host_key_stream(stream).await
+            }
+            (None, Some(proxy_spec)) => {
+                let stream = connect_via_proxy(
+                    proxy_spec,
+                    &profile.host,
+                    profile.port,
+                    engine.connect_timeout(),
+                )
+                .await
+                .map_err(|error| ssh_error(&error))?;
+                engine.probe_host_key_stream(stream).await
+            }
+            (None, None) => engine.probe_host_key(&profile.host, profile.port).await,
         }
         .map_err(|error| ssh_error(&error))?;
         let trust = trust_service.evaluate(
@@ -1515,6 +1647,7 @@ impl SessionRuntime {
     }
 
     pub async fn disconnect(&self, session_id: &str) -> Result<SessionSummary, AppError> {
+        self.elevated_access.invalidate_session(session_id);
         self.transition(session_id, SessionState::Disconnecting)?;
         self.remove_quick_profile(session_id)?;
         self.invalidate_process_snapshot(session_id)?;
@@ -1625,6 +1758,7 @@ impl SessionRuntime {
             .lock()
             .map_err(|_| session_lock_error())?
             .clear();
+        self.elevated_access.clear_all();
 
         match first_error {
             Some(error) => Err(error),
@@ -1638,13 +1772,7 @@ impl SessionRuntime {
         data: Vec<u8>,
         encoding_label: &str,
     ) -> Result<(), AppError> {
-        let text = std::str::from_utf8(&data).map_err(|_| terminal_input_invalid_error())?;
-        let encoding = terminal_text_encoding(encoding_label)?;
-        let (encoded, _, had_errors) = encoding.encode(text);
-        if had_errors {
-            return Err(terminal_encoding_unrepresentable_error());
-        }
-        let data = encoded.into_owned();
+        let data = crate::text_encoding::encode_terminal_bytes(&data, encoding_label)?;
         let terminal = {
             let connections = self.connections.lock().await;
             connections
@@ -1683,6 +1811,7 @@ impl SessionRuntime {
     }
 
     pub async fn remote_closed(&self, session_id: &str) -> Result<SessionSummary, AppError> {
+        self.elevated_access.invalidate_session(session_id);
         let connection = self.connections.lock().await.remove(session_id);
         if let Some(connection) = connection {
             {
@@ -1935,10 +2064,13 @@ impl SessionRuntime {
         &self,
         session_id: &str,
         path: &str,
+        encoding_label: Option<&str>,
     ) -> Result<RemoteTextPreview, AppError> {
         if path.is_empty() || path.contains('\0') {
             return Err(invalid_remote_path_error());
         }
+        let selected_encoding = encoding_label.unwrap_or("utf-8");
+        crate::text_encoding::resolve_text_encoding(selected_encoding)?;
         let session = self.session_handle(session_id).await?;
         let sftp = session
             .open_sftp()
@@ -1975,21 +2107,8 @@ impl SessionRuntime {
                     .size
                     .is_some_and(|size| size > u64::from(REMOTE_TEXT_PREVIEW_MAX_BYTES));
             bytes.truncate(REMOTE_TEXT_PREVIEW_MAX_BYTES as usize);
-            let content = match String::from_utf8(bytes) {
-                Ok(content) => content,
-                Err(error) if error.utf8_error().error_len().is_none() && truncated => {
-                    let valid_up_to = error.utf8_error().valid_up_to();
-                    String::from_utf8(error.into_bytes()[..valid_up_to].to_vec())
-                        .map_err(|_| sftp_preview_encoding_error())?
-                }
-                Err(_) => return Err(sftp_preview_encoding_error()),
-            };
-            if content.chars().any(|character| {
-                character == '\0'
-                    || (character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
-            }) {
-                return Err(sftp_preview_encoding_error());
-            }
+            let content =
+                crate::text_encoding::decode_text_bytes(&bytes, selected_encoding, truncated)?;
             Ok(RemoteTextPreview {
                 path: path.to_owned(),
                 bytes: u32::try_from(content.len()).unwrap_or(REMOTE_TEXT_PREVIEW_MAX_BYTES),
@@ -2194,6 +2313,7 @@ impl SessionRuntime {
         path: &str,
         content: &str,
         expected_revision: &str,
+        encoding_label: Option<&str>,
     ) -> Result<RemoteTextSaveResult, AppError> {
         validate_remote_delete_path(path)?;
         if content.len() > REMOTE_TEXT_PREVIEW_MAX_BYTES as usize {
@@ -2201,6 +2321,11 @@ impl SessionRuntime {
         }
         if !is_supported_preview_text(content) {
             return Err(sftp_preview_encoding_error());
+        }
+        let selected_encoding = encoding_label.unwrap_or("utf-8");
+        let encoded_bytes = crate::text_encoding::encode_text_lossless(content, selected_encoding)?;
+        if encoded_bytes.len() > REMOTE_TEXT_PREVIEW_MAX_BYTES as usize {
+            return Err(sftp_preview_too_large_error());
         }
         let session = self.session_handle(session_id).await?;
         let sftp = session
@@ -2219,7 +2344,7 @@ impl SessionRuntime {
                 ));
             }
 
-            let current = read_bounded_remote_text(&sftp, path).await?;
+            let current = read_bounded_remote_text(&sftp, path, selected_encoding).await?;
             if current.revision != expected_revision {
                 return Err(sftp_preview_conflict_error());
             }
@@ -2244,7 +2369,7 @@ impl SessionRuntime {
                 )
                 .await
                 .map_err(|_| sftp_save_error())?;
-            if temporary.write_all(content.as_bytes()).await.is_err() {
+            if temporary.write_all(&encoded_bytes).await.is_err() {
                 let _ = temporary.close().await;
                 let _ = sftp.remove_file(temporary_path).await;
                 return Err(sftp_save_error());
@@ -2267,13 +2392,14 @@ impl SessionRuntime {
                     return Err(sftp_save_error());
                 }
             }
-            let latest = match read_bounded_remote_text(&sftp, &source_path).await {
-                Ok(latest) => latest,
-                Err(error) => {
-                    let _ = sftp.remove_file(temporary_path.clone()).await;
-                    return Err(error);
-                }
-            };
+            let latest =
+                match read_bounded_remote_text(&sftp, &source_path, selected_encoding).await {
+                    Ok(latest) => latest,
+                    Err(error) => {
+                        let _ = sftp.remove_file(temporary_path.clone()).await;
+                        return Err(error);
+                    }
+                };
             if latest.revision != expected_revision {
                 let _ = sftp.remove_file(temporary_path).await;
                 return Err(sftp_preview_conflict_error());
@@ -2291,7 +2417,7 @@ impl SessionRuntime {
                 return Err(sftp_save_error());
             }
 
-            match read_bounded_remote_text(&sftp, &backup_path).await {
+            match read_bounded_remote_text(&sftp, &backup_path, selected_encoding).await {
                 Ok(backed_up) if backed_up.revision == expected_revision => {}
                 backed_up_result => {
                     if sftp
@@ -2872,8 +2998,16 @@ impl SessionRuntime {
         result
     }
 
-    pub fn prepare_transfer(&self, task_id: &str, session_id: &str) -> Result<(), AppError> {
-        if task_id.trim().is_empty() || session_id.trim().is_empty() {
+    pub fn prepare_transfer_with_destination(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        destination_session_id: Option<&str>,
+    ) -> Result<(), AppError> {
+        if task_id.trim().is_empty()
+            || session_id.trim().is_empty()
+            || destination_session_id.is_some_and(|dest| dest.trim().is_empty())
+        {
             return Err(transfer_control_transition_error());
         }
         let mut controls = self
@@ -2885,7 +3019,10 @@ impl SessionRuntime {
         }
         controls.insert(
             task_id.to_owned(),
-            Arc::new(TransferControl::new(session_id.to_owned())),
+            Arc::new(TransferControl::new(
+                session_id.to_owned(),
+                destination_session_id.map(str::to_owned),
+            )),
         );
         Ok(())
     }
@@ -2898,10 +3035,11 @@ impl SessionRuntime {
         Ok(())
     }
 
-    pub async fn prepare_transfer_resume(
+    pub async fn prepare_transfer_resume_with_destination(
         &self,
         task_id: &str,
         session_id: &str,
+        destination_session_id: Option<&str>,
     ) -> Result<bool, AppError> {
         let control = self
             .transfer_controls
@@ -2912,17 +3050,19 @@ impl SessionRuntime {
         let Some(control) = control else {
             return Ok(false);
         };
-        if control.session_id == session_id {
+        if control.matches_sessions(session_id, destination_session_id) {
             let state = control.state.lock().map_err(|_| session_lock_error())?;
             match *state {
                 TransferExecutionState::Paused => return Ok(true),
                 TransferExecutionState::Running | TransferExecutionState::Committing => {
                     return Err(transfer_control_transition_error());
                 }
-                TransferExecutionState::Cancelled | TransferExecutionState::Finished => {}
+                TransferExecutionState::Interrupted
+                | TransferExecutionState::Cancelled
+                | TransferExecutionState::Finished => {}
             }
         } else if !control.is_terminal()? {
-            control.cancel()?;
+            control.interrupt()?;
         }
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -2941,10 +3081,11 @@ impl SessionRuntime {
         }
     }
 
-    pub fn resume_transfer_control(
+    pub fn resume_transfer_control_with_destination(
         &self,
         task_id: &str,
         session_id: &str,
+        destination_session_id: Option<&str>,
     ) -> Result<bool, AppError> {
         let control = self
             .transfer_controls
@@ -2955,7 +3096,7 @@ impl SessionRuntime {
         let Some(control) = control else {
             return Ok(false);
         };
-        if control.session_id != session_id {
+        if !control.matches_sessions(session_id, destination_session_id) {
             return Ok(false);
         }
         control.resume()?;
@@ -2976,14 +3117,53 @@ impl SessionRuntime {
         Ok(Some(control.bytes_transferred()))
     }
 
+    pub fn transfer_bytes_transferred(&self, task_id: &str) -> u64 {
+        self.transfer_controls
+            .lock()
+            .ok()
+            .and_then(|controls| {
+                controls
+                    .get(task_id)
+                    .map(|control| control.bytes_transferred())
+            })
+            .unwrap_or(0)
+    }
+
+    pub async fn remove_remote_staging_file(
+        &self,
+        session_id: &str,
+        staging_path: &str,
+    ) -> Result<(), AppError> {
+        if staging_path.is_empty() || staging_path.contains('\0') {
+            return Err(invalid_remote_path_error());
+        }
+        let session = {
+            let connections = self.connections.lock().await;
+            connections
+                .get(session_id)
+                .map(|connection| connection.session.clone())
+                .ok_or_else(session_not_found_error)?
+        };
+        let sftp = session
+            .open_sftp()
+            .await
+            .map_err(|error| ssh_error(&error))?;
+        let remove_result = sftp
+            .remove_file(staging_path.to_owned())
+            .await
+            .map_err(|_| transfer_io_error("SFTP_DELETE_FAILED", "errors.sftpFailed"));
+        let _ = sftp.close().await;
+        remove_result
+    }
+
     pub async fn execute_transfer<F>(
         &self,
         session_id: &str,
         task: &TransferTask,
-        on_progress: F,
+        on_event: F,
     ) -> Result<u64, AppError>
     where
-        F: Fn(u64, Option<u64>) + Send + Sync,
+        F: Fn(TransferRuntimeEvent) + Send + Sync,
     {
         let control = self
             .transfer_controls
@@ -3007,13 +3187,78 @@ impl SessionRuntime {
                 .map_err(|error| ssh_error(&error))?;
             let transfer_result = match task.direction {
                 TransferDirection::Upload => {
-                    upload(&session, &sftp, task, &control, &on_progress).await
+                    upload(&session, &sftp, task, &control, &on_event).await
                 }
                 TransferDirection::Download => {
-                    download(&sftp, &session, task, &control, &on_progress).await
+                    download(&sftp, &session, task, &control, &on_event).await
                 }
+                TransferDirection::RemoteToRemote => Err(transfer_control_transition_error()),
             };
             let _ = sftp.close().await;
+            transfer_result
+        }
+        .await;
+        control.finish()?;
+        result
+    }
+
+    pub async fn execute_remote_relay_transfer<F>(
+        &self,
+        session_id: &str,
+        destination_session_id: &str,
+        task: &TransferTask,
+        on_event: F,
+    ) -> Result<u64, AppError>
+    where
+        F: Fn(TransferRuntimeEvent) + Send + Sync,
+    {
+        if task.direction != TransferDirection::RemoteToRemote {
+            return Err(transfer_control_transition_error());
+        }
+        let control = self
+            .transfer_controls
+            .lock()
+            .map_err(|_| session_lock_error())?
+            .get(&task.id)
+            .cloned()
+            .filter(|control| control.matches_sessions(session_id, Some(destination_session_id)))
+            .ok_or_else(transfer_control_transition_error)?;
+        let result = async {
+            let (source_session, destination_session) = {
+                let connections = self.connections.lock().await;
+                let source = connections
+                    .get(session_id)
+                    .map(|connection| connection.session.clone())
+                    .ok_or_else(session_not_found_error)?;
+                let destination = connections
+                    .get(destination_session_id)
+                    .map(|connection| connection.session.clone())
+                    .ok_or_else(session_not_found_error)?;
+                (source, destination)
+            };
+            let source_sftp = source_session
+                .open_sftp()
+                .await
+                .map_err(|error| ssh_error(&error))?;
+            let destination_sftp = match destination_session.open_sftp().await {
+                Ok(sftp) => sftp,
+                Err(error) => {
+                    let _ = source_sftp.close().await;
+                    return Err(ssh_error(&error));
+                }
+            };
+            let transfer_result = crate::remote_relay::relay_remote_to_remote(
+                &source_session,
+                &source_sftp,
+                &destination_session,
+                &destination_sftp,
+                task,
+                &control,
+                &on_event,
+            )
+            .await;
+            let _ = source_sftp.close().await;
+            let _ = destination_sftp.close().await;
             transfer_result
         }
         .await;
@@ -4097,11 +4342,11 @@ impl SessionRuntime {
             .lock()
             .map_err(|_| session_lock_error())?
             .values()
-            .filter(|control| control.session_id == session_id)
+            .filter(|control| control.involves_session(session_id))
             .cloned()
             .collect::<Vec<_>>();
         for control in controls {
-            let _ = control.cancel();
+            let _ = control.interrupt();
         }
         Ok(())
     }
@@ -4161,12 +4406,16 @@ impl SessionRuntime {
     }
 
     pub fn list(&self) -> Result<Vec<SessionSummary>, AppError> {
-        Ok(self
+        let summaries = self
             .machines
             .lock()
             .map_err(|_| session_lock_error())?
             .values()
             .map(SessionMachine::summary)
+            .collect::<Vec<_>>();
+        Ok(summaries
+            .into_iter()
+            .map(|summary| self.decorate_summary(summary))
             .collect())
     }
 
@@ -4231,16 +4480,19 @@ impl SessionRuntime {
             .lock()
             .map_err(|_| session_lock_error())?
             .clear();
+        self.elevated_access.clear_all();
         Ok(())
     }
 
     pub fn summary(&self, session_id: &str) -> Result<SessionSummary, AppError> {
-        self.machines
+        let summary = self
+            .machines
             .lock()
             .map_err(|_| session_lock_error())?
             .get(session_id)
             .map(SessionMachine::summary)
-            .ok_or_else(session_not_found_error)
+            .ok_or_else(session_not_found_error)?;
+        Ok(self.decorate_summary(summary))
     }
 
     fn transition(&self, session_id: &str, next: SessionState) -> Result<SessionSummary, AppError> {
@@ -4253,6 +4505,7 @@ impl SessionRuntime {
     }
 
     fn fail(&self, session_id: &str, error: AppError) -> Result<SessionSummary, AppError> {
+        self.elevated_access.invalidate_session(session_id);
         self.remove_quick_profile(session_id)?;
         let summary = self
             .machines
@@ -4274,7 +4527,42 @@ impl SessionRuntime {
     }
 }
 
-fn ssh_error(error: &SshError) -> AppError {
+async fn authenticate_stream<S>(
+    engine: &RusshEngine,
+    stream: S,
+    username: &str,
+    authentication: RouteAuthentication<'_>,
+    prepared_key: Option<PreparedPrivateKey>,
+    presented: PresentedHostKey,
+) -> Result<ConnectedSshSession, SshError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    match authentication {
+        RouteAuthentication::Password(password) => {
+            engine
+                .connect_password_stream(stream, username, password, presented)
+                .await
+        }
+        RouteAuthentication::PrivateKey(_) => {
+            engine
+                .connect_private_key_stream(
+                    stream,
+                    username,
+                    prepared_key.ok_or(SshError::PrivateKeyInvalid)?,
+                    presented,
+                )
+                .await
+        }
+        RouteAuthentication::Agent => {
+            engine
+                .connect_agent_stream(stream, username, presented)
+                .await
+        }
+    }
+}
+
+pub(crate) fn ssh_error(error: &SshError) -> AppError {
     let (code, message_key, retryable) = match error {
         SshError::Timeout => ("SSH_CONNECT_TIMEOUT", "errors.sshConnectTimeout", true),
         SshError::HostKeyMissing => ("SSH_HOST_KEY_MISSING", "errors.sshHostKeyMissing", false),
@@ -4361,6 +4649,21 @@ fn ssh_error(error: &SshError) -> AppError {
             true,
         ),
         SshError::OutputLimit => ("REMOTE_OUTPUT_LIMIT", "errors.remoteOutputLimit", false),
+        SshError::ProxyConnectFailed => ("PROXY_CONNECT_FAILED", "errors.proxyConnectFailed", true),
+        SshError::ProxyAuthenticationFailed => (
+            "PROXY_AUTHENTICATION_FAILED",
+            "errors.proxyAuthenticationFailed",
+            false,
+        ),
+        SshError::ProxyTargetRejected => {
+            ("PROXY_TARGET_REJECTED", "errors.proxyTargetRejected", true)
+        }
+        SshError::ProxyHandshakeFailed => (
+            "PROXY_HANDSHAKE_FAILED",
+            "errors.proxyHandshakeFailed",
+            true,
+        ),
+        SshError::ProxyTimeout => ("PROXY_CONNECT_TIMEOUT", "errors.proxyConnectTimeout", true),
         SshError::Transport(_) => ("SSH_TRANSPORT_FAILED", "errors.sshTransportFailed", true),
     };
     AppError {
@@ -4556,48 +4859,7 @@ fn invalid_terminal_size_error() -> AppError {
     }
 }
 
-fn terminal_text_encoding(label: &str) -> Result<&'static Encoding, AppError> {
-    match label {
-        "utf-8" => Ok(encoding_rs::UTF_8),
-        "gbk" => Ok(encoding_rs::GBK),
-        "big5" => Ok(encoding_rs::BIG5),
-        "shift_jis" => Ok(encoding_rs::SHIFT_JIS),
-        "windows-1252" => Ok(encoding_rs::WINDOWS_1252),
-        _ => Err(terminal_encoding_invalid_error()),
-    }
-}
-
-fn terminal_input_invalid_error() -> AppError {
-    AppError {
-        code: "TERMINAL_INPUT_INVALID".to_owned(),
-        message_key: "errors.terminalInputInvalid".to_owned(),
-        retryable: false,
-        remote_state: RemoteState::Unchanged,
-        field: None,
-    }
-}
-
-fn terminal_encoding_invalid_error() -> AppError {
-    AppError {
-        code: "TERMINAL_ENCODING_INVALID".to_owned(),
-        message_key: "errors.terminalEncodingInvalid".to_owned(),
-        retryable: false,
-        remote_state: RemoteState::Unchanged,
-        field: Some("terminalEncoding".to_owned()),
-    }
-}
-
-fn terminal_encoding_unrepresentable_error() -> AppError {
-    AppError {
-        code: "TERMINAL_ENCODING_UNREPRESENTABLE".to_owned(),
-        message_key: "errors.terminalEncodingUnrepresentable".to_owned(),
-        retryable: false,
-        remote_state: RemoteState::Unchanged,
-        field: None,
-    }
-}
-
-fn invalid_remote_path_error() -> AppError {
+pub(crate) fn invalid_remote_path_error() -> AppError {
     AppError {
         code: "REMOTE_PATH_INVALID".to_owned(),
         message_key: "errors.remotePathInvalid".to_owned(),
@@ -4607,7 +4869,7 @@ fn invalid_remote_path_error() -> AppError {
     }
 }
 
-const REMOTE_TEXT_PREVIEW_MAX_BYTES: u32 = 1024 * 1024;
+pub(crate) const REMOTE_TEXT_PREVIEW_MAX_BYTES: u32 = 1024 * 1024;
 const EXTERNAL_OPEN_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 fn remote_mode_error(code: &str) -> AppError {
@@ -4750,6 +5012,7 @@ struct BoundedRemoteText {
 async fn read_bounded_remote_text(
     sftp: &russh_sftp::client::SftpSession,
     path: &str,
+    encoding_label: &str,
 ) -> Result<BoundedRemoteText, AppError> {
     let metadata = sftp
         .symlink_metadata(path)
@@ -4776,10 +5039,7 @@ async fn read_bounded_remote_text(
     if bytes.len() > REMOTE_TEXT_PREVIEW_MAX_BYTES as usize {
         return Err(sftp_preview_too_large_error());
     }
-    let text = String::from_utf8(bytes).map_err(|_| sftp_preview_encoding_error())?;
-    if !is_supported_preview_text(&text) {
-        return Err(sftp_preview_encoding_error());
-    }
+    let text = crate::text_encoding::decode_text_bytes(&bytes, encoding_label, false)?;
     Ok(BoundedRemoteText {
         revision: text_revision(text.as_bytes()),
     })
@@ -4793,7 +5053,7 @@ pub(crate) fn text_revision(bytes: &[u8]) -> String {
     revision
 }
 
-fn split_remote_parent(path: &str) -> Result<(&str, &str), AppError> {
+pub(crate) fn split_remote_parent(path: &str) -> Result<(&str, &str), AppError> {
     let trimmed = path.trim_end_matches('/');
     match trimmed.rsplit_once('/') {
         Some(("", name)) if !name.is_empty() => Ok(("/", name)),
@@ -6330,7 +6590,7 @@ fn join_relative_sync_path(parent: &str, name: &str) -> String {
     }
 }
 
-fn join_remote_directory_path(parent: &str, name: &str) -> String {
+pub(crate) fn join_remote_directory_path(parent: &str, name: &str) -> String {
     let parent = parent.trim_end_matches('/');
     if parent.is_empty() {
         format!("/{name}")
@@ -6820,7 +7080,7 @@ async fn upload(
     sftp: &russh_sftp::client::SftpSession,
     task: &TransferTask,
     control: &TransferControl,
-    on_progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+    on_event: &(dyn Fn(TransferRuntimeEvent) + Send + Sync),
 ) -> Result<u64, AppError> {
     if task.local_path.is_empty() || task.local_path.len() > 4_096 || task.remote_path.len() > 4_096
     {
@@ -6835,11 +7095,10 @@ async fn upload(
         return Err(directory_tree_unsupported_error());
     }
     if file_type.is_file() {
-        on_progress(control.bytes_transferred(), Some(metadata.len()));
-        return upload_regular_file(sftp, task, control, on_progress).await;
+        return upload_regular_file(sftp, task, &metadata, control, on_event).await;
     }
     if file_type.is_dir() {
-        return upload_directory(session, sftp, task, &source_path, control, on_progress).await;
+        return upload_directory(session, sftp, task, &source_path, control, on_event).await;
     }
     Err(directory_tree_unsupported_error())
 }
@@ -6847,48 +7106,149 @@ async fn upload(
 async fn upload_regular_file(
     sftp: &russh_sftp::client::SftpSession,
     task: &TransferTask,
+    source_metadata: &std::fs::Metadata,
     control: &TransferControl,
-    on_progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+    on_event: &(dyn Fn(TransferRuntimeEvent) + Send + Sync),
 ) -> Result<u64, AppError> {
-    let mut target = task.remote_path.clone();
-    if target.is_empty() || target.contains('\0') {
+    if task.remote_path.is_empty() || task.remote_path.contains('\0') {
         return Err(invalid_remote_path_error());
     }
-    let exists = sftp
-        .try_exists(target.clone())
-        .await
-        .map_err(|_| transfer_io_error("SFTP_STAT_FAILED", "errors.sftpFailed"))?;
-    if exists {
-        match task.conflict_policy {
-            ConflictPolicy::Ask => return Err(transfer_conflict_error()),
-            ConflictPolicy::Skip => return Ok(0),
-            ConflictPolicy::Overwrite => {}
-            ConflictPolicy::Rename => {
-                target = unique_remote_path(sftp, &target).await?;
-            }
+    let source_size = Some(source_metadata.len());
+    let source_mtime_ms = source_metadata.modified().ok().and_then(system_time_to_ms);
+    let staged_len = if let Some(staging) = task.staging_path.as_deref() {
+        remote_transfer_metadata(sftp, staging)
+            .await?
+            .filter(|meta| meta.is_regular() && !meta.is_symlink())
+            .and_then(|meta| meta.size)
+    } else {
+        None
+    };
+
+    let plan = evaluate_resume_plan(task, source_size, source_mtime_ms, staged_len);
+    let (staging_path, resume_offset, mut target, existing) = match plan {
+        ResumePlan::IdentityChanged => {
+            on_event(TransferRuntimeEvent::IdentityChanged);
+            return Err(transfer_identity_changed_error());
         }
-    }
+        ResumePlan::ResumeFromOffset { offset } => {
+            let Some(staging) = task.staging_path.clone() else {
+                return Err(transfer_io_error(
+                    "TRANSFER_STAGING_MISSING",
+                    "errors.sftpFailed",
+                ));
+            };
+            let mut target = task.remote_path.clone();
+            let exists = sftp
+                .try_exists(target.clone())
+                .await
+                .map_err(|_| transfer_io_error("SFTP_STAT_FAILED", "errors.sftpFailed"))?;
+            if exists {
+                match task.conflict_policy {
+                    ConflictPolicy::Ask => return Err(transfer_conflict_error()),
+                    ConflictPolicy::Skip => {
+                        let _ = sftp.remove_file(staging).await;
+                        return Ok(0);
+                    }
+                    ConflictPolicy::Overwrite => {}
+                    ConflictPolicy::Rename => target = unique_remote_path(sftp, &target).await?,
+                }
+            }
+            (staging, offset, target, exists)
+        }
+        ResumePlan::FreshStart | ResumePlan::RestartFromBeginning => {
+            let mut target = task.remote_path.clone();
+            let exists = sftp
+                .try_exists(target.clone())
+                .await
+                .map_err(|_| transfer_io_error("SFTP_STAT_FAILED", "errors.sftpFailed"))?;
+            if exists {
+                match task.conflict_policy {
+                    ConflictPolicy::Ask => return Err(transfer_conflict_error()),
+                    ConflictPolicy::Skip => return Ok(0),
+                    ConflictPolicy::Overwrite => {}
+                    ConflictPolicy::Rename => target = unique_remote_path(sftp, &target).await?,
+                }
+            }
+            let staging = task
+                .staging_path
+                .clone()
+                .unwrap_or_else(|| deterministic_remote_staging_path(&task.remote_path, &task.id));
+            if staging.len() > 4_096 {
+                return Err(directory_tree_limit_error());
+            }
+            (staging, 0, target, exists)
+        }
+    };
+
+    on_event(TransferRuntimeEvent::Metadata {
+        source_size_bytes: source_size,
+        source_mtime_ms,
+        staging_path: Some(staging_path.clone()),
+        resume_state: TransferResumeState::SafeToResume,
+    });
+    control.set_bytes_transferred(resume_offset);
+    on_event(TransferRuntimeEvent::Progress {
+        bytes_transferred: resume_offset,
+        total_bytes: source_size,
+    });
+
     let mut local = tokio::fs::File::open(&task.local_path)
         .await
         .map_err(|_| transfer_io_error("LOCAL_FILE_READ_FAILED", "errors.localFileReadFailed"))?;
-    let temporary = format!("{target}.filex-part-{}", uuid::Uuid::new_v4());
-    let mut remote = sftp
-        .create(temporary.clone())
+    let mut remote = if resume_offset > 0 {
+        local
+            .seek(SeekFrom::Start(resume_offset))
+            .await
+            .map_err(|_| {
+                transfer_io_error("LOCAL_FILE_READ_FAILED", "errors.localFileReadFailed")
+            })?;
+        let mut handle = sftp
+            .open_with_flags(staging_path.clone(), OpenFlags::WRITE)
+            .await
+            .map_err(|_| transfer_io_error("SFTP_OPEN_FAILED", "errors.sftpFailed"))?;
+        handle
+            .seek(SeekFrom::Start(resume_offset))
+            .await
+            .map_err(|_| transfer_io_error("SFTP_SEEK_FAILED", "errors.sftpFailed"))?;
+        handle
+    } else {
+        sftp.open_with_flags(
+            staging_path.clone(),
+            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+        )
         .await
-        .map_err(|_| transfer_io_error("SFTP_CREATE_FAILED", "errors.sftpFailed"))?;
-    let bytes = match copy_transfer_stream(&mut local, &mut remote, control, on_progress, 0).await {
+        .map_err(|_| transfer_io_error("SFTP_CREATE_FAILED", "errors.sftpFailed"))?
+    };
+
+    let forward_progress = |bytes, total_bytes| {
+        on_event(TransferRuntimeEvent::Progress {
+            bytes_transferred: bytes,
+            total_bytes,
+        });
+    };
+    let copied = match copy_transfer_stream(
+        &mut local,
+        &mut remote,
+        control,
+        &forward_progress,
+        resume_offset,
+    )
+    .await
+    {
         Ok(bytes) => bytes,
         Err(error) => {
             let _ = tokio::time::timeout(Duration::from_secs(2), remote.close()).await;
-            let _ = tokio::time::timeout(Duration::from_secs(3), sftp.remove_file(temporary)).await;
+            if !should_preserve_staging_on_error(&error) {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    sftp.remove_file(staging_path.clone()),
+                )
+                .await;
+            }
             return Err(error);
         }
     };
-    if let Err(error) = control.begin_commit().await {
-        let _ = tokio::time::timeout(Duration::from_secs(2), remote.close()).await;
-        let _ = tokio::time::timeout(Duration::from_secs(3), sftp.remove_file(temporary)).await;
-        return Err(error);
-    }
+
     remote
         .shutdown()
         .await
@@ -6897,15 +7257,109 @@ async fn upload_regular_file(
         .close()
         .await
         .map_err(|_| transfer_io_error("SFTP_CLOSE_FAILED", "errors.sftpFailed"))?;
-    if exists && task.conflict_policy == ConflictPolicy::Overwrite {
-        sftp.remove_file(target.clone())
+
+    let expected_total = source_metadata.len();
+    let total_written = resume_offset.saturating_add(copied);
+    let staged_meta = remote_transfer_metadata(sftp, &staging_path).await?;
+    if total_written != expected_total
+        || staged_meta.as_ref().and_then(|meta| meta.size) != Some(expected_total)
+    {
+        return Err(transfer_size_mismatch_error());
+    }
+
+    let current_local = tokio::fs::symlink_metadata(&task.local_path)
+        .await
+        .map_err(|_| transfer_identity_changed_error())?;
+    let current_local_mtime = current_local.modified().ok().and_then(system_time_to_ms);
+    if !current_local.file_type().is_file()
+        || !source_identity_matches(
+            source_size,
+            source_mtime_ms,
+            Some(current_local.len()),
+            current_local_mtime,
+        )
+    {
+        on_event(TransferRuntimeEvent::IdentityChanged);
+        return Err(transfer_identity_changed_error());
+    }
+
+    if let Err(error) = control.begin_commit().await {
+        if !should_preserve_staging_on_error(&error) {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3),
+                sftp.remove_file(staging_path.clone()),
+            )
+            .await;
+        }
+        return Err(error);
+    }
+
+    let commit_result = async {
+        let now_exists = sftp
+            .try_exists(target.clone())
+            .await
+            .map_err(|_| transfer_io_error("SFTP_STAT_FAILED", "errors.sftpFailed"))?;
+        if now_exists && !existing {
+            match task.conflict_policy {
+                ConflictPolicy::Ask => return Err(transfer_conflict_error()),
+                ConflictPolicy::Skip => {
+                    let _ = sftp.remove_file(staging_path.clone()).await;
+                    return Ok(());
+                }
+                ConflictPolicy::Overwrite => {}
+                ConflictPolicy::Rename => target = unique_remote_path(sftp, &target).await?,
+            }
+        }
+        atomic_commit_remote_file(
+            sftp,
+            &staging_path,
+            &target,
+            now_exists && task.conflict_policy == ConflictPolicy::Overwrite,
+        )
+        .await
+    }
+    .await;
+    let end_result = control.end_commit();
+    if commit_result.is_err() {
+        let _ = tokio::time::timeout(Duration::from_secs(3), sftp.remove_file(staging_path)).await;
+    }
+    end_result?;
+    commit_result?;
+    Ok(expected_total)
+}
+
+pub(crate) async fn atomic_commit_remote_file(
+    sftp: &russh_sftp::client::SftpSession,
+    staging_path: &str,
+    target: &str,
+    overwrite_existing: bool,
+) -> Result<(), AppError> {
+    let backup = if overwrite_existing {
+        let path = format!("{target}.filex-backup-{}", uuid::Uuid::new_v4());
+        if path.len() > 4_096 {
+            return Err(directory_tree_limit_error());
+        }
+        sftp.rename(target.to_owned(), path.clone())
             .await
             .map_err(|_| transfer_io_error("SFTP_REPLACE_FAILED", "errors.sftpFailed"))?;
-    }
-    sftp.rename(temporary, target)
+        Some(path)
+    } else {
+        None
+    };
+    if sftp
+        .rename(staging_path.to_owned(), target.to_owned())
         .await
-        .map_err(|_| transfer_io_error("SFTP_COMMIT_FAILED", "errors.sftpFailed"))?;
-    Ok(bytes)
+        .is_err()
+    {
+        if let Some(backup) = backup.as_ref() {
+            let _ = sftp.rename(backup.clone(), target.to_owned()).await;
+        }
+        return Err(transfer_io_error("SFTP_COMMIT_FAILED", "errors.sftpFailed"));
+    }
+    if let Some(backup) = backup {
+        let _ = sftp.remove_file(backup).await;
+    }
+    Ok(())
 }
 
 async fn upload_directory(
@@ -6914,8 +7368,14 @@ async fn upload_directory(
     task: &TransferTask,
     source_root: &std::path::Path,
     control: &TransferControl,
-    on_progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+    on_event: &(dyn Fn(TransferRuntimeEvent) + Send + Sync),
 ) -> Result<u64, AppError> {
+    let forward_progress = |bytes, total_bytes| {
+        on_event(TransferRuntimeEvent::Progress {
+            bytes_transferred: bytes,
+            total_bytes,
+        });
+    };
     let mut target_root = canonical_remote_transfer_target(sftp, &task.remote_path).await?;
     let root_metadata = remote_transfer_metadata(sftp, &target_root).await?;
     let mut merge_existing = false;
@@ -6942,7 +7402,16 @@ async fn upload_directory(
                 .checked_add(entry.size)
                 .ok_or_else(directory_tree_limit_error)
         })?;
-    on_progress(control.bytes_transferred(), Some(total_size));
+    on_event(TransferRuntimeEvent::Metadata {
+        source_size_bytes: Some(total_size),
+        source_mtime_ms: None,
+        staging_path: None,
+        resume_state: TransferResumeState::RestartFromBeginning,
+    });
+    on_event(TransferRuntimeEvent::Progress {
+        bytes_transferred: control.bytes_transferred(),
+        total_bytes: Some(total_size),
+    });
     let staging_root = if merge_existing {
         None
     } else {
@@ -6987,7 +7456,7 @@ async fn upload_directory(
                 &target,
                 &task.conflict_policy,
                 control,
-                on_progress,
+                &forward_progress,
                 total_bytes,
             )
             .await?;
@@ -7096,32 +7565,13 @@ async fn upload_directory_file(
             .close()
             .await
             .map_err(|_| transfer_io_error("SFTP_CLOSE_FAILED", "errors.sftpFailed"))?;
-        let backup = if existing.is_some() && *conflict_policy == ConflictPolicy::Overwrite {
-            let path = format!("{target}.filex-backup-{}", uuid::Uuid::new_v4());
-            if path.len() > 4_096 {
-                return Err(directory_tree_limit_error());
-            }
-            sftp.rename(target.clone(), path.clone())
-                .await
-                .map_err(|_| transfer_io_error("SFTP_REPLACE_FAILED", "errors.sftpFailed"))?;
-            Some(path)
-        } else {
-            None
-        };
-        if sftp
-            .rename(temporary.clone(), target.clone())
-            .await
-            .is_err()
-        {
-            if let Some(backup) = backup.as_ref() {
-                let _ = sftp.rename(backup.clone(), target.clone()).await;
-            }
-            return Err(transfer_io_error("SFTP_COMMIT_FAILED", "errors.sftpFailed"));
-        }
-        if let Some(backup) = backup {
-            let _ = sftp.remove_file(backup).await;
-        }
-        Ok(())
+        atomic_commit_remote_file(
+            sftp,
+            &temporary,
+            &target,
+            existing.is_some() && *conflict_policy == ConflictPolicy::Overwrite,
+        )
+        .await
     }
     .await;
     let end_result = control.end_commit();
@@ -7138,7 +7588,7 @@ async fn download(
     session: &ConnectedSshSession,
     task: &TransferTask,
     control: &TransferControl,
-    on_progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+    on_event: &(dyn Fn(TransferRuntimeEvent) + Send + Sync),
 ) -> Result<u64, AppError> {
     if task.remote_path.is_empty()
         || task.remote_path.len() > 4_096
@@ -7156,13 +7606,10 @@ async fn download(
         return Err(directory_tree_unsupported_error());
     }
     if metadata.is_regular() {
-        if let Some(total_bytes) = metadata.size {
-            on_progress(control.bytes_transferred(), Some(total_bytes));
-        }
-        return download_regular_file(sftp, task, control, on_progress).await;
+        return download_regular_file(sftp, task, &metadata, control, on_event).await;
     }
     if metadata.is_dir() {
-        return download_directory(sftp, session, task, control, on_progress).await;
+        return download_directory(sftp, session, task, control, on_event).await;
     }
     Err(directory_tree_unsupported_error())
 }
@@ -7170,8 +7617,9 @@ async fn download(
 async fn download_regular_file(
     sftp: &russh_sftp::client::SftpSession,
     task: &TransferTask,
+    source_metadata: &FileAttributes,
     control: &TransferControl,
-    on_progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+    on_event: &(dyn Fn(TransferRuntimeEvent) + Send + Sync),
 ) -> Result<u64, AppError> {
     let mut target = std::path::PathBuf::from(&task.local_path);
     if target.as_os_str().is_empty() {
@@ -7180,37 +7628,152 @@ async fn download_regular_file(
             "errors.localPathInvalid",
         ));
     }
-    if tokio::fs::try_exists(&target).await.unwrap_or(false) {
-        match task.conflict_policy {
-            ConflictPolicy::Ask => return Err(transfer_conflict_error()),
-            ConflictPolicy::Skip => return Ok(0),
-            ConflictPolicy::Overwrite => {}
-            ConflictPolicy::Rename => target = unique_local_path(&target).await?,
+    let source_size = source_metadata.size;
+    let source_mtime_ms = source_metadata
+        .mtime
+        .map(|seconds| u64::from(seconds) * 1_000);
+    let staged_len = if let Some(staging) = task.staging_path.as_deref() {
+        match tokio::fs::symlink_metadata(staging).await {
+            Ok(meta) if !meta.file_type().is_symlink() && meta.file_type().is_file() => {
+                Some(meta.len())
+            }
+            _ => None,
         }
-    }
-    let parent = target
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .ok_or_else(|| transfer_io_error("LOCAL_PATH_INVALID", "errors.localPathInvalid"))?;
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(|_| transfer_io_error("LOCAL_DIRECTORY_FAILED", "errors.localFileWriteFailed"))?;
-    let temporary = parent.join(format!(".filex-part-{}", uuid::Uuid::new_v4()));
+    } else {
+        None
+    };
+
+    let plan = evaluate_resume_plan(task, source_size, source_mtime_ms, staged_len);
+    let (staging_path, resume_offset, target, exists_at_start) = match plan {
+        ResumePlan::IdentityChanged => {
+            on_event(TransferRuntimeEvent::IdentityChanged);
+            return Err(transfer_identity_changed_error());
+        }
+        ResumePlan::ResumeFromOffset { offset } => {
+            let Some(staging) = task.staging_path.as_deref() else {
+                return Err(transfer_io_error(
+                    "TRANSFER_STAGING_MISSING",
+                    "errors.localFileWriteFailed",
+                ));
+            };
+            let staging_buf = PathBuf::from(staging);
+            let exists = tokio::fs::try_exists(&target).await.unwrap_or(false);
+            if exists {
+                match task.conflict_policy {
+                    ConflictPolicy::Ask => return Err(transfer_conflict_error()),
+                    ConflictPolicy::Skip => {
+                        let _ = tokio::fs::remove_file(&staging_buf).await;
+                        return Ok(0);
+                    }
+                    ConflictPolicy::Overwrite => {}
+                    ConflictPolicy::Rename => target = unique_local_path(&target).await?,
+                }
+            }
+            (staging_buf, offset, target, exists)
+        }
+        ResumePlan::FreshStart | ResumePlan::RestartFromBeginning => {
+            let exists = tokio::fs::try_exists(&target).await.unwrap_or(false);
+            if exists {
+                match task.conflict_policy {
+                    ConflictPolicy::Ask => return Err(transfer_conflict_error()),
+                    ConflictPolicy::Skip => return Ok(0),
+                    ConflictPolicy::Overwrite => {}
+                    ConflictPolicy::Rename => target = unique_local_path(&target).await?,
+                }
+            }
+            let parent = target
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .ok_or_else(|| {
+                    transfer_io_error("LOCAL_PATH_INVALID", "errors.localPathInvalid")
+                })?;
+            tokio::fs::create_dir_all(parent).await.map_err(|_| {
+                transfer_io_error("LOCAL_DIRECTORY_FAILED", "errors.localFileWriteFailed")
+            })?;
+            let staging_buf = task
+                .staging_path
+                .as_deref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| deterministic_local_staging_path(parent, &task.id));
+            if staging_buf.to_string_lossy().len() > 4_096 {
+                return Err(directory_tree_limit_error());
+            }
+            (staging_buf, 0, target, exists)
+        }
+    };
+
+    on_event(TransferRuntimeEvent::Metadata {
+        source_size_bytes: source_size,
+        source_mtime_ms,
+        staging_path: Some(staging_path.to_string_lossy().into_owned()),
+        resume_state: TransferResumeState::SafeToResume,
+    });
+    control.set_bytes_transferred(resume_offset);
+    on_event(TransferRuntimeEvent::Progress {
+        bytes_transferred: resume_offset,
+        total_bytes: source_size,
+    });
+
     let transfer_result = async {
         let mut remote = sftp
             .open(task.remote_path.clone())
             .await
             .map_err(|_| transfer_io_error("SFTP_OPEN_FAILED", "errors.sftpFailed"))?;
-        let mut local = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .await
-            .map_err(|_| {
+        let mut local = if resume_offset > 0 {
+            remote
+                .seek(SeekFrom::Start(resume_offset))
+                .await
+                .map_err(|_| transfer_io_error("SFTP_SEEK_FAILED", "errors.sftpFailed"))?;
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&staging_path)
+                .await
+                .map_err(|_| {
+                    transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed")
+                })?;
+            file.set_len(resume_offset).await.map_err(|_| {
                 transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed")
             })?;
-        let bytes = copy_transfer_stream(&mut remote, &mut local, control, on_progress, 0).await?;
-        control.begin_commit().await?;
+            file.seek(SeekFrom::Start(resume_offset))
+                .await
+                .map_err(|_| {
+                    transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed")
+                })?;
+            file
+        } else {
+            tokio::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&staging_path)
+                .await
+                .map_err(|_| {
+                    transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed")
+                })?
+        };
+        let forward_progress = |bytes, total_bytes| {
+            on_event(TransferRuntimeEvent::Progress {
+                bytes_transferred: bytes,
+                total_bytes,
+            });
+        };
+        let copy_result = copy_transfer_stream(
+            &mut remote,
+            &mut local,
+            control,
+            &forward_progress,
+            resume_offset,
+        )
+        .await;
+        let copied = match copy_result {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = local.flush().await;
+                let _ = local.sync_all().await;
+                let _ = tokio::time::timeout(Duration::from_secs(2), remote.close()).await;
+                return Err(error);
+            }
+        };
         local.flush().await.map_err(|_| {
             transfer_io_error("LOCAL_FILE_FLUSH_FAILED", "errors.localFileWriteFailed")
         })?;
@@ -7222,21 +7785,103 @@ async fn download_regular_file(
             .await
             .map_err(|_| transfer_io_error("SFTP_CLOSE_FAILED", "errors.sftpFailed"))?;
         drop(local);
-        if tokio::fs::try_exists(&target).await.unwrap_or(false) {
-            tokio::fs::remove_file(&target).await.map_err(|_| {
-                transfer_io_error("LOCAL_REPLACE_FAILED", "errors.localFileWriteFailed")
-            })?;
+
+        let total_written = resume_offset.saturating_add(copied);
+        let staged_meta = tokio::fs::metadata(&staging_path).await.map_err(|_| {
+            transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed")
+        })?;
+        if staged_meta.len() != total_written
+            || source_size.is_some_and(|expected| staged_meta.len() != expected)
+        {
+            return Err(transfer_size_mismatch_error());
         }
-        tokio::fs::rename(&temporary, &target)
+        let recheck = sftp
+            .symlink_metadata(task.remote_path.clone())
             .await
-            .map_err(|_| transfer_io_error("LOCAL_COMMIT_FAILED", "errors.localFileWriteFailed"))?;
-        Ok(bytes)
+            .map_err(|_| transfer_identity_changed_error())?;
+        let recheck_mtime_ms = recheck.mtime.map(|seconds| u64::from(seconds) * 1_000);
+        if recheck.is_symlink()
+            || !recheck.is_regular()
+            || !source_identity_matches(
+                source_size,
+                source_mtime_ms,
+                recheck.size,
+                recheck_mtime_ms,
+            )
+        {
+            on_event(TransferRuntimeEvent::IdentityChanged);
+            return Err(transfer_identity_changed_error());
+        }
+
+        control.begin_commit().await?;
+        let commit_result = async {
+            let mut commit_target = target.clone();
+            let now_exists = tokio::fs::try_exists(&commit_target).await.unwrap_or(false);
+            if now_exists && !exists_at_start {
+                match task.conflict_policy {
+                    ConflictPolicy::Ask => return Err(transfer_conflict_error()),
+                    ConflictPolicy::Skip => return Ok(()),
+                    ConflictPolicy::Overwrite => {}
+                    ConflictPolicy::Rename => {
+                        commit_target = unique_local_path(&commit_target).await?;
+                    }
+                }
+            }
+            atomic_commit_local_file(
+                &staging_path,
+                &commit_target,
+                now_exists && task.conflict_policy == ConflictPolicy::Overwrite,
+            )
+            .await
+        }
+        .await;
+        control.end_commit()?;
+        commit_result?;
+        Ok(staged_meta.len())
     }
     .await;
-    if transfer_result.is_err() {
-        let _ = tokio::fs::remove_file(&temporary).await;
+    if let Err(ref error) = transfer_result
+        && !should_preserve_staging_on_error(error)
+    {
+        let _ = tokio::fs::remove_file(&staging_path).await;
     }
     transfer_result
+}
+
+async fn atomic_commit_local_file(
+    staging_path: &std::path::Path,
+    target: &std::path::Path,
+    overwrite_existing: bool,
+) -> Result<(), AppError> {
+    let backup = if overwrite_existing {
+        let parent = target
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .ok_or_else(|| transfer_io_error("LOCAL_PATH_INVALID", "errors.localPathInvalid"))?;
+        let backup = parent.join(format!(".filex-backup-{}", uuid::Uuid::new_v4()));
+        if backup.to_string_lossy().len() > 4_096 {
+            return Err(directory_tree_limit_error());
+        }
+        tokio::fs::rename(target, &backup).await.map_err(|_| {
+            transfer_io_error("LOCAL_REPLACE_FAILED", "errors.localFileWriteFailed")
+        })?;
+        Some(backup)
+    } else {
+        None
+    };
+    if tokio::fs::rename(staging_path, target).await.is_err() {
+        if let Some(backup) = backup.as_ref() {
+            let _ = tokio::fs::rename(backup, target).await;
+        }
+        return Err(transfer_io_error(
+            "LOCAL_COMMIT_FAILED",
+            "errors.localFileWriteFailed",
+        ));
+    }
+    if let Some(backup) = backup {
+        let _ = tokio::fs::remove_file(backup).await;
+    }
+    Ok(())
 }
 
 async fn download_directory(
@@ -7244,8 +7889,14 @@ async fn download_directory(
     session: &ConnectedSshSession,
     task: &TransferTask,
     control: &TransferControl,
-    on_progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+    on_event: &(dyn Fn(TransferRuntimeEvent) + Send + Sync),
 ) -> Result<u64, AppError> {
+    let forward_progress = |bytes, total_bytes| {
+        on_event(TransferRuntimeEvent::Progress {
+            bytes_transferred: bytes,
+            total_bytes,
+        });
+    };
     let source_root = sftp
         .canonicalize(task.remote_path.clone())
         .await
@@ -7298,8 +7949,17 @@ async fn download_directory(
             _ => None,
         };
     }
+    on_event(TransferRuntimeEvent::Metadata {
+        source_size_bytes: total_size,
+        source_mtime_ms: None,
+        staging_path: None,
+        resume_state: TransferResumeState::RestartFromBeginning,
+    });
     if let Some(total_size) = total_size {
-        on_progress(control.bytes_transferred(), Some(total_size));
+        on_event(TransferRuntimeEvent::Progress {
+            bytes_transferred: control.bytes_transferred(),
+            total_bytes: Some(total_size),
+        });
     }
     let parent = target_root
         .parent()
@@ -7342,7 +8002,7 @@ async fn download_directory(
                 &target,
                 &task.conflict_policy,
                 control,
-                on_progress,
+                &forward_progress,
                 total_bytes,
             )
             .await?;
@@ -7391,33 +8051,53 @@ async fn validate_remote_transfer_destinations(
     control: &TransferControl,
 ) -> Result<(), AppError> {
     for entry in entries {
-        control.wait_until_running().await?;
-        let target = remote_transfer_child_path(target_root, &entry.relative_path);
-        if target.len() > 4_096 {
-            return Err(directory_tree_limit_error());
-        }
-        let metadata = tokio::select! {
-            biased;
-            () = control.cancellation.cancelled() => return Err(transfer_cancelled_error()),
-            result = remote_transfer_metadata(sftp, &target) => result?,
-        };
-        let Some(metadata) = metadata else {
-            continue;
-        };
-        if metadata.is_symlink() {
+        validate_remote_transfer_destination_path(
+            sftp,
+            target_root,
+            &entry.relative_path,
+            entry.is_directory,
+            conflict_policy,
+            control,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn validate_remote_transfer_destination_path(
+    sftp: &russh_sftp::client::SftpSession,
+    target_root: &str,
+    relative_path: &str,
+    is_directory: bool,
+    conflict_policy: &ConflictPolicy,
+    control: &TransferControl,
+) -> Result<(), AppError> {
+    control.wait_until_running().await?;
+    let target = remote_transfer_child_path(target_root, relative_path);
+    if target.len() > 4_096 {
+        return Err(directory_tree_limit_error());
+    }
+    let metadata = tokio::select! {
+        biased;
+        () = control.cancellation.cancelled() => return Err(control.cancellation_error()),
+        result = remote_transfer_metadata(sftp, &target) => result?,
+    };
+    let Some(metadata) = metadata else {
+        return Ok(());
+    };
+    if metadata.is_symlink() {
+        return Err(directory_tree_unsupported_error());
+    }
+    if is_directory {
+        if !metadata.is_dir() {
             return Err(directory_tree_unsupported_error());
         }
-        if entry.is_directory {
-            if !metadata.is_dir() {
-                return Err(directory_tree_unsupported_error());
-            }
-        } else {
-            if !metadata.is_regular() {
-                return Err(directory_tree_unsupported_error());
-            }
-            if *conflict_policy == ConflictPolicy::Ask {
-                return Err(transfer_conflict_error());
-            }
+    } else {
+        if !metadata.is_regular() {
+            return Err(directory_tree_unsupported_error());
+        }
+        if *conflict_policy == ConflictPolicy::Ask {
+            return Err(transfer_conflict_error());
         }
     }
     Ok(())
@@ -7437,7 +8117,7 @@ async fn validate_local_transfer_destinations(
         }
         let metadata = tokio::select! {
             biased;
-            () = control.cancellation.cancelled() => return Err(transfer_cancelled_error()),
+            () = control.cancellation.cancelled() => return Err(control.cancellation_error()),
             result = local_transfer_metadata(&target) => result?,
         };
         let Some(metadata) = metadata else {
@@ -7463,7 +8143,7 @@ async fn validate_local_transfer_destinations(
     Ok(())
 }
 
-async fn ensure_remote_transfer_directory(
+pub(crate) async fn ensure_remote_transfer_directory(
     sftp: &russh_sftp::client::SftpSession,
     path: &str,
 ) -> Result<(), AppError> {
@@ -7566,31 +8246,12 @@ async fn download_directory_file(
                 .await
                 .map_err(|_| transfer_io_error("SFTP_CLOSE_FAILED", "errors.sftpFailed"))?;
             drop(local);
-            let backup = if existing.is_some() && *conflict_policy == ConflictPolicy::Overwrite {
-                let backup = parent.join(format!(".filex-backup-{}", uuid::Uuid::new_v4()));
-                if backup.to_string_lossy().len() > 4_096 {
-                    return Err(directory_tree_limit_error());
-                }
-                tokio::fs::rename(&target, &backup).await.map_err(|_| {
-                    transfer_io_error("LOCAL_REPLACE_FAILED", "errors.localFileWriteFailed")
-                })?;
-                Some(backup)
-            } else {
-                None
-            };
-            if tokio::fs::rename(&temporary, &target).await.is_err() {
-                if let Some(backup) = backup.as_ref() {
-                    let _ = tokio::fs::rename(backup, &target).await;
-                }
-                return Err(transfer_io_error(
-                    "LOCAL_COMMIT_FAILED",
-                    "errors.localFileWriteFailed",
-                ));
-            }
-            if let Some(backup) = backup {
-                let _ = tokio::fs::remove_file(backup).await;
-            }
-            Ok(())
+            atomic_commit_local_file(
+                &temporary,
+                &target,
+                existing.is_some() && *conflict_policy == ConflictPolicy::Overwrite,
+            )
+            .await
         }
         .await;
         let end_result = control.end_commit();
@@ -7616,7 +8277,7 @@ async fn scan_local_transfer_tree(
         control.wait_until_running().await?;
         let mut directory = tokio::select! {
             biased;
-            () = control.cancellation.cancelled() => return Err(transfer_cancelled_error()),
+            () = control.cancellation.cancelled() => return Err(control.cancellation_error()),
             result = tokio::fs::read_dir(&directory_path) => {
                 result.map_err(|_| transfer_io_error("LOCAL_DIRECTORY_FAILED", "errors.localFileReadFailed"))?
             }
@@ -7626,7 +8287,7 @@ async fn scan_local_transfer_tree(
             control.wait_until_running().await?;
             let next = tokio::select! {
                 biased;
-                () = control.cancellation.cancelled() => return Err(transfer_cancelled_error()),
+                () = control.cancellation.cancelled() => return Err(control.cancellation_error()),
                 result = directory.next_entry() => {
                     result.map_err(|_| transfer_io_error("LOCAL_DIRECTORY_FAILED", "errors.localFileReadFailed"))?
                 },
@@ -7651,7 +8312,7 @@ async fn scan_local_transfer_tree(
             }
             let metadata = tokio::select! {
                 biased;
-                () = control.cancellation.cancelled() => return Err(transfer_cancelled_error()),
+                () = control.cancellation.cancelled() => return Err(control.cancellation_error()),
                 result = tokio::fs::symlink_metadata(&source_path) => {
                     result.map_err(|_| transfer_io_error("LOCAL_FILE_READ_FAILED", "errors.localFileReadFailed"))?
                 },
@@ -7687,7 +8348,7 @@ async fn scan_local_transfer_tree(
     Ok(entries)
 }
 
-async fn scan_remote_transfer_tree(
+pub(crate) async fn scan_remote_transfer_tree(
     directory_reader: &SftpDirectoryReader,
     root: &str,
     control: Option<&TransferControl>,
@@ -7828,7 +8489,7 @@ where
     }
 }
 
-async fn remote_transfer_metadata(
+pub(crate) async fn remote_transfer_metadata(
     sftp: &russh_sftp::client::SftpSession,
     path: &str,
 ) -> Result<Option<FileAttributes>, AppError> {
@@ -7843,7 +8504,7 @@ async fn remote_transfer_metadata(
     }
 }
 
-async fn remove_remote_tree(
+pub(crate) async fn remove_remote_tree(
     session: &ConnectedSshSession,
     sftp: &russh_sftp::client::SftpSession,
     root: &str,
@@ -7913,7 +8574,7 @@ async fn remove_remote_tree(
     Ok(())
 }
 
-async fn canonical_remote_transfer_target(
+pub(crate) async fn canonical_remote_transfer_target(
     sftp: &russh_sftp::client::SftpSession,
     requested_path: &str,
 ) -> Result<String, AppError> {
@@ -8004,7 +8665,7 @@ async fn remove_local_transfer_tree(root: &std::path::Path) -> Result<(), AppErr
     Ok(())
 }
 
-fn remote_transfer_child_path(root: &str, relative_path: &str) -> String {
+pub(crate) fn remote_transfer_child_path(root: &str, relative_path: &str) -> String {
     if relative_path.is_empty() {
         root.to_owned()
     } else {
@@ -8016,7 +8677,7 @@ fn local_transfer_child_path(root: &std::path::Path, relative_path: &str) -> Pat
     root.join(relative_path)
 }
 
-async fn copy_transfer_stream<R, W>(
+pub(crate) async fn copy_transfer_stream<R, W>(
     reader: &mut R,
     writer: &mut W,
     control: &TransferControl,
@@ -8038,9 +8699,16 @@ where
     loop {
         control.wait_until_running().await?;
         let read = tokio::select! {
-            result = reader.read(&mut buffer) => result
-                .map_err(|_| transfer_io_error("TRANSFER_STREAM_FAILED", "errors.transferStreamFailed"))?,
-            () = control.cancellation.cancelled() => return Err(transfer_cancelled_error()),
+            result = reader.read(&mut buffer) => match result {
+                Ok(n) => n,
+                Err(_) => {
+                    let aggregate = base_bytes.saturating_add(copied);
+                    control.bytes_transferred.store(aggregate, Ordering::Release);
+                    on_progress(aggregate, None);
+                    return Err(transfer_io_error("TRANSFER_STREAM_FAILED", "errors.transferStreamFailed"));
+                }
+            },
+            () = control.cancellation.cancelled() => return Err(control.cancellation_error()),
         };
         if read == 0 {
             break;
@@ -8048,9 +8716,15 @@ where
 
         control.wait_until_running().await?;
         tokio::select! {
-            result = writer.write_all(&buffer[..read]) => result
-                .map_err(|_| transfer_io_error("TRANSFER_STREAM_FAILED", "errors.transferStreamFailed"))?,
-            () = control.cancellation.cancelled() => return Err(transfer_cancelled_error()),
+            result = writer.write_all(&buffer[..read]) => {
+                if result.is_err() {
+                    let aggregate = base_bytes.saturating_add(copied);
+                    control.bytes_transferred.store(aggregate, Ordering::Release);
+                    on_progress(aggregate, None);
+                    return Err(transfer_io_error("TRANSFER_STREAM_FAILED", "errors.transferStreamFailed"));
+                }
+            },
+            () = control.cancellation.cancelled() => return Err(control.cancellation_error()),
         }
 
         copied = copied.saturating_add(read as u64);
@@ -8075,7 +8749,7 @@ where
     Ok(copied)
 }
 
-async fn unique_remote_path(
+pub(crate) async fn unique_remote_path(
     sftp: &russh_sftp::client::SftpSession,
     original: &str,
 ) -> Result<String, AppError> {
@@ -8114,7 +8788,7 @@ async fn unique_local_path(original: &std::path::Path) -> Result<std::path::Path
     ))
 }
 
-fn directory_tree_limit_error() -> AppError {
+pub(crate) fn directory_tree_limit_error() -> AppError {
     AppError {
         code: "DIRECTORY_TREE_LIMIT_EXCEEDED".to_owned(),
         message_key: "errors.directoryTreeLimit".to_owned(),
@@ -8124,7 +8798,7 @@ fn directory_tree_limit_error() -> AppError {
     }
 }
 
-fn directory_tree_unsupported_error() -> AppError {
+pub(crate) fn directory_tree_unsupported_error() -> AppError {
     AppError {
         code: "DIRECTORY_TREE_UNSUPPORTED".to_owned(),
         message_key: "errors.directoryTreeUnsupported".to_owned(),
@@ -8134,7 +8808,7 @@ fn directory_tree_unsupported_error() -> AppError {
     }
 }
 
-fn transfer_conflict_error() -> AppError {
+pub(crate) fn transfer_conflict_error() -> AppError {
     transfer_io_error("TRANSFER_CONFLICT", "errors.transferConflict")
 }
 
@@ -8146,6 +8820,11 @@ fn transfer_cancelled_error() -> AppError {
         remote_state: RemoteState::Unknown,
         field: None,
     }
+}
+
+#[cfg(test)]
+pub(crate) fn transfer_cancelled_error_for_test() -> AppError {
+    transfer_cancelled_error()
 }
 
 fn copy_commit_in_progress_error() -> AppError {
@@ -8168,7 +8847,7 @@ fn transfer_control_transition_error() -> AppError {
     }
 }
 
-fn transfer_io_error(code: &str, message_key: &str) -> AppError {
+pub(crate) fn transfer_io_error(code: &str, message_key: &str) -> AppError {
     AppError {
         code: code.to_owned(),
         message_key: message_key.to_owned(),
@@ -8218,8 +8897,10 @@ mod tests {
             tags: Vec::new(),
             authentication_method,
             identity_file,
+            key_id: None,
             proxy_jump: proxy_jump.map(str::to_owned),
             proxy_jump_profile_ids: Vec::new(),
+            proxy_profile_id: None,
             credential_ref: None,
             state: ConnectionState::Idle,
             latency_ms: None,

@@ -2,6 +2,10 @@ import type { KeyboardShortcuts } from '@/types/contracts';
 
 export type CommandPaletteCommandId =
   | Exclude<keyof KeyboardShortcuts, 'commandPalette'>
+  | 'openOverview'
+  | 'openLocalTerminal'
+  | 'openKeyProxyLibrary'
+  | 'toggleCompactComposer'
   | 'showMonitor'
   | 'disconnectActiveSession';
 

@@ -1,5 +1,99 @@
 # FILEX verification evidence
 
+## 2026-11-16 — v0.1.8 release preparation and Windows packaging
+
+- Scope: prepared release `0.1.8` consolidating Phases B1–B4, C1–C4, D (`Phase 5.7`), clipboard upload and typeahead navigation (`Phase 5.8` / `ADR-0031`), and session-switch / duplicate-session state preservation:
+  - Updated `scripts/sync-version.mjs` to also enforce `filex-local-terminal` version synchronization in `Cargo.lock`.
+  - Synchronized workspace manifests (`package.json`, `Cargo.toml`, `src-tauri/tauri.conf.json`, `Cargo.lock`) to `0.1.8`, updated `CHANGELOG.md` with the `## [0.1.8] - 2026-11-16` section, and verified `node scripts/release-notes.mjs v0.1.8`.
+  - Built local unsigned Windows bundles via `pnpm tauri build --bundles nsis --bundles msi` (`FILEX_0.1.8_x64-setup.exe` at `17.72 MiB` and `FILEX_0.1.8_x64_en-US.msi` at `22.02 MiB` under the external Cargo target cache).
+- Scope limits preserved honestly: local `tauri build` exercises unsigned Windows x64 bundling without updater signing secrets (`TAURI_SIGNING_PRIVATE_KEY` and `FILEX_UPDATER_PUBLIC_KEY` embed into signed multi-OS installers and `latest.json` verification inside `.github/workflows/release.yml` on tag push); `e2e/live-ssh.spec.ts` requires a running WebView2 CDP desktop session on `127.0.0.1:9222` and fails with `ECONNREFUSED` when run without a live desktop CDP instance.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Version sync | `pnpm version:check` | Passed (`0.1.8`) |
+| Release notes | `node scripts/release-notes.mjs v0.1.8` | Passed |
+| ESLint | `pnpm lint` | Passed (0 warnings) |
+| TypeScript | `pnpm typecheck` | Passed |
+| Frontend unit tests | `pnpm test` | Passed, 30 files and 115 tests |
+| Production bundle | `pnpm build` | Passed (existing Vite >500 kB chunk-size warning retained) |
+| Windows Tauri bundles | `pnpm tauri build --bundles nsis --bundles msi` | Passed (`FILEX_0.1.8_x64-setup.exe` 17.72 MiB, `FILEX_0.1.8_x64_en-US.msi` 22.02 MiB) |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust locked check | `cargo check --workspace --locked` | Passed |
+| Rust Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed (0 warnings) |
+| Rust workspace tests | `cargo test --workspace --offline` | Passed, 76 tests (`filex_contracts`: 0, `filex_core`: 17, `filex_credentials`: 3, `filex_desktop_lib`: 34, `filex_desktop`: 0, `filex_local_terminal`: 4, `filex_ssh`: 6, `filex_storage`: 12) |
+| Workbench Playwright E2E | `pnpm exec playwright test e2e/workbench.spec.ts` | Passed, 32 tests (`e2e/live-ssh.spec.ts` excluded without live WebView2 CDP on `127.0.0.1:9222`) |
+| Diff hygiene | `git diff --check` | Passed |
+
+## 2026-11-16 — Session-switch & duplicate-session UI/state preservation
+
+- Scope: eliminated unnecessary terminal, file browser, composer, and telemetry refreshes when duplicating a session or switching across any open session tabs while strictly preserving per-session data isolation:
+  - **Bounded per-session state LRU**: added `src/domain/sessionStateCache.ts` (`createSessionStateCache`) so cached per-session UI and domain snapshots remain bounded and are pruned via `dropSession` when tabs close.
+  - **Persistent terminal workspaces**: updated `src/components/terminal/TerminalWorkspace.vue` to mount one `<TerminalPane>` per open session keyed by `:key="session.id"` with `v-show` visibility and per-session `searchOpenSessionIds`; updated `src/components/terminal/TerminalPane.vue` so tab switches refresh the existing `XTerm` DOM without calling `replaySession()`, resetting buffers, or triggering spurious `resizeSession` calls when dimensions are unchanged (`v-if="visible"` guards `TerminalQuickOpsBar` and `.terminal-search` against duplicate hidden controls). Updated `src/components/terminal/CommandInputBar.vue` to preserve unsent drafts per active session.
+  - **File browser, inspector, and telemetry cache restoration**: updated `src/stores/sftp.ts` (`sessionCaches`, `hasSessionState`, `activateSession`, `dropSession`, `setExpandedTreePaths`, `expandedTreePaths`), `src/stores/bookmarks.ts`, `src/components/files/FileBrowserPanel.vue`, and `src/components/inspector/InspectorPane.vue` to restore per-session directory path, entries, selection, tree expansion, active inspector subview, and follow-terminal/elevation watchers without resetting or leaking across sessions. Updated `src/stores/monitor.ts`, `src/stores/processes.ts`, `src/stores/network.ts`, `src/stores/docker.ts`, `src/stores/ops.ts`, `src/composables/useMonitorPolling.ts`, `src/components/layout/WorkbenchShell.vue`, and `src/components/connections/ConnectionsPane.vue` (`openProfile`) to switch snapshots via `activateSession` instead of clearing cached host telemetry.
+  - **Regression tests**: added `tests/sessionStatePersistence.test.ts` (4 unit tests covering LRU eviction, SFTP cache isolation, and monitor/process/network/docker/ops state restoration) and `e2e/workbench.spec.ts` (`preserves terminal, SFTP, composer draft, and monitor state when duplicating and switching sessions`).
+- Scope limits preserved honestly: `e2e/workbench.spec.ts` runs against Chromium with controlled Pinia fixtures and mocked `__TAURI_INTERNALS__` handlers; live SSH end-to-end verification in `e2e/live-ssh.spec.ts` requires a running WebView2 CDP desktop session and live SSH target.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Version sync | `pnpm version:check` | Passed (`0.1.7`) |
+| ESLint | `pnpm lint` | Passed (0 warnings) |
+| TypeScript | `pnpm typecheck` | Passed |
+| Frontend unit tests | `pnpm test` | Passed, 30 files and 115 tests (`tests/sessionStatePersistence.test.ts`: 4) |
+| Production bundle | `pnpm build` | Passed (existing Vite >500 kB chunk-size warning retained) |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed (0 warnings) |
+| Rust workspace tests | `cargo test --workspace --offline` | Passed, 76 tests (`filex_contracts`: 0, `filex_core`: 17, `filex_credentials`: 3, `filex_desktop_lib`: 34, `filex_desktop`: 0, `filex_local_terminal`: 4, `filex_ssh`: 6, `filex_storage`: 12) |
+| Workbench Playwright E2E | `pnpm exec playwright test e2e/workbench.spec.ts` | Passed, 32 tests (`e2e/live-ssh.spec.ts` excluded without live WebView2 CDP) |
+| Diff hygiene | `git diff --check` | Passed |
+
+## 2026-11-16 — Clipboard file copy/paste upload & folder letter typeahead navigation
+
+- Scope: added `docs/adr/ADR-0031-clipboard-upload-and-typeahead-navigation.md` and updated `docs/PRODUCT_DESIGN.md`, `docs/UX_DESIGN.md`, and `docs/ROADMAP.md` (`Phase 5.8`):
+  - **Clipboard File Copy/Paste Upload (`Ctrl+C` / `Ctrl+V`)**: added `ClipboardFileSnapshot` and `ClipboardFileWriteResult` contracts (`crates/filex-contracts/src/lib.rs`, `src/types/contracts.ts`), native OS file-list clipboard backend (`src-tauri/src/clipboard_files.rs`, registered in `src-tauri/src/lib.rs` with Windows `CF_HDROP`, macOS `NSPasteboard`, and Linux Wayland/X11 URI list handlers plus `canonical_local_entry` validation and clipboard sequence arbitration), typed `src/api/domain/clipboardFilesApi.ts`, pure domain helpers `src/domain/fileClipboard.ts`, `src/stores/fileClipboard.ts`, shared `src/composables/useFileUploadQueue.ts`, `FileContextMenu.vue` copy/paste upload menu items, and `zh-CN`/`en-US` localization across `FileBrowserPanel.vue` and `InspectorPane.vue`.
+  - **Folder Letter/Prefix Typeahead & Keyboard Navigation**: added `src/domain/fileTypeahead.ts` and shared `src/composables/useFilePaneKeyboard.ts` (case-insensitive prefix matching, repeated single-letter cycling across directories and files, rapid multi-letter refinement, input-focus guards, Up/Down row selection, virtualized scroll-into-view via `VirtualList.vue` `scrollToIndex`, and live `.file-typeahead-pill` status feedback).
+- Visual review: inspected `test-results/file-typeahead-1440-dark.png` (1440 × 900 dark theme) and `test-results/file-clipboard-upload-960-light.png` (960 × 640 light theme) showing clean `.file-typeahead-pill` placement over scrolled virtualized rows, visible paste-upload toast and transfer drawer queue items, and zero horizontal page overflow (`scrollWidth <= viewportWidth`).
+- Scope limits preserved honestly: Windows `CF_HDROP` wide-layout encoding, URI list parsing, and path normalization were verified via Rust unit tests on Windows, while live macOS `NSPasteboard` and Linux `wl-paste`/`xclip` desktop runtime execution require native macOS/Linux verification hosts; Playwright E2E tests ran with controlled Pinia fixtures and mocked `__TAURI_INTERNALS__` handlers (`e2e/live-ssh.spec.ts` requires a live WebView2 CDP session, and a pre-existing concurrent WIP test on remote tree paths was outside the targeted filter).
+
+| Check | Command | Result |
+| --- | --- | --- |
+| ESLint | `pnpm lint` | Passed (0 warnings) |
+| TypeScript | `pnpm typecheck` | Passed |
+| Frontend unit tests | `pnpm test` | Passed, 30 files and 115 tests (`tests/fileClipboardUpload.test.ts`: 3, `tests/fileTypeahead.test.ts`: 5) |
+| Production bundle | `pnpm build` | Passed (`18.73s`; existing Vite >500 kB chunk-size warning retained) |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed (0 warnings) |
+| Rust workspace tests | `cargo test --workspace` | Passed, 76 tests (`filex_core`: 17, `filex_credentials`: 3, `filex_desktop_lib`: 34 incl. 5 `clipboard_files` tests, `filex_local_terminal`: 4, `filex_ssh`: 6, `filex_storage`: 12; `filex_contracts`: 0, `filex_desktop`: 0) |
+| Targeted Playwright E2E | `npx playwright test e2e/workbench.spec.ts -g "locates folders and files\|supports Ctrl\+C and Ctrl\+V\|exposes the keyboard-accessible file menu"` | Passed, 3 tests |
+| Diff hygiene | `git diff --check` | Passed |
+
+## 2026-11-15 — Phases B1–B4, C1–C4 & D implementation and acceptance
+
+- Scope: completed the sequenced capability additions from `docs/FILETERM_FEATURE_REVIEW_AND_FILEX_PLAN.md`:
+  - **B1 (Local Terminal)**: added `crates/filex-local-terminal` + `src-tauri/src/local_terminal.rs` + `localTerminalApi.ts` + `LocalTerminalDialog.vue` for allowlisted local PTY shells (`sessionKind: 'local'`), separated from SSH credentials and remote monitoring collectors.
+  - **B2 (Explicit Elevated File Access)**: added `src-tauri/src/elevated_access.rs` + `privilegeApi.ts` + `src/stores/privilege.ts` + `ElevatedAccessDialog.vue` with zeroized secret lease memory, per-operation session revalidation, TTL countdown, amber elevated indicator badges, and manual/disconnect revocation.
+  - **B3 (Central Key & Proxy Libraries)**: added `src-tauri/src/key_proxy_library.rs` + `keysApi.ts` / `proxiesApi.ts` + `src/stores/{keys,proxies}.ts` + `KeyAndProxyLibraryDialog.vue` with OpenSSH key metadata/fingerprint inspection, profile reference binding/rotation, validated SOCKS5 / HTTP CONNECT proxy profiles, and OS-credential-only secret references.
+  - **B4 (Per-Profile Command History & Optional Composer)**: added `src-tauri/src/command_history.rs` + `commandHistoryApi.ts` + `CommandInputBar.vue` with bounded 200-entry SQLite persistence per profile, credential/secret exclusion filters, and a compact composer hidden by default.
+  - **C1 (Remote Content Encoding)**: added `encoding_rs`-backed `src-tauri/src/text_encoding.rs` supporting UTF-8, UTF-16LE/BE, GBK/GB18030, Big5, Shift-JIS, EUC-JP, EUC-KR, and Windows-1252 with strict unmappable character rejection.
+  - **C2 (Remote-to-Remote SFTP Relay)**: added `src-tauri/src/remote_relay.rs` + updated `TransferDialog.vue` & `FileBrowserPanel.vue` for two-endpoint `remote_to_remote` transfers streaming through local workstation memory without local disk staging or server-to-server claims, with explicit endpoint confirmation.
+  - **C3 (Restart-Safe Resume)**: added `src-tauri/src/transfer_resume.rs` and SQLite checkpoint columns distinguishing `safe_to_resume`, `restart_from_beginning`, `identity_changed`, and `not_applicable` states.
+  - **C4 (Path Bookmarks & Transfer History)**: added `src-tauri/src/path_bookmarks.rs` + `bookmarksApi.ts` + `src/stores/bookmarks.ts` + `FileBrowserPanel.vue` + active-vs-history transfer filtering in `TaskDrawer.vue`.
+  - **D (Workbench Overview, Unified Activity Center & Bounded Remote Jobs)**: added `crates/filex-ssh` streaming exec (`open_exec_stream` + `ExecControl`), `src-tauri/src/remote_jobs.rs` (fixed preset jobs, 4 active jobs/session limit, 256 KiB UTF-8 ring buffer, distinct `SIGINT` cancel vs `SIGTERM`/`SIGKILL` terminate, `outcome_uncertain` on session loss, shutdown cleanup), `remoteJobsApi.ts`, `src/stores/remoteJobs.ts`, `OverviewDialog.vue`, and unified `TaskDrawer.vue` activity center (`all`, `transfers`, `jobs`, `tunnels`, `events`) with an inline detail/output pane preserving the active terminal.
+- Visual review: inspected `test-results/remote-relay-dialog-1440.png`, `test-results/overview-1440-dark.png`, `test-results/activity-960-light.png`, and `test-results/overview-960-light.png` across 1440 × 900 dark and 960 × 640 light viewports with zero clipping, readable contrast, clear two-endpoint disclosure, and zero horizontal overflow (`scrollWidth <= viewportWidth`).
+- Scope limits preserved honestly: live remote multi-OS SSH targets (real Linux/macOS/Windows hosts for private-key/Agent auth, ProxyJump routes, tunnels, relay transfers, and remote jobs), `e2e/live-ssh.spec.ts` (requires live WebView2 CDP), Phase E (read-only CLI/MCP bridge), and Phase F (non-SSH protocols) remain separate gated verification or future delivery phases.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Version sync | `pnpm version:check` | Passed (`0.1.7`) |
+| ESLint | `pnpm lint` | Passed (0 warnings) |
+| TypeScript | `pnpm typecheck` | Passed |
+| Frontend unit tests | `pnpm test` | Passed, 27 files and 103 tests |
+| Production bundle | `pnpm build` | Passed (existing Vite >500 kB chunk-size warning retained) |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed (0 warnings) |
+| Rust workspace tests | `cargo test --workspace --offline` | Passed, 71 tests (`filex-core`: 17, `filex-credentials`: 3, `filex-desktop-lib`: 29, `filex-local-terminal`: 4, `filex-ssh`: 6, `filex-storage`: 12; `filex-contracts`: 0, `filex-desktop`: 0) |
+| Workbench Playwright E2E | `pnpm exec playwright test e2e/workbench.spec.ts` | Passed, 29 tests (controlled fixture & mock stores; `e2e/live-ssh.spec.ts` excluded without live WebView2 CDP) |
+| Diff hygiene | `git diff --check` | Passed |
+
 ## 2026-11-14 — v0.1.7 release preparation
 
 - Scope: adapted `St0ff3l/fileterm` terminal adapters for `@xterm/xterm@5.5.0`: added `TerminalLogColorizer` (`src/domain/terminalLogColorizer.ts`) for normal-buffer semantic log highlighting while skipping alternate-screen TUIs and preserving explicit remote ANSI colors, added `registerTerminalSelectionRenderer` / `registerTerminalForegroundAdapter` / `registerTerminalBufferRenderRecovery` / `pulseTerminalFontMetrics` (`src/domain/terminalAdapters.ts`) so `.xterm-decoration-top` inline selection backgrounds no longer hide adjacent characters, wired `document.fonts` `loadingdone` metric refresh and `连接主机...` / `连接主机成功` banner lifecycle in `TerminalPane.vue`, migrated legacy monospace font defaults in TypeScript and Rust (`crates/filex-core/src/lib.rs`), and synchronized workspace manifests and `Cargo.lock` to `0.1.7`.

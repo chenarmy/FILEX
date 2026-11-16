@@ -4,6 +4,8 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import {
   ArrowLeftRight,
+  Bookmark,
+  ChevronDown,
   Columns2,
   ChevronRight,
   ChevronUp,
@@ -14,12 +16,14 @@ import {
   FolderPlus,
   HelpCircle,
   Send,
+  ShieldAlert,
   ShieldCheck,
   ShieldQuestion,
   Trash2,
   Upload,
   Download,
   RefreshCw,
+  Search,
   Terminal,
   X,
 } from 'lucide-vue-next';
@@ -34,14 +38,15 @@ import { useSyncPreviewStore } from '@/stores/syncPreview';
 import { useTransfersStore } from '@/stores/transfers';
 import { useSnippetsStore } from '@/stores/snippets';
 import { useUiStore } from '@/stores/ui';
+import { useBookmarksStore } from '@/stores/bookmarks';
 import { useEditorStore } from '@/stores/editor';
 import { useExternalEditorsStore } from '@/stores/externalEditors';
+import { formatRemainingTtl, usePrivilegeStore } from '@/stores/privilege';
 import { isTauriRuntime } from '@/api/common';
-import {
-  inspectLocalEntry,
-  openLocalFileExternally,
-} from '@/api/domain/localFilesApi';
+import { openLocalFileExternally } from '@/api/domain/localFilesApi';
 import { selectUploadPaths } from '@/api/domain/filePickerApi';
+import { useFilePaneKeyboard } from '@/composables/useFilePaneKeyboard';
+import { useFileUploadQueue } from '@/composables/useFileUploadQueue';
 import VirtualList from '@/components/ui/VirtualList.vue';
 import PermissionDialog from '@/components/dialogs/PermissionDialog.vue';
 import EditorPanel from '@/components/editor/EditorPanel.vue';
@@ -49,6 +54,8 @@ import FileContextMenu from '@/components/files/FileContextMenu.vue';
 import DirectoryTree from '@/components/files/DirectoryTree.vue';
 import FileEntryIcon from '@/components/files/FileEntryIcon.vue';
 import { ownerLabel } from '@/domain/permissions';
+import { isSafeTransferName } from '@/domain/fileClipboard';
+import { hasCapability, isLocalSession } from '@/domain/sessionCapabilities';
 import { directoryAncestors, directoryRoot, missingAncestorDirectories } from '@/domain/directoryNavigation';
 import {
   completedTransferAffectsLocalListing,
@@ -77,8 +84,10 @@ const transfers = useTransfersStore();
 const snippets = useSnippetsStore();
 const checksums = useChecksumsStore();
 const syncPreviews = useSyncPreviewStore();
+const bookmarks = useBookmarksStore();
 const editor = useEditorStore();
 const externalEditors = useExternalEditorsStore();
+const privilege = usePrivilegeStore();
 
 const view = ref<'files' | 'commands' | 'editor'>('files');
 const dualPaneEnabled = computed(() => settings.value.dualPaneSftp);
@@ -86,11 +95,16 @@ const activePane = ref<'local' | 'remote'>('remote');
 const remoteDropElement = ref<HTMLElement | null>(null);
 const nativeDropActive = ref(false);
 const localDropActive = ref(false);
-const dropBusy = ref(false);
 const REMOTE_FILE_DRAG_TYPE = 'application/x-filex-remote-entry';
 let unlistenNativeDrop: UnlistenFn | null = null;
 let panelUnmounted = false;
 const panelOpen = computed(() => settings.value.fileBrowserOpen && !settings.value.focusMode);
+const {
+  uploadBusy,
+  queueLocalPathsForUpload,
+  copyLocalEntryForUpload,
+  pasteUploadFromClipboard,
+} = useFileUploadQueue();
 
 const quickSession = computed(() => sessions.isQuickProfile(sessions.activeSession?.profileId));
 const remoteReady = computed(() => {
@@ -103,6 +117,40 @@ const sessionHost = computed(() => {
   const session = sessions.activeSession;
   return session ? `${session.username}@${session.host} (${session.port})` : '';
 });
+const activeSshSessionId = computed(() => (sessions.activeSession && sessions.activeSession.sessionKind === 'ssh'
+  ? sessions.activeSession.id
+  : null));
+const elevatedLease = computed(() => privilege.getLease(activeSshSessionId.value));
+const elevatedRemaining = computed(() => (elevatedLease.value
+  ? formatRemainingTtl(privilege.remainingSeconds(elevatedLease.value.sessionId))
+  : ''));
+
+function openElevatedAccess(): void {
+  if (!activeSshSessionId.value || !remoteReady.value) return;
+  ui.openElevatedAccessDialog(activeSshSessionId.value);
+}
+
+async function revokeElevation(): Promise<void> {
+  if (!elevatedLease.value) return;
+  if (await privilege.revoke(elevatedLease.value.sessionId)) {
+    ui.notify(t('elevated.revokedNotice'));
+  }
+}
+
+watch(
+  () => [activeSshSessionId.value, Boolean(elevatedLease.value)] as const,
+  ([sessionId, elevated], previous) => {
+    if (
+      previous
+      && previous[0] === sessionId
+      && previous[1] !== elevated
+      && sessionId
+      && remoteReady.value
+    ) {
+      void sftp.load(sessionId, sftp.path);
+    }
+  },
+);
 
 const runningTransfers = computed(() => transfers.tasks.filter((task) => task.state === 'running' || task.state === 'queued').length);
 const transferRefreshBaseline = Date.now();
@@ -118,7 +166,18 @@ const followTerminal = computed({
 const terminalCwd = computed(() => sessions.sessionCwd(sessions.activeSessionId));
 const followHelpOpen = ref(false);
 const pathDrafts = reactive<Record<'local' | 'remote', string>>({ local: '', remote: '.' });
-const expandedTreePaths = reactive<Record<'local' | 'remote', string[]>>({ local: [], remote: ['/'] });
+const expandedLocalTreePaths = ref<string[]>([]);
+const paneBySession = new Map<string, 'local' | 'remote'>();
+const viewBySession = new Map<string, 'files' | 'commands' | 'editor'>();
+
+function expandedPathsFor(pane: 'local' | 'remote'): string[] {
+  return pane === 'local' ? expandedLocalTreePaths.value : sftp.expandedTreePaths;
+}
+
+function setExpandedPathsFor(pane: 'local' | 'remote', paths: string[]): void {
+  if (pane === 'local') expandedLocalTreePaths.value = paths;
+  else sftp.setExpandedTreePaths(paths);
+}
 
 // ---- listing panes -------------------------------------------------------
 
@@ -134,6 +193,21 @@ interface BrowserPane {
 }
 
 const browserPanes = computed<BrowserPane[]>(() => {
+  const localOnly = isLocalSession(sessions.activeSession);
+  if (localOnly && !dualPaneEnabled.value) {
+    return [
+      {
+        id: 'local',
+        label: 'inspector.localPane',
+        entries: localFiles.listing?.entries ?? [],
+        path: localFiles.listing?.path ?? '',
+        loading: localFiles.loading,
+        selectedPath: localFiles.selectedPath,
+        error: localFiles.error,
+        truncated: localFiles.listing?.truncated ?? false,
+      },
+    ];
+  }
   const panes: BrowserPane[] = [
     {
       id: dualPaneEnabled.value ? 'local' : 'remote',
@@ -162,9 +236,9 @@ const browserPanes = computed<BrowserPane[]>(() => {
 });
 
 function expandTreePath(pane: 'local' | 'remote', path: string): void {
-  const next = new Set(expandedTreePaths[pane]);
+  const next = new Set(expandedPathsFor(pane));
   directoryAncestors(path).forEach((ancestor) => next.add(ancestor));
-  expandedTreePaths[pane] = [...next];
+  setExpandedPathsFor(pane, [...next]);
 }
 
 async function syncTreePath(pane: 'local' | 'remote', path: string): Promise<void> {
@@ -200,6 +274,37 @@ async function loadRemotePath(sessionId: string, path: string): Promise<boolean>
   return loaded;
 }
 
+const bookmarkMenuPane = ref<'local' | 'remote' | null>(null);
+
+function paneBookmarks(pane: 'local' | 'remote') {
+  return bookmarks.listFor(sessions.activeSession?.profileId, pane);
+}
+
+function isPaneBookmarked(pane: 'local' | 'remote', currentPath: string): boolean {
+  return bookmarks.findByPath(sessions.activeSession?.profileId, pane, currentPath) !== null;
+}
+
+async function togglePaneBookmark(pane: 'local' | 'remote', currentPath: string): Promise<void> {
+  const profileId = sessions.activeSession?.profileId;
+  const existing = bookmarks.findByPath(profileId, pane, currentPath);
+  if (existing) {
+    await bookmarks.remove(profileId, existing.id);
+    ui.notify(t('files.bookmarkRemoved'));
+    return;
+  }
+  const saved = await bookmarks.save(profileId, pane, currentPath);
+  if (saved) ui.notify(t('files.bookmarkSaved', { label: saved.label }));
+}
+
+function toggleBookmarkMenu(pane: 'local' | 'remote'): void {
+  bookmarkMenuPane.value = bookmarkMenuPane.value === pane ? null : pane;
+}
+
+async function openBookmarkPath(pane: 'local' | 'remote', targetPath: string): Promise<void> {
+  bookmarkMenuPane.value = null;
+  await navigatePanePath(pane, targetPath);
+}
+
 async function navigatePanePath(pane: 'local' | 'remote', requestedPath = pathDrafts[pane]): Promise<void> {
   const target = requestedPath.trim();
   if (!target || target.length > 4_096 || target.includes('\0')) return;
@@ -218,11 +323,12 @@ function resetPathDraft(pane: 'local' | 'remote'): void {
 }
 
 async function toggleTreePath(pane: 'local' | 'remote', treePath: string): Promise<void> {
-  if (expandedTreePaths[pane].includes(treePath)) {
-    expandedTreePaths[pane] = expandedTreePaths[pane].filter((path) => path !== treePath);
+  const current = expandedPathsFor(pane);
+  if (current.includes(treePath)) {
+    setExpandedPathsFor(pane, current.filter((path) => path !== treePath));
     return;
   }
-  expandedTreePaths[pane] = [...expandedTreePaths[pane], treePath];
+  setExpandedPathsFor(pane, [...current, treePath]);
   const children = pane === 'local' ? localFiles.directoryChildren : sftp.directoryChildren;
   if (Object.prototype.hasOwnProperty.call(children, treePath)) return;
   if (pane === 'local') await localFiles.loadTreeDirectory(treePath);
@@ -236,6 +342,15 @@ watch(
     pathDrafts.remote = remotePath;
     if (localPath) void syncTreePath('local', localPath);
     if (remoteSessionId && remotePath && remotePath !== '.') void syncTreePath('remote', remotePath);
+  },
+  { immediate: true },
+);
+
+watch(
+  () => sessions.activeSession?.profileId ?? null,
+  (profileId) => {
+    bookmarkMenuPane.value = null;
+    if (profileId) void bookmarks.load(profileId);
   },
   { immediate: true },
 );
@@ -275,12 +390,79 @@ const fileMenu = ref<{
 } | null>(null);
 const fileMenuTrigger = ref<HTMLElement | null>(null);
 
+const filePaneKeyboard = useFilePaneKeyboard<LocalFileEntry | RemoteFileEntry>({
+  getEntries: (pane) => (pane === 'local' ? (localFiles.listing?.entries ?? []) : sftp.entries),
+  getSelectedPath: (pane) => (pane === 'local' ? localFiles.selectedPath : sftp.selectedPath),
+  selectEntry: (entry, pane) => selectPaneEntry(entry, pane),
+  isBlocked: () => !panelOpen.value
+    || view.value !== 'files'
+    || createDirectoryOpen.value
+    || createFileOpen.value
+    || renameDialogOpen.value
+    || moveDialogOpen.value
+    || copyDialogOpen.value
+    || permissionTarget.value !== null
+    || checksumDialogOpen.value
+    || syncPreviewDialogOpen.value
+    || fileMenu.value !== null
+    || bookmarkMenuPane.value !== null
+    || ui.settingsOpen
+    || ui.commandPaletteOpen
+    || ui.confirmation !== null,
+  onCopyLocal: () => copyLocalEntryForUpload(selectedLocalEntry.value),
+  onPasteUpload: (pane, event) => pasteUploadFromClipboard({
+    event,
+    pane,
+    dualPaneEnabled: dualPaneEnabled.value,
+    remoteReady: remoteReady.value,
+    quickSession: quickSession.value,
+  }),
+});
+const { typeaheadIndicator } = filePaneKeyboard;
+
+function handlePaneMousedown(pane: 'local' | 'remote', event: MouseEvent): void {
+  activePane.value = pane;
+  if (event.button !== 0) return;
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  if (target && !target.closest('button, input, select, textarea, a, [tabindex], .path-bookmarks-popover')) {
+    filePaneKeyboard.focusListContainer(pane);
+  }
+}
+
+watch(
+  () => [localFiles.loading, sftp.loading] as const,
+  ([localLoading, remoteLoading], [prevLocalLoading, prevRemoteLoading]) => {
+    if (!panelOpen.value || view.value !== 'files') return;
+    const localDone = prevLocalLoading && !localLoading && activePane.value === 'local';
+    const remoteDone = prevRemoteLoading && !remoteLoading && activePane.value === 'remote';
+    if ((localDone || remoteDone) && document.activeElement === document.body) {
+      const paneToFocus = activePane.value;
+      void nextTick(() => {
+        if (document.activeElement === document.body && panelOpen.value && view.value === 'files') {
+          filePaneKeyboard.focusListContainer(paneToFocus);
+        }
+      });
+    }
+  },
+);
+
+watch(
+  () => [localFiles.listing?.path ?? '', sftp.path, activePane.value, view.value, panelOpen.value] as const,
+  () => filePaneKeyboard.clearTypeahead(),
+);
+
 watch(
   () => [sessions.activeSessionId, sessions.activeSession?.state, panelOpen.value] as const,
   ([sessionId, state, open], previous) => {
     const previousSessionId = previous?.[0];
-    if (previousSessionId && previousSessionId !== sessionId) {
+    const sessionChanged = Boolean(previous) && previousSessionId !== sessionId;
+    if (previousSessionId && sessionChanged) {
+      viewBySession.set(previousSessionId, view.value);
+      paneBySession.set(previousSessionId, activePane.value);
       void externalEditors.stopForSession(previousSessionId);
+    }
+    if (sessionChanged) {
+      view.value = (sessionId && viewBySession.get(sessionId)) || 'files';
     }
     if (sessionId && state !== 'connected') {
       void externalEditors.stopForSession(sessionId);
@@ -303,28 +485,39 @@ watch(
       copyDialogOpen.value = false;
       copySourceEntry.value = null;
     }
-    if (sessionId && state === 'connected' && open) {
-      const sessionChanged = sftp.sessionId !== sessionId;
+    const canSftp = hasCapability(sessions.activeSession, 'sftp');
+    if (sessionId && state === 'connected' && open && canSftp) {
+      const restored = sftp.activateSession(sessionId);
       if (sessionChanged) {
-        sftp.clear();
-        expandedTreePaths.remote = ['/'];
+        activePane.value = paneBySession.get(sessionId) ?? 'remote';
       }
-      if (sessionChanged || previous?.[0] !== sessionId || previous?.[1] !== 'connected') {
+      const reconnectedSameSession = Boolean(
+        previous
+        && previous[0] === sessionId
+        && previous[1] !== undefined
+        && previous[1] !== 'connected',
+      );
+      if (!restored || reconnectedSameSession) {
         void loadRemotePath(sessionId, terminalCwd.value && followTerminal.value ? terminalCwd.value : '.');
       }
-    } else if (!sessionId || state !== 'connected') {
-      sftp.clear();
-      expandedTreePaths.remote = ['/'];
+    } else if (!sessionId || state !== 'connected' || !canSftp) {
+      sftp.activateSession(null);
       closeInlineDialogs();
-      activePane.value = 'remote';
+      activePane.value = isLocalSession(sessions.activeSession)
+        ? 'local'
+        : (sessionId ? (paneBySession.get(sessionId) ?? 'remote') : 'remote');
+      if (isLocalSession(sessions.activeSession) && open && !localFiles.listing && !localFiles.loading) {
+        void localFiles.load(terminalCwd.value ?? undefined);
+      }
     }
   },
   { immediate: true },
 );
 
 watch(dualPaneEnabled, (enabled) => {
-  if (enabled) void localFiles.load(localFiles.listing?.path);
-  else {
+  if (enabled) {
+    if (!localFiles.listing && !localFiles.loading) void localFiles.load();
+  } else {
     if (copyDialogOpen.value && copyTargetPane.value === 'local') {
       void requestCopyCancellation();
       closeCopyDialog();
@@ -338,11 +531,12 @@ watch(dualPaneEnabled, (enabled) => {
 // Follow-terminal: sync the remote pane to the shell's OSC 7 working directory.
 watch(
   () => [sessions.activeSessionId, terminalCwd.value, followTerminal.value, panelOpen.value] as const,
-  ([sessionId, cwd, follow, open]) => {
+  ([sessionId, cwd, follow, open], previous) => {
     if (!sessionId || !follow || !open || !cwd) return;
     const session = sessions.activeSession;
-    if (!session || session.id !== sessionId || session.state !== 'connected') return;
+    if (!session || session.id !== sessionId || session.state !== 'connected' || !hasCapability(session, 'sftp')) return;
     if (sftp.sessionId === sessionId && sftp.path === cwd) return;
+    if (previous?.[0] !== sessionId && sftp.hasSessionState(sessionId)) return;
     void loadRemotePath(sessionId, cwd);
   },
 );
@@ -404,7 +598,7 @@ onMounted(async () => {
         if (isTarget) void queueDroppedLocalPaths(event.payload.paths);
         return;
       }
-      nativeDropActive.value = isTarget && !dropBusy.value;
+      nativeDropActive.value = isTarget && !uploadBusy.value;
     });
     if (panelUnmounted) void unlisten();
     else unlistenNativeDrop = unlisten;
@@ -415,6 +609,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   panelUnmounted = true;
+  filePaneKeyboard.dispose();
   if (transferRefreshTimer !== null) window.clearTimeout(transferRefreshTimer);
   if (copyOperationId.value) void requestCopyCancellation();
   if (unlistenNativeDrop) {
@@ -585,31 +780,12 @@ async function queueNativeUpload(
     ui.notify(t(selected.error.messageKey as Parameters<typeof t>[0]));
     return;
   }
-  let queued = 0;
-  for (const path of selected.data.slice(0, 64)) {
-    const inspected = await inspectLocalEntry(path);
-    if (!inspected.ok) {
-      ui.notify(t(inspected.error.messageKey as Parameters<typeof t>[0]));
-      break;
-    }
-    const local = inspected.data;
-    if (local.isSymlink || (!local.isDirectory && local.size === null)) continue;
-    const queuedOk = await transfers.enqueue({
-      profileId: session.profileId,
-      direction: 'upload',
-      localPath: local.path,
-      remotePath: remoteJoin(destinationDirectory, local.name),
-      conflictPolicy: 'ask',
-      totalBytes: local.isDirectory ? null : local.size,
-    });
-    if (!queuedOk) break;
-    queued += 1;
-  }
-  if (queued > 0) {
-    settings.value.taskTab = 'transfers';
-    settings.value.taskDrawerOpen = true;
-    ui.notify(t('fileMenu.uploadQueued', { count: queued }));
-  }
+  await queueLocalPathsForUpload(selected.data, {
+    source: 'picker',
+    remoteDirectory: destinationDirectory,
+    remoteReady: remoteReady.value,
+    quickSession: quickSession.value,
+  });
 }
 
 async function runFileMenuAction(action: string): Promise<void> {
@@ -640,8 +816,16 @@ async function runFileMenuAction(action: string): Promise<void> {
     case 'copyPath':
       await copyContextPath();
       return;
+    case 'copyForUpload':
+      if (target.pane === 'local' && target.entry) {
+        await copyLocalEntryForUpload(target.entry);
+      }
+      return;
     case 'download':
       if (target.pane === 'remote' && target.entry) await openDownloadEntry(target.entry);
+      return;
+    case 'remoteRelay':
+      if (target.pane === 'remote' && target.entry) openRemoteRelayEntry(target.entry);
       return;
     case 'uploadFiles':
       await queueNativeUpload(
@@ -654,6 +838,15 @@ async function runFileMenuAction(action: string): Promise<void> {
         'folders',
         target.pane === 'remote' && target.entry?.isDirectory ? target.entry.path : sftp.path,
       );
+      return;
+    case 'pasteUpload':
+      await pasteUploadFromClipboard({
+        pane: 'remote',
+        dualPaneEnabled: dualPaneEnabled.value,
+        remoteReady: remoteReady.value,
+        quickSession: quickSession.value,
+        remoteDirectory: target.pane === 'remote' && target.entry?.isDirectory ? target.entry.path : sftp.path,
+      });
       return;
     case 'createFile':
       openCreateFile();
@@ -711,8 +904,12 @@ function localJoin(directory: string, name: string): string {
   return parent ? `${parent}${separator}${name}` : `${separator}${name}`;
 }
 
-function bindRemoteDropElement(element: Element | ComponentPublicInstance | null): void {
-  remoteDropElement.value = element instanceof HTMLElement ? element : null;
+function bindPaneListElement(
+  pane: 'local' | 'remote',
+  element: Element | ComponentPublicInstance | null,
+): void {
+  const resolved = filePaneKeyboard.bindListElement(pane, element);
+  if (pane === 'remote') remoteDropElement.value = resolved;
 }
 
 function isRemoteDropTarget(position: { x: number; y: number }): boolean {
@@ -725,71 +922,16 @@ function isRemoteDropTarget(position: { x: number; y: number }): boolean {
   return x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom;
 }
 
-function isSafeTransferName(name: string): boolean {
-  return name.length > 0
-    && name.length <= 255
-    && name !== '.'
-    && name !== '..'
-    // eslint-disable-next-line no-control-regex -- control characters must be detected here
-    && !/[\\/\u0000-\u001f\u007f]/u.test(name);
-}
-
 async function queueDroppedLocalPaths(paths: string[]): Promise<void> {
-  if (dropBusy.value) return;
-  const session = sessions.activeSession;
-  if (!session || !remoteReady.value || !panelOpen.value) return;
-  if (quickSession.value) {
-    ui.notify(t('quick.savedHint'));
-    return;
-  }
-  dropBusy.value = true;
-  nativeDropActive.value = false;
-  const sessionId = session.id;
-  const profileId = session.profileId;
-  const remoteRoot = sftp.path;
-  const distinctPaths = [...new Set(paths)];
-  let unsupported = Math.max(0, distinctPaths.length - 64);
-  let queued = 0;
-  try {
-    for (const path of distinctPaths.slice(0, 64)) {
-      if (!path || path.length > 4_096 || path.includes('\0')) {
-        unsupported += 1;
-        continue;
-      }
-      const inspected = await inspectLocalEntry(path);
-      if (!inspected.ok) {
-        transfers.error = inspected.error;
-        break;
-      }
-      const entry = inspected.data;
-      if (!isSafeTransferName(entry.name)
-        || entry.isSymlink
-        || (!entry.isDirectory && entry.size === null)) {
-        unsupported += 1;
-        continue;
-      }
-      const input: CreateTransferInput = {
-        profileId,
-        direction: 'upload',
-        localPath: entry.path,
-        remotePath: remoteJoin(remoteRoot, entry.name),
-        conflictPolicy: 'ask',
-        totalBytes: entry.isDirectory ? null : entry.size,
-      };
-      if (!await transfers.enqueue(input, sessionId)) break;
-      queued += 1;
-    }
-    if (queued > 0) {
-      settings.value.taskTab = 'transfers';
-      settings.value.taskDrawerOpen = true;
-      ui.notify(t('inspector.dropUploadQueued', { count: queued }));
-    }
-    if (unsupported > 0) ui.notify(t('inspector.dropUnsupportedItems', { count: unsupported }));
-  } catch {
-    ui.notify(t('inspector.dropFailed'));
-  } finally {
-    dropBusy.value = false;
-  }
+  if (!panelOpen.value) return;
+  await queueLocalPathsForUpload(paths, {
+    source: 'drop',
+    remoteReady: remoteReady.value,
+    quickSession: quickSession.value,
+    onBeforeStart: () => {
+      nativeDropActive.value = false;
+    },
+  });
 }
 
 function beginRemoteFileDrag(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote', event: DragEvent): void {
@@ -875,6 +1017,26 @@ async function openDownloadEntry(source: RemoteFileEntry): Promise<void> {
 async function openDownload(): Promise<void> {
   const source = selectedRemoteEntry.value;
   if (source) await openDownloadEntry(source);
+}
+
+function openRemoteRelayEntry(source: RemoteFileEntry): void {
+  if (!remoteReady.value || source.isSymlink) return;
+  if (quickSession.value) {
+    ui.notify(t('quick.savedHint'));
+    return;
+  }
+  const sourceProfileId = sessions.activeSession?.profileId;
+  const otherConnected = sessions.summaries.find((item) => (
+    item.sessionKind === 'ssh'
+    && item.state === 'connected'
+    && !sessions.isQuickProfile(item.profileId)
+    && item.profileId !== sourceProfileId
+  ));
+  const destProfileId = otherConnected?.profileId ?? sourceProfileId;
+  const destPath = otherConnected
+    ? remoteJoin(sessions.sessionCwd(otherConnected.id) || '/tmp', source.name)
+    : `${source.path.replace(/\/+$/, '')}.relay`;
+  ui.openTransfer('remote_to_remote', source.path, undefined, sourceProfileId, destProfileId, destPath);
 }
 
 async function openSelectedInEditor(): Promise<void> {
@@ -1460,6 +1622,29 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
         >
           <HelpCircle :size="12" />
         </button>
+        <span v-if="elevatedLease" class="elevated-badge mono" role="status">
+          <ShieldAlert :size="11" />
+          <span>{{ t('elevated.badgeCountdown', { remaining: elevatedRemaining }) }}</span>
+          <button
+            type="button"
+            class="elevated-badge-revoke"
+            :aria-label="t('elevated.revoke')"
+            @click="revokeElevation"
+          >
+            {{ t('elevated.revoke') }}
+          </button>
+        </span>
+        <button
+          v-else-if="!isLocalSession(sessions.activeSession)"
+          type="button"
+          class="icon-button"
+          :disabled="!remoteReady || !activeSshSessionId"
+          :aria-label="t('elevated.enableAction')"
+          :title="t('elevated.enableAction')"
+          @click="openElevatedAccess"
+        >
+          <ShieldAlert :size="12" />
+        </button>
         <span class="file-browser-panel-spacer" />
         <div class="file-toolbar-group">
           <button type="button" class="icon-button" :disabled="quickSession || !remoteReady || sftp.loading || (dualPaneEnabled && (activePane !== 'local' || !selectedLocalEntry || selectedLocalEntry.isSymlink))" :aria-label="t('inspector.uploadFile')" :title="quickSession ? t('quick.savedHint') : t('inspector.uploadFile')" @click="openUpload"><Upload :size="12" /></button>
@@ -1505,7 +1690,9 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
         :class="{ active: activePane === pane.id }"
         role="region"
         :aria-label="t(pane.label)"
-        @mousedown="activePane = pane.id"
+        @mousedown="handlePaneMousedown(pane.id, $event)"
+        @keydown="filePaneKeyboard.handlePaneKeydown(pane.id, $event)"
+        @paste="filePaneKeyboard.handlePanePaste(pane.id, $event)"
       >
         <header class="file-browser-pane-heading">
           <strong>{{ t(pane.label) }}</strong>
@@ -1522,6 +1709,47 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
               @keydown.esc.prevent="resetPathDraft(pane.id)"
             >
           </form>
+          <div class="pane-bookmark-actions" @keydown.esc.stop="bookmarkMenuPane = null">
+            <button
+              type="button"
+              class="icon-button"
+              :class="{ active: isPaneBookmarked(pane.id, pane.path) }"
+              :disabled="!pane.path || (pane.id === 'remote' && !remoteReady)"
+              :aria-pressed="isPaneBookmarked(pane.id, pane.path)"
+              :aria-label="t(isPaneBookmarked(pane.id, pane.path) ? 'files.removeBookmark' : 'files.addBookmark')"
+              :title="t(isPaneBookmarked(pane.id, pane.path) ? 'files.removeBookmark' : 'files.addBookmark')"
+              @click="togglePaneBookmark(pane.id, pane.path)"
+            >
+              <Bookmark :size="11" />
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              :disabled="pane.id === 'remote' && !remoteReady"
+              :aria-expanded="bookmarkMenuPane === pane.id"
+              :aria-label="t('files.bookmarksMenu')"
+              :title="t('files.bookmarksMenu')"
+              @click="toggleBookmarkMenu(pane.id)"
+            >
+              <ChevronDown :size="11" />
+            </button>
+            <div v-if="bookmarkMenuPane === pane.id" class="path-bookmarks-popover" role="region" :aria-label="t('files.bookmarksTitle')">
+              <div class="path-bookmarks-header">
+                <strong>{{ t('files.bookmarksTitle') }}</strong>
+                <button type="button" class="icon-button" :aria-label="t('app.dismissNotice')" @click="bookmarkMenuPane = null"><X :size="11" /></button>
+              </div>
+              <p v-if="paneBookmarks(pane.id).length === 0" class="path-bookmarks-empty">{{ t('files.bookmarksEmpty') }}</p>
+              <div v-for="bm in paneBookmarks(pane.id)" v-else :key="bm.id" class="path-bookmark-row">
+                <button type="button" class="path-bookmark-jump" @click="openBookmarkPath(pane.id, bm.path)">
+                  <strong>{{ bm.label }}</strong>
+                  <small class="mono">{{ bm.path }}</small>
+                </button>
+                <button type="button" class="icon-button" :aria-label="t('files.deleteBookmark', { label: bm.label })" @click="bookmarks.remove(sessions.activeSession?.profileId, bm.id)">
+                  <Trash2 :size="11" />
+                </button>
+              </div>
+            </div>
+          </div>
         </header>
         <div class="file-browser-pane-content">
           <DirectoryTree
@@ -1529,14 +1757,15 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
             :active-path="pane.path"
             :label="t('files.directoryTree')"
             :children-by-path="pane.id === 'local' ? localFiles.directoryChildren : sftp.directoryChildren"
-            :expanded-paths="expandedTreePaths[pane.id]"
+            :expanded-paths="expandedPathsFor(pane.id)"
             :loading-paths="pane.id === 'local' ? localFiles.directoryLoadingPaths : sftp.directoryLoadingPaths"
             :error-paths="pane.id === 'local' ? localFiles.directoryErrorPaths : sftp.directoryErrorPaths"
             @navigate="navigatePanePath(pane.id, $event)"
             @toggle="toggleTreePath(pane.id, $event)"
           />
           <div
-            :ref="pane.id === 'remote' ? bindRemoteDropElement : undefined"
+            :ref="(el) => bindPaneListElement(pane.id, el)"
+            tabindex="-1"
             class="file-list file-table"
             :class="{ 'file-list-drop-target': (pane.id === 'remote' && nativeDropActive) || (pane.id === 'local' && localDropActive) }"
             @dragover="allowRemoteFileDrop($event, pane.id)"
@@ -1557,12 +1786,19 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
             <div v-else-if="pane.entries.length === 0" class="task-empty">{{ t('inspector.emptyDirectory') }}</div>
             <template v-else>
               <p v-if="pane.truncated" class="dialog-note preview-truncated">{{ t('inspector.directoryTruncated') }}</p>
-              <VirtualList v-if="pane.entries.length > VIRTUALIZE_THRESHOLD" :items="pane.entries" :row-height="26" class="file-table-body">
+              <VirtualList
+                v-if="pane.entries.length > VIRTUALIZE_THRESHOLD"
+                :ref="(el) => filePaneKeyboard.bindVirtualList(pane.id, el)"
+                :items="pane.entries"
+                :row-height="26"
+                class="file-table-body"
+              >
                 <template #default="{ item }">
                   <button
                     type="button"
                     class="file-row file-table-row"
                     :class="{ selected: item.path === pane.selectedPath }"
+                    :data-entry-path="item.path"
                     :draggable="pane.id === 'remote' && !item.isSymlink"
                     @dragstart="beginRemoteFileDrag(item, pane.id, $event)"
                     @click="selectPaneEntry(item, pane.id)"
@@ -1587,6 +1823,7 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
                   type="button"
                   class="file-row file-table-row"
                   :class="{ selected: entry.path === pane.selectedPath }"
+                  :data-entry-path="entry.path"
                   :draggable="pane.id === 'remote' && !entry.isSymlink"
                   @dragstart="beginRemoteFileDrag(entry, pane.id, $event)"
                   @click="selectPaneEntry(entry, pane.id)"
@@ -1604,6 +1841,16 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
                 </button>
               </div>
             </template>
+            <div
+              v-if="typeaheadIndicator && typeaheadIndicator.pane === pane.id"
+              class="file-typeahead-pill mono"
+              :class="{ unmatched: !typeaheadIndicator.matched }"
+              role="status"
+              aria-live="polite"
+            >
+              <Search :size="11" aria-hidden="true" />
+              <span>{{ t(typeaheadIndicator.matched ? 'files.typeaheadMatch' : 'files.typeaheadNoMatch', { query: typeaheadIndicator.query }) }}</span>
+            </div>
             <div v-if="pane.id === 'remote' && nativeDropActive" class="file-drop-hint">{{ t('inspector.dropUploadHint') }}</div>
             <div v-if="pane.id === 'local' && localDropActive" class="file-drop-hint">{{ t('inspector.dropDownloadHint') }}</div>
           </div>
@@ -1681,6 +1928,7 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
       :quick-session="quickSession"
       :can-edit="fileMenu.entry ? !fileMenu.entry.isSymlink && (fileMenu.pane === 'local' || remoteReady) : true"
       :can-download="fileMenu.pane === 'remote' && Boolean(fileMenu.entry) && !fileMenu.entry?.isSymlink && !quickSession"
+      :can-remote-relay="fileMenu.pane === 'remote' && Boolean(fileMenu.entry) && !fileMenu.entry?.isSymlink && !quickSession && remoteReady"
       :can-permissions="fileMenu.pane === 'remote' && Boolean(fileMenu.entry) && !fileMenu.entry?.isSymlink && remoteReady"
       :can-quick-delete="fileMenu.pane === 'remote' && Boolean(fileMenu.entry) && fileMenu.entry?.path !== '/' && !fileMenu.entry?.isSymlink && remoteReady"
       :can-create="fileMenu.pane === 'local' ? Boolean(localFiles.listing) : remoteReady"

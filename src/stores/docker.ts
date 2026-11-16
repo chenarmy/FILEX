@@ -1,12 +1,19 @@
 import { ref } from 'vue';
 import { defineStore } from 'pinia';
 import { collectDockerLogs, collectDockerSnapshot, runDockerContainerAction } from '@/api/domain/dockerApi';
+import { createSessionStateCache } from '@/domain/sessionStateCache';
 import type {
   AppError,
   DockerContainerAction,
   DockerLogsSnapshot,
   DockerSnapshot,
 } from '@/types/contracts';
+
+interface DockerSessionCache {
+  snapshot: DockerSnapshot | null;
+  logs: DockerLogsSnapshot | null;
+  error: AppError | null;
+}
 
 export const useDockerStore = defineStore('docker', () => {
   const snapshot = ref<DockerSnapshot | null>(null);
@@ -15,19 +22,68 @@ export const useDockerStore = defineStore('docker', () => {
   const logsLoading = ref(false);
   const actingContainerId = ref<string | null>(null);
   const error = ref<AppError | null>(null);
+  const sessionCaches = createSessionStateCache<DockerSessionCache>();
   let snapshotSessionId: string | null = null;
   let generation = 0;
 
-  function syncSession(sessionId: string): void {
-    if (snapshotSessionId === sessionId) return;
-    generation += 1;
-    snapshotSessionId = sessionId;
+  function persistCurrentSession(): void {
+    if (!snapshotSessionId) return;
+    if (snapshot.value === null && logs.value === null && error.value === null) return;
+    sessionCaches.set(snapshotSessionId, {
+      snapshot: snapshot.value,
+      logs: logs.value,
+      error: error.value,
+    });
+  }
+
+  function resetActive(): void {
     snapshot.value = null;
     logs.value = null;
     error.value = null;
     loading.value = false;
     logsLoading.value = false;
     actingContainerId.value = null;
+  }
+
+  function activateSession(nextSessionId: string | null): boolean {
+    persistCurrentSession();
+    if (
+      nextSessionId !== null
+      && snapshotSessionId === nextSessionId
+      && (snapshot.value !== null || logs.value !== null || error.value !== null)
+    ) {
+      return true;
+    }
+    generation += 1;
+    snapshotSessionId = nextSessionId;
+    loading.value = false;
+    logsLoading.value = false;
+    actingContainerId.value = null;
+    if (nextSessionId !== null) {
+      const cached = sessionCaches.get(nextSessionId);
+      if (cached) {
+        snapshot.value = cached.snapshot;
+        logs.value = cached.logs;
+        error.value = cached.error;
+        return true;
+      }
+    }
+    resetActive();
+    return false;
+  }
+
+  function dropSession(sessionId: string): void {
+    sessionCaches.delete(sessionId);
+    if (snapshotSessionId === sessionId) {
+      generation += 1;
+      snapshotSessionId = null;
+      resetActive();
+    }
+  }
+
+  function syncSession(sessionId: string): void {
+    if (snapshotSessionId === sessionId) return;
+    activateSession(sessionId);
   }
 
   async function collect(sessionId: string): Promise<void> {
@@ -38,9 +94,10 @@ export const useDockerStore = defineStore('docker', () => {
     error.value = null;
     try {
       const result = await collectDockerSnapshot(sessionId);
-      if (request !== generation) return;
+      if (request !== generation || snapshotSessionId !== sessionId) return;
       if (result.ok) snapshot.value = result.data;
       else error.value = result.error;
+      persistCurrentSession();
     } finally {
       if (request === generation) loading.value = false;
     }
@@ -54,9 +111,10 @@ export const useDockerStore = defineStore('docker', () => {
     error.value = null;
     try {
       const result = await collectDockerLogs(sessionId, containerId, tailLines);
-      if (request !== generation) return;
+      if (request !== generation || snapshotSessionId !== sessionId) return;
       if (result.ok) logs.value = result.data;
       else error.value = result.error;
+      persistCurrentSession();
     } finally {
       if (request === generation) logsLoading.value = false;
     }
@@ -77,7 +135,10 @@ export const useDockerStore = defineStore('docker', () => {
       const result = await runDockerContainerAction(sessionId, containerId, action);
       if (request !== generation) return false;
       if (result.ok) succeeded = true;
-      else error.value = result.error;
+      else {
+        error.value = result.error;
+        persistCurrentSession();
+      }
     } finally {
       if (request === generation) actingContainerId.value = null;
     }
@@ -89,13 +150,8 @@ export const useDockerStore = defineStore('docker', () => {
 
   function clear(): void {
     generation += 1;
-    snapshotSessionId = null;
-    snapshot.value = null;
-    logs.value = null;
-    error.value = null;
-    loading.value = false;
-    logsLoading.value = false;
-    actingContainerId.value = null;
+    if (snapshotSessionId) sessionCaches.delete(snapshotSessionId);
+    resetActive();
   }
 
   return {
@@ -105,6 +161,8 @@ export const useDockerStore = defineStore('docker', () => {
     logsLoading,
     actingContainerId,
     error,
+    activateSession,
+    dropSession,
     collect,
     fetchLogs,
     performAction,

@@ -17,8 +17,24 @@ import {
   saveProfilePassword,
   writeTerminal,
 } from '@/api/domain/sessionsApi';
+import {
+  closeLocalTerminal,
+  listLocalShellOptions,
+  openLocalTerminal,
+} from '@/api/domain/localTerminalApi';
+import {
+  appendProfileCommandHistory,
+  clearProfileCommandHistory,
+  deleteProfileCommandHistoryEntry,
+  listProfileCommandHistory,
+} from '@/api/domain/commandHistoryApi';
 import { isTauriRuntime } from '@/api/common';
+import {
+  MAX_PROFILE_COMMAND_HISTORY_ENTRIES,
+  shouldExcludeCommandFromHistory,
+} from '@/domain/commandHistory';
 import { recordHostTrust } from '@/api/domain/trustApi';
+import { isLocalSession } from '@/domain/sessionCapabilities';
 import { useConnectionsStore } from '@/stores/connections';
 import { useEventsStore } from '@/stores/events';
 import { useTunnelsStore } from '@/stores/tunnels';
@@ -27,6 +43,10 @@ import type {
   AppError,
   ConnectionProfile,
   HostKeyChallenge,
+  LocalShellKind,
+  LocalShellOption,
+  OpenLocalTerminalInput,
+  ProfileCommandHistoryEntry,
   QuickConnectInput,
   SessionSummary,
 } from '@/types/contracts';
@@ -46,12 +66,31 @@ export const useSessionsStore = defineStore('sessions', () => {
   const outputBufferStarts = shallowRef<Record<string, number>>({});
   const outputRevision = ref(0);
   const sessionCwds = ref<Record<string, string>>({});
-  const commandHistory = ref<string[]>([]);
-  const COMMAND_HISTORY_LIMIT = 100;
+  const profileHistoryEntries = ref<Record<string, ProfileCommandHistoryEntry[]>>({});
+  const ephemeralHistoryEntries = ref<Record<string, ProfileCommandHistoryEntry[]>>({});
+  const loadedHistoryProfiles = new Set<string>();
+  const localShellOptions = ref<LocalShellOption[]>([]);
+  const localShellMetadata = ref<Record<string, {
+    shellKind: LocalShellKind;
+    shellLabel: string;
+    workingDirectory: string;
+  }>>({});
   let unlistenTerminal: UnlistenFn | null = null;
   const autoReconnectInFlight = new Set<string>();
   const suppressAutoReconnect = new Set<string>();
   const activeSession = computed(() => summaries.value.find((item) => item.id === activeSessionId.value) ?? null);
+  const activeHistoryPersisted = computed(() => isPersistedHistorySession(activeSession.value));
+  const commandHistoryEntries = computed<ProfileCommandHistoryEntry[]>(() => {
+    const current = activeSession.value;
+    if (!current) return ephemeralHistoryEntries.value['__default__'] ?? [];
+    if (isPersistedHistorySession(current)) {
+      return profileHistoryEntries.value[current.profileId] ?? [];
+    }
+    return ephemeralHistoryEntries.value[current.id] ?? [];
+  });
+  const commandHistory = computed<string[]>(() =>
+    [...commandHistoryEntries.value].reverse().map((entry) => entry.command),
+  );
 
   function profileForId(profileId: string | null | undefined): ConnectionProfile | null {
     if (!profileId) return null;
@@ -61,7 +100,61 @@ export const useSessionsStore = defineStore('sessions', () => {
   }
 
   function profileForSession(session: SessionSummary | null | undefined): ConnectionProfile | null {
-    return session ? profileForId(session.profileId) : null;
+    if (!session || isLocalSession(session)) return null;
+    return profileForId(session.profileId);
+  }
+
+  function localMetadataForSession(sessionId: string | null | undefined): {
+    shellKind: LocalShellKind;
+    shellLabel: string;
+    workingDirectory: string;
+  } | null {
+    return sessionId ? localShellMetadata.value[sessionId] ?? null : null;
+  }
+
+  async function loadLocalShellOptions(): Promise<LocalShellOption[]> {
+    const result = await listLocalShellOptions();
+    if (!result.ok) {
+      error.value = result.error;
+      return [];
+    }
+    localShellOptions.value = result.data;
+    return result.data;
+  }
+
+  async function openLocalSession(input: OpenLocalTerminalInput = {
+    shellKind: null,
+    workingDirectory: null,
+    columns: 120,
+    rows: 32,
+  }): Promise<boolean> {
+    if (busy.value) return false;
+    busy.value = true;
+    error.value = null;
+    try {
+      const result = await openLocalTerminal(input);
+      if (!result.ok) {
+        error.value = result.error;
+        useEventsStore().record('session', result.error.code, 'error');
+        return false;
+      }
+      localShellMetadata.value = {
+        ...localShellMetadata.value,
+        [result.data.session.id]: {
+          shellKind: result.data.shell.kind,
+          shellLabel: result.data.shell.label,
+          workingDirectory: result.data.workingDirectory,
+        },
+      };
+      upsert(result.data.session);
+      setSessionCwd(result.data.session.id, result.data.workingDirectory);
+      useEventsStore().record('session', 'LOCAL_TERMINAL_OPENED', 'success', {
+        sessionId: result.data.session.id,
+      });
+      return true;
+    } finally {
+      busy.value = false;
+    }
   }
 
   function isQuickProfile(profileId: string | null | undefined): boolean {
@@ -111,8 +204,31 @@ export const useSessionsStore = defineStore('sessions', () => {
     };
   }
 
+  function isPersistedHistorySession(session: SessionSummary | null | undefined): boolean {
+    return Boolean(session && session.sessionKind === 'ssh' && !isQuickProfile(session.profileId));
+  }
+
+  async function loadCommandHistory(profileId: string, force = false): Promise<void> {
+    if (!profileId || !isTauriRuntime()) return;
+    if (!force && loadedHistoryProfiles.has(profileId)) return;
+    loadedHistoryProfiles.add(profileId);
+    const result = await listProfileCommandHistory(profileId);
+    if (result.ok) {
+      profileHistoryEntries.value = {
+        ...profileHistoryEntries.value,
+        [profileId]: result.data,
+      };
+    } else {
+      loadedHistoryProfiles.delete(profileId);
+    }
+  }
+
   function profileSupportError(profile: ConnectionProfile): AppError | null {
-    if (profile.authenticationMethod === 'private_key' && !profile.identityFile?.trim()) {
+    if (
+      profile.authenticationMethod === 'private_key'
+      && !profile.identityFile?.trim()
+      && !profile.keyId?.trim()
+    ) {
       return {
         code: 'SSH_PRIVATE_KEY_PATH_REQUIRED',
         messageKey: 'profile.privateKeyPathRequired',
@@ -173,6 +289,9 @@ export const useSessionsStore = defineStore('sessions', () => {
     if (index >= 0) summaries.value[index] = summary;
     else summaries.value.push(summary);
     activeSessionId.value = summary.id;
+    if (isPersistedHistorySession(summary)) {
+      void loadCommandHistory(summary.profileId);
+    }
   }
 
   async function refreshSummary(sessionId: string): Promise<void> {
@@ -294,7 +413,7 @@ export const useSessionsStore = defineStore('sessions', () => {
   async function reconnectSession(sessionId: string, automatic = false): Promise<void> {
     if (!automatic) suppressAutoReconnect.delete(sessionId);
     const session = summaries.value.find((item) => item.id === sessionId);
-    if (!session || busy.value || !['disconnected', 'failed'].includes(session.state)) return;
+    if (!session || isLocalSession(session) || busy.value || !['disconnected', 'failed'].includes(session.state)) return;
     const profile = profileForId(session.profileId);
     if (!profile) {
       suppressAutoReconnect.add(sessionId);
@@ -622,12 +741,16 @@ export const useSessionsStore = defineStore('sessions', () => {
   async function disconnectActive(): Promise<void> {
     if (!activeSessionId.value || busy.value) return;
     const disconnectedId = activeSessionId.value;
-    const quickProfileId = summaries.value.find((item) => item.id === disconnectedId)?.profileId;
+    const current = summaries.value.find((item) => item.id === disconnectedId);
+    const quickProfileId = current?.profileId;
+    const localSession = isLocalSession(current);
     suppressAutoReconnect.add(disconnectedId);
     busy.value = true;
     error.value = null;
     try {
-      const result = await disconnectSession(activeSessionId.value);
+      const result = localSession
+        ? await closeLocalTerminal(activeSessionId.value)
+        : await disconnectSession(activeSessionId.value);
       if (!result.ok) {
         suppressAutoReconnect.delete(disconnectedId);
         clearQuickProfile(quickProfileId);
@@ -636,7 +759,7 @@ export const useSessionsStore = defineStore('sessions', () => {
       }
       upsert(result.data);
       clearQuickProfile(quickProfileId);
-      useEventsStore().record('session', 'SSH_DISCONNECTED', 'info', { sessionId: result.data.id });
+      useEventsStore().record('session', localSession ? 'LOCAL_TERMINAL_CLOSED' : 'SSH_DISCONNECTED', 'info', { sessionId: result.data.id });
     } finally {
       busy.value = false;
     }
@@ -673,13 +796,20 @@ export const useSessionsStore = defineStore('sessions', () => {
   }
 
   function selectSession(sessionId: string): void {
-    if (summaries.value.some((item) => item.id === sessionId)) activeSessionId.value = sessionId;
+    const found = summaries.value.find((item) => item.id === sessionId);
+    if (!found) return;
+    activeSessionId.value = sessionId;
+    if (isPersistedHistorySession(found)) {
+      void loadCommandHistory(found.profileId);
+    }
   }
 
-  /** Records the OSC 7 working directory reported by the session's shell. */
+  /** Records the working directory reported by the session's shell. */
   function setSessionCwd(sessionId: string, cwd: string): void {
     const trimmed = cwd.trim();
-    if (!trimmed.startsWith('/') || trimmed.length > 4096 || trimmed.includes('\0')) return;
+    const session = summaries.value.find((item) => item.id === sessionId);
+    const allowLocal = isLocalSession(session);
+    if ((!allowLocal && !trimmed.startsWith('/')) || trimmed.length > 4096 || trimmed.includes('\0')) return;
     if (sessionCwds.value[sessionId] === trimmed) return;
     sessionCwds.value = { ...sessionCwds.value, [sessionId]: trimmed };
   }
@@ -688,22 +818,116 @@ export const useSessionsStore = defineStore('sessions', () => {
     return sessionId ? sessionCwds.value[sessionId] ?? null : null;
   }
 
-  /** Appends a sent command to the bounded in-memory history; never persisted. */
-  function recordCommandHistory(command: string): void {
+  function upsertMemoryHistoryList(
+    list: ProfileCommandHistoryEntry[],
+    entry: ProfileCommandHistoryEntry,
+  ): ProfileCommandHistoryEntry[] {
+    const filtered = list.filter((item) => item.command !== entry.command);
+    filtered.unshift(entry);
+    if (filtered.length > MAX_PROFILE_COMMAND_HISTORY_ENTRIES) {
+      filtered.length = MAX_PROFILE_COMMAND_HISTORY_ENTRIES;
+    }
+    return filtered;
+  }
+
+  /** Appends a sent command to persisted profile history or session-only memory, excluding secrets. */
+  async function recordCommandHistory(command: string): Promise<boolean> {
     const trimmed = command.trim();
-    if (!trimmed) return;
-    const next = commandHistory.value.filter((item) => item !== trimmed);
-    next.push(trimmed);
-    while (next.length > COMMAND_HISTORY_LIMIT) next.shift();
-    commandHistory.value = next;
+    if (!trimmed || shouldExcludeCommandFromHistory(trimmed)) return false;
+
+    const current = activeSession.value;
+    if (isPersistedHistorySession(current) && current) {
+      const profileId = current.profileId;
+      if (isTauriRuntime()) {
+        const result = await appendProfileCommandHistory(profileId, trimmed);
+        if (!result.ok || !result.data) return false;
+        profileHistoryEntries.value = {
+          ...profileHistoryEntries.value,
+          [profileId]: upsertMemoryHistoryList(
+            profileHistoryEntries.value[profileId] ?? [],
+            result.data,
+          ),
+        };
+        return true;
+      }
+      const entry: ProfileCommandHistoryEntry = {
+        id: globalThis.crypto?.randomUUID?.() ?? `cmd-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        profileId,
+        command: trimmed,
+        createdAtMs: Date.now(),
+      };
+      profileHistoryEntries.value = {
+        ...profileHistoryEntries.value,
+        [profileId]: upsertMemoryHistoryList(profileHistoryEntries.value[profileId] ?? [], entry),
+      };
+      return true;
+    }
+
+    const bucketKey = current?.id ?? '__default__';
+    const entry: ProfileCommandHistoryEntry = {
+      id: globalThis.crypto?.randomUUID?.() ?? `cmd-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      profileId: current?.profileId ?? bucketKey,
+      command: trimmed,
+      createdAtMs: Date.now(),
+    };
+    ephemeralHistoryEntries.value = {
+      ...ephemeralHistoryEntries.value,
+      [bucketKey]: upsertMemoryHistoryList(ephemeralHistoryEntries.value[bucketKey] ?? [], entry),
+    };
+    return true;
   }
 
-  function clearCommandHistory(): void {
-    commandHistory.value = [];
+  async function clearCommandHistory(): Promise<void> {
+    const current = activeSession.value;
+    if (isPersistedHistorySession(current) && current) {
+      const profileId = current.profileId;
+      if (isTauriRuntime()) {
+        const result = await clearProfileCommandHistory(profileId);
+        if (!result.ok) {
+          error.value = result.error;
+          return;
+        }
+      }
+      profileHistoryEntries.value = {
+        ...profileHistoryEntries.value,
+        [profileId]: [],
+      };
+      return;
+    }
+    const bucketKey = current?.id ?? '__default__';
+    const next = { ...ephemeralHistoryEntries.value };
+    delete next[bucketKey];
+    ephemeralHistoryEntries.value = next;
   }
 
-  function removeCommandHistory(command: string): void {
-    commandHistory.value = commandHistory.value.filter((item) => item !== command);
+  async function removeCommandHistory(command: string): Promise<void> {
+    const target = commandHistoryEntries.value.find((item) => item.command === command);
+    if (!target) return;
+    await removeCommandHistoryEntry(target.id);
+  }
+
+  async function removeCommandHistoryEntry(entryId: string): Promise<void> {
+    const current = activeSession.value;
+    if (isPersistedHistorySession(current) && current) {
+      const profileId = current.profileId;
+      if (isTauriRuntime()) {
+        const result = await deleteProfileCommandHistoryEntry(profileId, entryId);
+        if (!result.ok) {
+          error.value = result.error;
+          return;
+        }
+      }
+      profileHistoryEntries.value = {
+        ...profileHistoryEntries.value,
+        [profileId]: (profileHistoryEntries.value[profileId] ?? []).filter((item) => item.id !== entryId),
+      };
+      return;
+    }
+    const bucketKey = current?.id ?? '__default__';
+    ephemeralHistoryEntries.value = {
+      ...ephemeralHistoryEntries.value,
+      [bucketKey]: (ephemeralHistoryEntries.value[bucketKey] ?? []).filter((item) => item.id !== entryId),
+    };
   }
 
   async function closeSession(sessionId: string): Promise<void> {
@@ -716,6 +940,9 @@ export const useSessionsStore = defineStore('sessions', () => {
     }
     clearQuickProfile(profileId);
     summaries.value = summaries.value.filter((item) => item.id !== sessionId);
+    const nextEphemeral = { ...ephemeralHistoryEntries.value };
+    delete nextEphemeral[sessionId];
+    ephemeralHistoryEntries.value = nextEphemeral;
     const nextBuffers = { ...outputBuffers.value };
     delete nextBuffers[sessionId];
     outputBuffers.value = nextBuffers;
@@ -725,6 +952,9 @@ export const useSessionsStore = defineStore('sessions', () => {
     const nextCwds = { ...sessionCwds.value };
     delete nextCwds[sessionId];
     sessionCwds.value = nextCwds;
+    const nextLocalMeta = { ...localShellMetadata.value };
+    delete nextLocalMeta[sessionId];
+    localShellMetadata.value = nextLocalMeta;
     if (activeSessionId.value === sessionId) {
       activeSessionId.value = summaries.value.at(-1)?.id ?? null;
     }
@@ -758,11 +988,12 @@ export const useSessionsStore = defineStore('sessions', () => {
         const index = summaries.value.findIndex((item) => item.id === payload.sessionId);
         const current = summaries.value[index];
         const quickSession = Boolean(current && isQuickProfile(current.profileId));
+        const localSession = isLocalSession(current);
         if (current) summaries.value[index] = { ...current, state: 'disconnected' };
         useEventsStore().record('session', payload.kind === 'exit' ? 'PTY_EXITED' : 'PTY_CLOSED', 'warning', { sessionId: payload.sessionId, exitStatus: payload.exitStatus ?? -1 });
         if (payload.kind === 'closed' && current) {
           clearQuickProfile(current.profileId);
-          if (quickSession) suppressAutoReconnect.add(payload.sessionId);
+          if (quickSession || localSession) suppressAutoReconnect.add(payload.sessionId);
           else void autoReconnect(payload.sessionId);
         }
       }
@@ -798,6 +1029,27 @@ export const useSessionsStore = defineStore('sessions', () => {
     void cancelPendingAttempt();
   }
 
+  function syncElevatedCapability(sessionId: string, elevated: boolean): void {
+    const index = summaries.value.findIndex((item) => item.id === sessionId);
+    const current = summaries.value[index];
+    if (!current || current.sessionKind !== 'ssh') return;
+    const nextCapabilities = elevated
+      ? Array.from(new Set([...current.capabilities, 'elevated_file_access' as const]))
+      : current.capabilities.filter((item) => item !== 'elevated_file_access');
+    summaries.value[index] = {
+      ...current,
+      capabilities: nextCapabilities,
+    };
+  }
+
+  async function refreshSummaries(): Promise<void> {
+    if (!isTauriRuntime()) return;
+    const result = await listSessions();
+    if (!result.ok) return;
+    const remoteById = new Map(result.data.map((item) => [item.id, item]));
+    summaries.value = summaries.value.map((item) => remoteById.get(item.id) ?? item);
+  }
+
   return {
     summaries,
     activeSessionId,
@@ -817,9 +1069,18 @@ export const useSessionsStore = defineStore('sessions', () => {
     sessionCwd,
     setSessionCwd,
     commandHistory,
+    commandHistoryEntries,
+    activeHistoryPersisted,
+    loadCommandHistory,
     recordCommandHistory,
     clearCommandHistory,
     removeCommandHistory,
+    removeCommandHistoryEntry,
+    localShellOptions,
+    localShellMetadata,
+    localMetadataForSession,
+    loadLocalShellOptions,
+    openLocalSession,
     profileForId,
     profileForSession,
     isQuickProfile,
@@ -841,5 +1102,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     dismissChallenge,
     dismissPassword,
     dismissPrivateKeyPassphrase,
+    syncElevatedCapability,
+    refreshSummaries,
   };
 });

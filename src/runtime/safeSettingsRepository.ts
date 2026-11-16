@@ -1,4 +1,5 @@
 import type { SafeSettings } from '@/types/contracts';
+import { normalizeTextEncoding } from '@/domain/encodings';
 import { normalizeTerminalTheme } from '@/domain/terminalThemes';
 import { DEFAULT_TERMINAL_FONT_FAMILY, LEGACY_TERMINAL_FONT_FAMILY } from '@/domain/terminalInteractions';
 import { DEFAULT_KEYBOARD_SHORTCUTS, normalizeKeyboardShortcuts } from '@/utils/keyboardShortcuts';
@@ -41,6 +42,7 @@ export const defaultSafeSettings: SafeSettings = {
   textEditorPreference: 'internal',
   externalEditorPath: null,
   terminalLogging: false,
+  compactComposerOpen: false,
   backupSchedule: 'daily',
   updateChannel: 'stable',
   shortcuts: { ...DEFAULT_KEYBOARD_SHORTCUTS },
@@ -67,8 +69,7 @@ function normalizeSettings(input: Partial<SafeSettings>): SafeSettings {
   const themes = ['system', 'dark', 'light'] as const;
   const locales = ['zh-CN', 'en-US'] as const;
   const inspectorTabs = ['files', 'monitor', 'session'] as const;
-  const taskTabs = ['transfers', 'tunnels', 'events'] as const;
-  const terminalEncodings = ['utf-8', 'gbk', 'big5', 'shift_jis', 'windows-1252'] as const;
+  const taskTabs = ['all', 'transfers', 'jobs', 'tunnels', 'events'] as const;
 
   return {
     theme: themes.includes(input.theme as typeof themes[number]) ? input.theme as SafeSettings['theme'] : 'system',
@@ -82,9 +83,7 @@ function normalizeSettings(input: Partial<SafeSettings>): SafeSettings {
       : input.terminalFontFamily?.slice(0, 160) || defaultSafeSettings.terminalFontFamily,
     terminalFontSize: clampNumber(input.terminalFontSize, 11, 24, defaultSafeSettings.terminalFontSize),
     terminalTheme: normalizeTerminalTheme(input.terminalTheme),
-    terminalEncoding: terminalEncodings.includes(input.terminalEncoding as typeof terminalEncodings[number])
-      ? input.terminalEncoding as SafeSettings['terminalEncoding']
-      : defaultSafeSettings.terminalEncoding,
+    terminalEncoding: normalizeTextEncoding(input.terminalEncoding, defaultSafeSettings.terminalEncoding),
     terminalScrollback: [5_000, 10_000, 25_000].includes(input.terminalScrollback ?? 0)
       ? input.terminalScrollback!
       : defaultSafeSettings.terminalScrollback,
@@ -122,6 +121,7 @@ function normalizeSettings(input: Partial<SafeSettings>): SafeSettings {
     textEditorPreference: input.textEditorPreference === 'external' ? 'external' : 'internal',
     externalEditorPath: normalizeExternalEditorPath(input.externalEditorPath),
     terminalLogging: input.terminalLogging === true,
+    compactComposerOpen: input.compactComposerOpen === true,
     backupSchedule: ['off', 'daily', 'weekly'].includes(input.backupSchedule ?? '')
       ? input.backupSchedule as SafeSettings['backupSchedule']
       : defaultSafeSettings.backupSchedule,

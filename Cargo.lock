@@ -1478,7 +1478,7 @@ dependencies = [
 
 [[package]]
 name = "filex-contracts"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "serde",
  "uuid",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "filex-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "filex-contracts",
  "serde_json",
@@ -1495,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "filex-credentials"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "filex-contracts",
  "keyring",
@@ -1506,13 +1506,14 @@ dependencies = [
 
 [[package]]
 name = "filex-desktop"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "base64 0.23.1",
  "encoding_rs",
  "filex-contracts",
  "filex-core",
  "filex-credentials",
+ "filex-local-terminal",
  "filex-ssh",
  "filex-storage",
  "futures-util",
@@ -1535,8 +1536,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "filex-local-terminal"
+version = "0.1.8"
+dependencies = [
+ "filex-contracts",
+ "libc",
+ "tokio",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "filex-ssh"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "filex-contracts",
  "rand",
@@ -1549,7 +1561,7 @@ dependencies = [
 
 [[package]]
 name = "filex-storage"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "filex-contracts",
  "filex-core",

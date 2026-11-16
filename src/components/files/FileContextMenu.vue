@@ -4,6 +4,7 @@ import {
   Check,
   ChevronRight,
   Clipboard,
+  ArrowLeftRight,
   Download,
   Edit3,
   ExternalLink,
@@ -35,9 +36,12 @@ type FileContextMenuAction =
   | 'selectExternal'
   | 'configureExternal'
   | 'copyPath'
+  | 'copyForUpload'
   | 'download'
+  | 'remoteRelay'
   | 'uploadFiles'
   | 'uploadFolders'
+  | 'pasteUpload'
   | 'createFile'
   | 'createFolder'
   | 'rename'
@@ -54,6 +58,7 @@ const props = defineProps<{
   quickSession: boolean;
   canEdit: boolean;
   canDownload: boolean;
+  canRemoteRelay: boolean;
   canPermissions: boolean;
   canQuickDelete: boolean;
   canCreate: boolean;
@@ -237,16 +242,31 @@ onBeforeUnmount(() => {
       <button type="button" role="menuitem" :disabled="!entry" @click="run('copyPath')">
         <Clipboard :size="13" />{{ t('fileMenu.copyPath') }}
       </button>
+      <button
+        v-if="pane === 'local'"
+        type="button"
+        role="menuitem"
+        :disabled="!entry || entry.isSymlink"
+        @click="run('copyForUpload')"
+      >
+        <Upload :size="13" />{{ t('fileMenu.copyForUpload') }}
+      </button>
 
       <div class="file-context-separator" />
       <button type="button" role="menuitem" :disabled="!canDownload" @click="run('download')">
         <Download :size="13" />{{ t('fileMenu.download') }}
+      </button>
+      <button type="button" role="menuitem" :disabled="!canRemoteRelay" @click="run('remoteRelay')">
+        <ArrowLeftRight :size="13" />{{ t('fileMenu.remoteRelay') }}
       </button>
       <button type="button" role="menuitem" :disabled="!canUpload" @click="run('uploadFiles')">
         <Upload :size="13" />{{ t('fileMenu.uploadFiles') }}
       </button>
       <button type="button" role="menuitem" :disabled="!canUpload" @click="run('uploadFolders')">
         <MoveUpRight :size="13" />{{ t('fileMenu.uploadFolders') }}
+      </button>
+      <button type="button" role="menuitem" :disabled="!canUpload" @click="run('pasteUpload')">
+        <Clipboard :size="13" />{{ t('fileMenu.pasteUpload') }}
       </button>
 
       <div class="file-context-separator" />

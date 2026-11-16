@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { FileCode2, RefreshCw, Save, X } from 'lucide-vue-next';
 import type * as MonacoApi from 'monaco-editor/editor/editor.api';
 import { resolveTerminalThemeAppearance } from '@/domain/terminalThemes';
+import { SUPPORTED_TEXT_ENCODINGS, normalizeTextEncoding } from '@/domain/encodings';
 import { t } from '@/i18n';
 import { editorLanguageForPath, useEditorStore } from '@/stores/editor';
 import { useSettingsStore } from '@/stores/settings';
@@ -155,6 +156,14 @@ onBeforeUnmount(() => {
 function tabBadge(side: 'local' | 'remote'): string {
   return side === 'local' ? t('inspector.localPane') : t('inspector.remotePane');
 }
+
+function handleEncodingChange(event: Event): void {
+  const tab = editor.activeTab;
+  if (!tab) return;
+  const target = event.target as HTMLSelectElement | null;
+  if (!target) return;
+  void editor.setEncoding(tab.id, normalizeTextEncoding(target.value, tab.encoding));
+}
 </script>
 
 <template>
@@ -189,6 +198,17 @@ function tabBadge(side: 'local' | 'remote'): string {
         </button>
       </div>
       <span class="editor-tabs-spacer" />
+      <select
+        v-if="editor.activeTab"
+        class="text-encoding-select"
+        :value="editor.activeTab.encoding"
+        :disabled="editor.activeTab.loading || editor.activeTab.saving"
+        :aria-label="t('editor.encoding')"
+        :title="t('editor.encoding')"
+        @change="handleEncodingChange"
+      >
+        <option v-for="item in SUPPORTED_TEXT_ENCODINGS" :key="item.value" :value="item.value">{{ item.label }}</option>
+      </select>
       <button
         type="button"
         class="icon-button"

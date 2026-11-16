@@ -1,3 +1,11 @@
+pub mod command_history;
+pub mod key_proxy;
+pub mod path_bookmarks;
+
+pub use command_history::*;
+pub use key_proxy::*;
+pub use path_bookmarks::*;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,9 +15,10 @@ use filex_contracts::{
     CreateConnectionProfileInput, CreateTransferInput, CreateTunnelRuleInput, DiskMount,
     HostTrustEvaluation, HostTrustRecord, ImportKnownHostsInput, ImportKnownHostsResult,
     KeyboardShortcuts, MonitorState, PortableConnectionProfile, PortableConnectionRouteHop,
-    RecordHostTrustInput, RemoteState, SafeSettings, SessionState, SessionSummary,
-    SshConfigImportCandidate, SystemMonitorSnapshot, TransferState, TransferTask, TunnelKind,
-    TunnelRule, UpdateConnectionProfileInput, UpdateTunnelRuleInput,
+    RecordHostTrustInput, RemoteState, SafeSettings, SessionKind, SessionState, SessionSummary,
+    SshConfigImportCandidate, SystemMonitorSnapshot, TransferDirection, TransferResumeState,
+    TransferState, TransferTask, TunnelKind, TunnelRule, UpdateConnectionProfileInput,
+    UpdateTunnelRuleInput, capabilities_for_ssh,
 };
 
 pub const PORTABLE_PROFILE_EXPORT_MAX_PROFILES: usize = 10_000;
@@ -106,6 +115,7 @@ pub fn default_safe_settings() -> SafeSettings {
         text_editor_preference: "internal".to_owned(),
         external_editor_path: None,
         terminal_logging: false,
+        compact_composer_open: false,
         backup_schedule: "daily".to_owned(),
         update_channel: "stable".to_owned(),
         shortcuts: KeyboardShortcuts::default(),
@@ -136,15 +146,26 @@ fn validate_safe_settings(settings: &SafeSettings) -> Result<(), AppError> {
             "light",
         ]
         .contains(&settings.terminal_theme.as_str())
-        && ["utf-8", "gbk", "big5", "shift_jis", "windows-1252"]
-            .contains(&settings.terminal_encoding.as_str())
+        && [
+            "utf-8",
+            "utf-16le",
+            "utf-16be",
+            "gbk",
+            "gb18030",
+            "big5",
+            "shift_jis",
+            "euc-jp",
+            "euc-kr",
+            "windows-1252",
+        ]
+        .contains(&settings.terminal_encoding.as_str())
         && [5_000, 10_000, 25_000].contains(&settings.terminal_scrollback)
         && [10, 15, 30, 60].contains(&settings.connection_timeout_seconds)
         && [0, 15, 30, 60].contains(&settings.keepalive_seconds)
         && settings.reconnect_attempts <= 5
         && [15, 30, 60].contains(&settings.monitor_interval_seconds)
         && ["files", "monitor", "session"].contains(&settings.inspector_tab.as_str())
-        && ["transfers", "tunnels", "events"].contains(&settings.task_tab.as_str())
+        && ["all", "transfers", "jobs", "tunnels", "events"].contains(&settings.task_tab.as_str())
         && (180..=420).contains(&settings.connections_pane_width)
         && (220..=760).contains(&settings.inspector_pane_width)
         && (300..=520).contains(&settings.assistant_pane_width)
@@ -275,6 +296,7 @@ pub trait TransferRepository: Send + Sync {
     fn get(&self, id: &str) -> Result<Option<TransferTask>, AppError>;
     fn insert(&self, task: &TransferTask) -> Result<(), AppError>;
     fn update(&self, task: &TransferTask) -> Result<(), AppError>;
+    fn delete_terminal_transfers(&self) -> Result<u64, AppError>;
 }
 
 pub trait TunnelRuleRepository: Send + Sync {
@@ -433,24 +455,67 @@ impl TransferService {
     }
 
     pub fn enqueue(&self, input: CreateTransferInput) -> Result<TransferTask, AppError> {
-        if input.profile_id.trim().is_empty()
-            || input.local_path.trim().is_empty()
-            || input.remote_path.trim().is_empty()
-        {
-            return Err(validation_error("transfer.pathRequired", "path"));
-        }
+        let (local_path, destination_profile_id, destination_remote_path) = match input.direction {
+            TransferDirection::RemoteToRemote => {
+                let dest_profile = input
+                    .destination_profile_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        validation_error("transfer.destinationRequired", "destinationProfileId")
+                    })?
+                    .to_owned();
+                let dest_path = input
+                    .destination_remote_path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        validation_error("transfer.destinationRequired", "destinationRemotePath")
+                    })?
+                    .to_owned();
+                if input.profile_id.trim().is_empty() || input.remote_path.trim().is_empty() {
+                    return Err(validation_error("transfer.pathRequired", "path"));
+                }
+                if dest_profile == input.profile_id.trim() && dest_path == input.remote_path.trim()
+                {
+                    return Err(validation_error(
+                        "transfer.sameEndpoint",
+                        "destinationRemotePath",
+                    ));
+                }
+                (String::new(), Some(dest_profile), Some(dest_path))
+            }
+            TransferDirection::Upload | TransferDirection::Download => {
+                if input.profile_id.trim().is_empty()
+                    || input.local_path.trim().is_empty()
+                    || input.remote_path.trim().is_empty()
+                {
+                    return Err(validation_error("transfer.pathRequired", "path"));
+                }
+                (input.local_path, None, None)
+            }
+        };
         let now = now_ms()?;
         let task = TransferTask {
             id: uuid::Uuid::new_v4().to_string(),
             profile_id: input.profile_id,
             session_id: None,
             direction: input.direction,
-            local_path: input.local_path,
+            local_path,
             remote_path: input.remote_path,
+            destination_profile_id,
+            destination_session_id: None,
+            destination_remote_path,
             state: TransferState::Queued,
             bytes_transferred: 0,
             total_bytes: input.total_bytes,
             conflict_policy: input.conflict_policy,
+            remote_size_bytes: input.total_bytes,
+            remote_mtime_ms: None,
+            staging_path: None,
+            resume_state: TransferResumeState::NotApplicable,
             error: None,
             created_at_ms: now,
             updated_at_ms: now,
@@ -468,6 +533,10 @@ impl TransferService {
             return Err(transfer_transition_error());
         }
         task.state = TransferState::Cancelled;
+        task.session_id = None;
+        task.destination_session_id = None;
+        task.staging_path = None;
+        task.resume_state = TransferResumeState::NotApplicable;
         task.updated_at_ms = now_ms()?;
         self.repository.update(&task)?;
         Ok(task)
@@ -480,7 +549,41 @@ impl TransferService {
         }
         task.state = TransferState::Paused;
         task.bytes_transferred = bytes_transferred;
+        if task.resume_state != TransferResumeState::IdentityChanged {
+            task.resume_state = if task.staging_path.is_some() {
+                TransferResumeState::SafeToResume
+            } else {
+                TransferResumeState::RestartFromBeginning
+            };
+        }
         task.error = None;
+        task.updated_at_ms = now_ms()?;
+        self.repository.update(&task)?;
+        Ok(task)
+    }
+
+    pub fn interrupt(
+        &self,
+        id: &str,
+        bytes_transferred: u64,
+        error: AppError,
+    ) -> Result<TransferTask, AppError> {
+        let mut task = self.task(id)?;
+        if !matches!(task.state, TransferState::Running | TransferState::Paused) {
+            return Err(transfer_transition_error());
+        }
+        task.state = TransferState::Paused;
+        task.session_id = None;
+        task.destination_session_id = None;
+        task.bytes_transferred = task.bytes_transferred.max(bytes_transferred);
+        if task.resume_state != TransferResumeState::IdentityChanged {
+            task.resume_state = if task.staging_path.is_some() {
+                TransferResumeState::SafeToResume
+            } else {
+                TransferResumeState::RestartFromBeginning
+            };
+        }
+        task.error = Some(error);
         task.updated_at_ms = now_ms()?;
         self.repository.update(&task)?;
         Ok(task)
@@ -491,7 +594,112 @@ impl TransferService {
         if task.state != TransferState::Paused {
             return Err(transfer_transition_error());
         }
+        if task.resume_state == TransferResumeState::IdentityChanged {
+            return Err(transfer_identity_changed_error());
+        }
         task.state = TransferState::Running;
+        task.error = None;
+        task.updated_at_ms = now_ms()?;
+        self.repository.update(&task)?;
+        Ok(task)
+    }
+
+    /// Transitions a paused or retryable staged task into Running while preserving its checkpoint metadata.
+    pub fn prepare_checkpoint_resume(
+        &self,
+        id: &str,
+        session_id: &str,
+        destination_session_id: Option<&str>,
+    ) -> Result<TransferTask, AppError> {
+        let mut task = self.task(id)?;
+        if session_id.trim().is_empty() {
+            return Err(transfer_transition_error());
+        }
+        let resumable_failed = task.state == TransferState::Failed
+            && task.staging_path.is_some()
+            && task.error.as_ref().is_some_and(|err| err.retryable);
+        if task.state != TransferState::Paused && !resumable_failed {
+            return Err(transfer_transition_error());
+        }
+        if task.resume_state == TransferResumeState::IdentityChanged {
+            return Err(transfer_identity_changed_error());
+        }
+        if task.direction == TransferDirection::RemoteToRemote
+            && destination_session_id.is_none_or(|id| id.trim().is_empty())
+        {
+            return Err(transfer_transition_error());
+        }
+        task.state = TransferState::Running;
+        task.session_id = Some(session_id.to_owned());
+        task.destination_session_id = destination_session_id.map(str::to_owned);
+        task.error = None;
+        task.updated_at_ms = now_ms()?;
+        self.repository.update(&task)?;
+        Ok(task)
+    }
+
+    pub fn record_resume_metadata(
+        &self,
+        id: &str,
+        source_size_bytes: Option<u64>,
+        source_mtime_ms: Option<u64>,
+        staging_path: Option<String>,
+        resume_state: TransferResumeState,
+    ) -> Result<TransferTask, AppError> {
+        let mut task = self.task(id)?;
+        if matches!(
+            task.state,
+            TransferState::Completed | TransferState::Cancelled
+        ) {
+            return Err(transfer_transition_error());
+        }
+        task.remote_size_bytes = source_size_bytes;
+        if let Some(total) = source_size_bytes {
+            task.total_bytes = Some(total);
+        }
+        task.remote_mtime_ms = source_mtime_ms;
+        task.staging_path = staging_path;
+        task.resume_state = resume_state;
+        task.updated_at_ms = now_ms()?;
+        self.repository.update(&task)?;
+        Ok(task)
+    }
+
+    pub fn mark_identity_changed(
+        &self,
+        id: &str,
+        error: AppError,
+    ) -> Result<TransferTask, AppError> {
+        let mut task = self.task(id)?;
+        if !matches!(task.state, TransferState::Running | TransferState::Paused) {
+            return Err(transfer_transition_error());
+        }
+        task.state = TransferState::Paused;
+        task.session_id = None;
+        task.destination_session_id = None;
+        task.resume_state = TransferResumeState::IdentityChanged;
+        task.error = Some(error);
+        task.updated_at_ms = now_ms()?;
+        self.repository.update(&task)?;
+        Ok(task)
+    }
+
+    /// Clears staged progress and identity metadata and re-queues the task from byte 0.
+    pub fn reset_staging(&self, id: &str) -> Result<TransferTask, AppError> {
+        let mut task = self.task(id)?;
+        if !matches!(
+            task.state,
+            TransferState::Paused | TransferState::Failed | TransferState::Cancelled
+        ) {
+            return Err(transfer_transition_error());
+        }
+        task.state = TransferState::Queued;
+        task.bytes_transferred = 0;
+        task.session_id = None;
+        task.destination_session_id = None;
+        task.remote_mtime_ms = None;
+        task.staging_path = None;
+        task.resume_state = TransferResumeState::NotApplicable;
         task.error = None;
         task.updated_at_ms = now_ms()?;
         self.repository.update(&task)?;
@@ -509,6 +717,10 @@ impl TransferService {
         task.state = TransferState::Queued;
         task.bytes_transferred = 0;
         task.session_id = None;
+        task.destination_session_id = None;
+        task.remote_mtime_ms = None;
+        task.staging_path = None;
+        task.resume_state = TransferResumeState::NotApplicable;
         task.error = None;
         task.updated_at_ms = now_ms()?;
         self.repository.update(&task)?;
@@ -516,12 +728,27 @@ impl TransferService {
     }
 
     pub fn start(&self, id: &str, session_id: &str) -> Result<TransferTask, AppError> {
+        self.start_with_destination(id, session_id, None)
+    }
+
+    pub fn start_with_destination(
+        &self,
+        id: &str,
+        session_id: &str,
+        destination_session_id: Option<&str>,
+    ) -> Result<TransferTask, AppError> {
         let mut task = self.task(id)?;
         if task.state != TransferState::Queued || session_id.trim().is_empty() {
             return Err(transfer_transition_error());
         }
+        if task.direction == TransferDirection::RemoteToRemote
+            && destination_session_id.is_none_or(|id| id.trim().is_empty())
+        {
+            return Err(transfer_transition_error());
+        }
         task.state = TransferState::Running;
         task.session_id = Some(session_id.to_owned());
+        task.destination_session_id = destination_session_id.map(str::to_owned);
         task.error = None;
         task.updated_at_ms = now_ms()?;
         self.repository.update(&task)?;
@@ -535,6 +762,8 @@ impl TransferService {
         }
         task.state = TransferState::Completed;
         task.bytes_transferred = bytes_transferred;
+        task.staging_path = None;
+        task.resume_state = TransferResumeState::NotApplicable;
         task.error = None;
         task.updated_at_ms = now_ms()?;
         self.repository.update(&task)?;
@@ -569,6 +798,15 @@ impl TransferService {
             return Err(transfer_transition_error());
         }
         task.state = TransferState::Failed;
+        task.session_id = None;
+        task.destination_session_id = None;
+        if task.resume_state != TransferResumeState::IdentityChanged {
+            task.resume_state = if task.staging_path.is_some() && error.retryable {
+                TransferResumeState::SafeToResume
+            } else {
+                TransferResumeState::RestartFromBeginning
+            };
+        }
         task.error = Some(error);
         task.updated_at_ms = now_ms()?;
         self.repository.update(&task)?;
@@ -581,6 +819,15 @@ impl TransferService {
             if task.state == TransferState::Running {
                 task.state = TransferState::Paused;
                 task.session_id = None;
+                task.destination_session_id = None;
+                if task.resume_state != TransferResumeState::IdentityChanged {
+                    task.resume_state =
+                        if task.staging_path.is_some() && task.remote_size_bytes.is_some() {
+                            TransferResumeState::SafeToResume
+                        } else {
+                            TransferResumeState::RestartFromBeginning
+                        };
+                }
                 task.error = Some(AppError {
                     code: "TRANSFER_INTERRUPTED".to_owned(),
                     message_key: "errors.transferInterrupted".to_owned(),
@@ -594,6 +841,11 @@ impl TransferService {
             }
         }
         Ok(recovered)
+    }
+
+    pub fn clear_completed(&self) -> Result<Vec<TransferTask>, AppError> {
+        let _ = self.repository.delete_terminal_transfers()?;
+        self.repository.list()
     }
 
     fn task(&self, id: &str) -> Result<TransferTask, AppError> {
@@ -618,6 +870,16 @@ fn transfer_transition_error() -> AppError {
         message_key: "errors.transferInvalidTransition".to_owned(),
         retryable: false,
         remote_state: RemoteState::NotApplicable,
+        field: None,
+    }
+}
+
+fn transfer_identity_changed_error() -> AppError {
+    AppError {
+        code: "TRANSFER_IDENTITY_CHANGED".to_owned(),
+        message_key: "errors.transferIdentityChanged".to_owned(),
+        retryable: false,
+        remote_state: RemoteState::Unchanged,
         field: None,
     }
 }
@@ -837,8 +1099,10 @@ impl ProfileService {
             tags: normalize_tags(input.tags),
             authentication_method: input.authentication_method,
             identity_file: normalize_optional(input.identity_file),
+            key_id: normalize_optional(input.key_id),
             proxy_jump: normalize_optional(input.proxy_jump),
             proxy_jump_profile_ids: input.proxy_jump_profile_ids,
+            proxy_profile_id: normalize_optional(input.proxy_profile_id),
             credential_ref: None,
             state: ConnectionState::Idle,
             latency_ms: None,
@@ -863,8 +1127,10 @@ impl ProfileService {
             tags: input.tags.clone(),
             authentication_method: input.authentication_method.clone(),
             identity_file: input.identity_file.clone(),
+            key_id: input.key_id.clone(),
             proxy_jump: input.proxy_jump.clone(),
             proxy_jump_profile_ids: input.proxy_jump_profile_ids.clone(),
+            proxy_profile_id: input.proxy_profile_id.clone(),
         })?;
         let existing = self
             .repository
@@ -879,10 +1145,11 @@ impl ProfileService {
             return Err(proxy_jump_nested_profile_error());
         }
         let identity_file = normalize_optional(input.identity_file);
+        let key_id = normalize_optional(input.key_id);
         let credential_context_unchanged = existing.authentication_method
             == input.authentication_method
             && (input.authentication_method != AuthenticationMethod::PrivateKey
-                || existing.identity_file == identity_file);
+                || (existing.identity_file == identity_file && existing.key_id == key_id));
         let updated = ConnectionProfile {
             id: existing.id,
             name: input.name.trim().to_owned(),
@@ -895,8 +1162,10 @@ impl ProfileService {
             tags: normalize_tags(input.tags),
             authentication_method: input.authentication_method,
             identity_file,
+            key_id,
             proxy_jump: normalize_optional(input.proxy_jump),
             proxy_jump_profile_ids: input.proxy_jump_profile_ids,
+            proxy_profile_id: normalize_optional(input.proxy_profile_id),
             credential_ref: credential_context_unchanged
                 .then_some(existing.credential_ref)
                 .flatten(),
@@ -1084,10 +1353,20 @@ pub fn validate_profile(input: &CreateConnectionProfileInput) -> Result<(), AppE
     }
     if input.authentication_method == AuthenticationMethod::PrivateKey
         && normalize_optional(input.identity_file.clone()).is_none()
+        && normalize_optional(input.key_id.clone()).is_none()
     {
         return Err(validation_error(
             "profile.privateKeyPathRequired",
             "identityFile",
+        ));
+    }
+    if normalize_optional(input.proxy_profile_id.clone()).is_some()
+        && (!input.proxy_jump_profile_ids.is_empty()
+            || normalize_optional(input.proxy_jump.clone()).is_some())
+    {
+        return Err(validation_error(
+            "profile.proxyAndJumpConflict",
+            "proxyProfileId",
         ));
     }
     Ok(())
@@ -1304,6 +1583,8 @@ impl SessionMachine {
                 id: uuid::Uuid::new_v4().to_string(),
                 generation: 0,
                 profile_id: profile.id.clone(),
+                session_kind: SessionKind::Ssh,
+                capabilities: capabilities_for_ssh(false),
                 state: SessionState::Idle,
                 host: profile.host.clone(),
                 port: profile.port,
@@ -1720,8 +2001,10 @@ mod tests {
             tags: vec!["api".to_owned(), " api ".to_owned()],
             authentication_method: AuthenticationMethod::Password,
             identity_file: None,
+            key_id: None,
             proxy_jump: None,
             proxy_jump_profile_ids: Vec::new(),
+            proxy_profile_id: None,
         }
     }
 
@@ -1743,6 +2026,27 @@ mod tests {
         assert!(settings.follow_terminal_cwd);
         assert_eq!(settings.text_editor_preference, "internal");
         assert!(settings.external_editor_path.is_none());
+    }
+
+    #[test]
+    fn safe_settings_accept_complete_multi_encoding_matrix() {
+        for encoding in [
+            "utf-8",
+            "utf-16le",
+            "utf-16be",
+            "gbk",
+            "gb18030",
+            "big5",
+            "shift_jis",
+            "euc-jp",
+            "euc-kr",
+            "windows-1252",
+        ] {
+            let mut settings = default_safe_settings();
+            settings.terminal_encoding = encoding.to_owned();
+            super::validate_safe_settings(&settings)
+                .unwrap_or_else(|error| panic!("{encoding} should validate cleanly: {error:?}"));
+        }
     }
 
     #[test]
@@ -1915,5 +2219,70 @@ mod tests {
         assert!(!mounts.iter().any(|mount| mount.path == "/home"));
         // The 12-entry cap keeps the first valid entries and drops the rest.
         assert!(!mounts.iter().any(|mount| mount.path == "/m"));
+    }
+
+    #[test]
+    fn rejects_identical_or_missing_relay_endpoints() {
+        use std::sync::{Arc, Mutex};
+
+        use filex_contracts::{
+            ConflictPolicy, CreateTransferInput, TransferDirection, TransferTask,
+        };
+
+        struct InMemoryTransfers(Mutex<Vec<TransferTask>>);
+        impl super::TransferRepository for InMemoryTransfers {
+            fn list(&self) -> Result<Vec<TransferTask>, AppError> {
+                Ok(self.0.lock().expect("lock").clone())
+            }
+            fn get(&self, id: &str) -> Result<Option<TransferTask>, AppError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .find(|item| item.id == id)
+                    .cloned())
+            }
+            fn insert(&self, task: &TransferTask) -> Result<(), AppError> {
+                self.0.lock().expect("lock").push(task.clone());
+                Ok(())
+            }
+            fn update(&self, task: &TransferTask) -> Result<(), AppError> {
+                let mut guard = self.0.lock().expect("lock");
+                if let Some(slot) = guard.iter_mut().find(|item| item.id == task.id) {
+                    *slot = task.clone();
+                }
+                Ok(())
+            }
+            fn delete_terminal_transfers(&self) -> Result<u64, AppError> {
+                Ok(0)
+            }
+        }
+
+        let service =
+            super::TransferService::new(Arc::new(InMemoryTransfers(Mutex::new(Vec::new()))));
+        let missing_dest = service.enqueue(CreateTransferInput {
+            profile_id: "prof-a".to_owned(),
+            direction: TransferDirection::RemoteToRemote,
+            local_path: String::new(),
+            remote_path: "/srv/file.bin".to_owned(),
+            conflict_policy: ConflictPolicy::Overwrite,
+            total_bytes: None,
+            destination_profile_id: None,
+            destination_remote_path: Some("/dst/file.bin".to_owned()),
+        });
+        assert!(missing_dest.is_err());
+
+        let same_endpoint = service.enqueue(CreateTransferInput {
+            profile_id: "prof-a".to_owned(),
+            direction: TransferDirection::RemoteToRemote,
+            local_path: String::new(),
+            remote_path: "/srv/file.bin".to_owned(),
+            conflict_policy: ConflictPolicy::Overwrite,
+            total_bytes: None,
+            destination_profile_id: Some("prof-a".to_owned()),
+            destination_remote_path: Some("/srv/file.bin".to_owned()),
+        });
+        assert!(same_endpoint.is_err());
     }
 }
