@@ -1772,6 +1772,9 @@ test('central SSH key and outbound proxy library modal and profile selectors are
     const dialog = page.getByRole('dialog', { name: 'SSH 密钥与出站代理库' });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByRole('tab', { name: /SSH 密钥/ })).toHaveAttribute('aria-selected', 'true');
+    await expect(dialog.locator('.key-proxy-form')).toBeVisible();
+    const bodyHeight = await dialog.locator('.key-proxy-library-body').evaluate((el) => el.getBoundingClientRect().height);
+    expect(bodyHeight).toBeGreaterThanOrEqual(240);
 
     await dialog.getByRole('tab', { name: /出站代理/ }).click();
     await expect(dialog.getByRole('tab', { name: /出站代理/ })).toHaveAttribute('aria-selected', 'true');

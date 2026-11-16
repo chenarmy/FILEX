@@ -6871,12 +6871,14 @@
 .key-proxy-library-dialog {
   width: min(760px, calc(100vw - 28px));
   max-height: min(86vh, 780px);
+  grid-template-rows: 46px auto minmax(0, 1fr) 52px;
 }
 
 .key-proxy-tabs {
   display: flex;
-  gap: 6px;
-  padding: 0 18px 10px;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
   border-bottom: 1px solid hsl(var(--border-subtle));
 }
 
@@ -6917,7 +6919,9 @@
 
 .key-proxy-library-body {
   display: grid;
+  align-content: start;
   gap: 12px;
+  padding: 16px 20px;
   overflow: auto;
 }
 
@@ -7006,13 +7010,14 @@
 .key-proxy-card-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
 }
 
 .key-proxy-form {
   display: grid;
-  gap: 10px;
-  padding: 12px;
+  gap: 12px;
+  padding: 16px;
   border-radius: var(--radius-panel);
   border: 1px solid hsl(var(--border-subtle));
   background: hsl(var(--card));
@@ -7028,7 +7033,8 @@
 .key-proxy-path-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
 }
 
 .key-proxy-path-row input {
@@ -7064,6 +7070,12 @@
 .key-proxy-form-footer {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.key-proxy-library-dialog .dialog-footer {
+  padding-inline: 20px;
 }
 
 .key-proxy-error-code {
