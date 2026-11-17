@@ -1,5 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="FILEX">
-  <rect width="64" height="64" rx="12" fill="#3b82f6"/>
-  <path d="M17 20h30v24H17z" fill="none" stroke="#fff" stroke-width="4" stroke-linejoin="round"/>
-  <path d="m23 27 6 5-6 5m10 1h8" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <defs>
+    <linearGradient id="filex-brand-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#4285ff"/>
+      <stop offset="100%" stop-color="#0f44d2"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#filex-brand-bg)"/>
+  <g fill="none" stroke="#fff" stroke-width="3.83" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M18.67 20.33 28.67 30.33 18.67 40.33"/>
+    <path d="M32 43.67h13.33"/>
+  </g>
 </svg>
