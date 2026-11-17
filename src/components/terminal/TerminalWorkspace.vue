@@ -153,7 +153,7 @@ function selectSessionTab(sessionId: string): void {
   sessions.selectSession(sessionId);
 }
 
-async function startNewSession(): Promise<void> {
+function startNewSession(): void {
   if (!canStartSession.value) return;
   ui.openQuickConnect();
 }

@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-11-17
+
+### Added
+
+- Connection sidebar context menu (`ConnectionContextMenu`) for profiles (open, edit, duplicate, favorite, move to group, delete with confirmation), group headers (new connection in group, create/rename/delete group, collapse), and empty space (new connection, new group, expand/collapse all).
+- Connection group management (`createGroup`, `renameGroup`, `deleteGroup`, `moveToGroup`) with persisted empty groups, persisted collapse state, the reserved `未分组` default group, and a validated `GroupNameDialog`. Deleting a group moves its connections to `未分组` instead of deleting them.
+- Group suggestions in the connection profile dialog and pre-filled group when creating a connection from a group context menu.
+
+### Changed
+
+- The terminal tab bar `+` button now always opens Quick Connect, so it no longer duplicates the "Duplicate session" action.
+
+### Fixed
+
+- Added the missing dialog body padding and wider layout for `LocalTerminalDialog`.
+
 ## [0.1.9] - 2026-11-17
 
 ### Changed
