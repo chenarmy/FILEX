@@ -42,7 +42,7 @@ const form = reactive<{
   proxyJumpProfileIds: string[];
 }>({
   name: editingProfile.value?.name ?? '',
-  group: editingProfile.value?.group ?? '未分组',
+  group: editingProfile.value?.group ?? ui.defaultProfileGroup ?? '未分组',
   host: editingProfile.value?.host ?? '',
   port: editingProfile.value?.port ?? 22,
   username: editingProfile.value?.username ?? '',
@@ -276,7 +276,10 @@ async function submit(): Promise<void> {
           </label>
           <label class="field">
             <span>{{ t('profile.group') }}</span>
-            <input v-model="form.group" autocomplete="off">
+            <input v-model="form.group" list="connection-group-suggestions" autocomplete="off">
+            <datalist id="connection-group-suggestions">
+              <option v-for="groupName in connections.allGroupNames" :key="groupName" :value="groupName" />
+            </datalist>
           </label>
           <label class="field">
             <span>{{ t('profile.environment') }}</span>

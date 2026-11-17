@@ -24,6 +24,7 @@ export const useUiStore = defineStore('ui', () => {
   const keyProxyLibraryTab = ref<KeyProxyLibraryTab>('keys');
   const addProfileOpen = ref(false);
   const editingProfileId = ref<string | null>(null);
+  const defaultProfileGroup = ref<string | null>(null);
   const sshImportOpen = ref(false);
   const transferDialog = ref<{
     direction: TransferDirection;
@@ -135,19 +136,22 @@ export const useUiStore = defineStore('ui', () => {
     overviewOpen.value = false;
   }
 
-  function openAddProfile(): void {
+  function openAddProfile(defaultGroup?: string): void {
     editingProfileId.value = null;
+    defaultProfileGroup.value = defaultGroup ?? null;
     addProfileOpen.value = true;
   }
 
   function openEditProfile(id: string): void {
     editingProfileId.value = id;
+    defaultProfileGroup.value = null;
     addProfileOpen.value = true;
   }
 
   function closeAddProfile(): void {
     addProfileOpen.value = false;
     editingProfileId.value = null;
+    defaultProfileGroup.value = null;
   }
 
   function openSshImport(): void {
@@ -241,6 +245,7 @@ export const useUiStore = defineStore('ui', () => {
     keyProxyLibraryTab,
     addProfileOpen,
     editingProfileId,
+    defaultProfileGroup,
     sshImportOpen,
     transferDialog,
     tunnelDialogOpen,

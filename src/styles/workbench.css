@@ -3706,7 +3706,8 @@
 .password-dialog .dialog-body,
 .transfer-dialog .dialog-body,
 .tunnel-dialog .dialog-body,
-.permission-dialog .dialog-body {
+.permission-dialog .dialog-body,
+.local-terminal-dialog .dialog-body {
   padding: 16px 20px;
 }
 

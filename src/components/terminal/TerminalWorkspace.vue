@@ -155,11 +155,7 @@ function selectSessionTab(sessionId: string): void {
 
 async function startNewSession(): Promise<void> {
   if (!canStartSession.value) return;
-  if (!connections.activeProfile) {
-    ui.openQuickConnect();
-    return;
-  }
-  await sessions.begin(connections.activeProfile);
+  ui.openQuickConnect();
 }
 
 async function duplicateActiveSession(): Promise<void> {

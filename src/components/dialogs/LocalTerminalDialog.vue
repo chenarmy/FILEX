@@ -184,7 +184,12 @@ async function submit(): Promise<void> {
 
 <style scoped>
 .local-terminal-dialog {
-  width: min(480px, calc(100vw - 24px));
+  width: min(540px, calc(100vw - 32px));
+}
+
+.local-terminal-dialog select {
+  width: 100%;
+  min-width: 0;
 }
 
 .local-directory-row {

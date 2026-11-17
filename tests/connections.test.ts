@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { createPinia, setActivePinia } from 'pinia';
 import { filterProfiles, validateConnectionProfile } from '@/domain/connections';
+import { DEFAULT_CONNECTION_GROUP, useConnectionsStore } from '@/stores/connections';
 import type { ConnectionProfile, CreateConnectionProfileInput } from '@/types/contracts';
 
 const validInput: CreateConnectionProfileInput = {
@@ -45,5 +47,36 @@ describe('connection profile rules', () => {
     expect(filterProfiles([profile], 'Production')).toHaveLength(1);
     expect(filterProfiles([profile], 'deploy')).toHaveLength(1);
     expect(filterProfiles([profile], 'missing')).toHaveLength(0);
+  });
+});
+
+describe('connections store group management', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    setActivePinia(createPinia());
+  });
+
+  it('creates, renames, moves profiles between groups, and deletes groups safely', async () => {
+    const store = useConnectionsStore();
+    expect(await store.create(validInput)).toBe(true);
+    const createdId = store.profiles[0]!.id;
+
+    expect(store.createGroup('')).toEqual({ ok: false, reason: 'empty' });
+    expect(store.createGroup(DEFAULT_CONNECTION_GROUP)).toEqual({ ok: false, reason: 'reserved' });
+    expect(store.createGroup('Staging')).toEqual({ ok: true });
+    expect(store.createGroup('staging')).toEqual({ ok: false, reason: 'duplicate' });
+    expect(store.allGroupNames).toContain('Staging');
+
+    expect(await store.moveToGroup(createdId, 'Staging')).toBe(true);
+    expect(store.profiles[0]?.group).toBe('Staging');
+
+    expect(await store.renameGroup('Staging', 'Pre-Prod')).toEqual({ ok: true });
+    expect(store.profiles[0]?.group).toBe('Pre-Prod');
+    expect(store.allGroupNames).not.toContain('Staging');
+    expect(store.allGroupNames).toContain('Pre-Prod');
+
+    expect(await store.deleteGroup('Pre-Prod')).toBe(true);
+    expect(store.profiles[0]?.group).toBe(DEFAULT_CONNECTION_GROUP);
+    expect(store.allGroupNames).not.toContain('Pre-Prod');
   });
 });
