@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-11-17
+
+### Changed
+
+- Aligned the application, desktop bundle, and taskbar icons (`public/filex-mark.svg` and `src-tauri/icons/`) with the FILEX brand mark.
+
+### Fixed
+
+- Fixed vertical body collapse inside `KeyAndProxyLibraryDialog` (`grid-template-rows: 46px auto minmax(0, 1fr) 52px`) caused by the dialog's four-row layout with `.key-proxy-tabs`, aligned inner padding (`16px 20px`), and refined spacing across tab strips, path actions, card actions, form inputs, and dialog footer buttons.
+
 ## [0.1.8] - 2026-11-16
 
 ### Added

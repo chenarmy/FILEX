@@ -1,5 +1,26 @@
 # FILEX verification evidence
 
+## 2026-11-17 — v0.1.9 release preparation
+
+- Scope: prepared release `0.1.9` on top of pulled `origin/main` (`e2f3206` brand/taskbar icon alignment and `b9d1aae` `KeyAndProxyLibraryDialog` layout/button-spacing fix):
+  - Synchronized workspace manifests (`package.json`, `Cargo.toml`, `src-tauri/tauri.conf.json`, `Cargo.lock`) to `0.1.9`, updated `CHANGELOG.md` with `## [0.1.9] - 2026-11-17`, and verified `node scripts/release-notes.mjs v0.1.9`.
+- Scope limits preserved honestly: cross-platform signed installers and `latest.json` verification run inside `.github/workflows/release.yml` upon pushing tag `v0.1.9`; `e2e/live-ssh.spec.ts` remains excluded without a running WebView2 CDP runtime on `127.0.0.1:9222`.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Version sync | `pnpm version:check` | Passed (`0.1.9`) |
+| Release notes | `node scripts/release-notes.mjs v0.1.9` | Passed |
+| ESLint | `pnpm lint` | Passed (0 warnings) |
+| TypeScript | `pnpm typecheck` | Passed |
+| Frontend unit tests | `pnpm test` | Passed, 30 files and 115 tests |
+| Production bundle | `pnpm build` | Passed (existing Vite >500 kB chunk-size warning retained) |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust locked check | `cargo check --workspace --locked` | Passed |
+| Rust Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed (0 warnings) |
+| Rust workspace tests | `cargo test --workspace --offline` | Passed, 76 tests (`filex_contracts`: 0, `filex_core`: 17, `filex_credentials`: 3, `filex_desktop_lib`: 34, `filex_desktop`: 0, `filex_local_terminal`: 4, `filex_ssh`: 6, `filex_storage`: 12) |
+| Workbench Playwright E2E | `pnpm exec playwright test e2e/workbench.spec.ts` | Passed, 32 tests (`e2e/live-ssh.spec.ts` excluded without live WebView2 CDP on `127.0.0.1:9222`) |
+| Diff hygiene | `git diff --check` | Passed |
+
 ## 2026-11-16 — v0.1.8 release preparation and Windows packaging
 
 - Scope: prepared release `0.1.8` consolidating Phases B1–B4, C1–C4, D (`Phase 5.7`), clipboard upload and typeahead navigation (`Phase 5.8` / `ADR-0031`), and session-switch / duplicate-session state preservation:
