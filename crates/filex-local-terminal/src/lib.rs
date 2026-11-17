@@ -1079,7 +1079,9 @@ mod unix_pty {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
+        // macOS/BSD libc::openpty takes *mut winsize while glibc takes *const winsize.
         // SAFETY: Valid stack descriptors and winsize pointer.
+        #[allow(clippy::unnecessary_mut_passed)]
         if unsafe {
             libc::openpty(
                 &mut master,
