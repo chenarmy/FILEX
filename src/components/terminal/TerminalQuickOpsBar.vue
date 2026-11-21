@@ -14,12 +14,14 @@ import {
 } from 'lucide-vue-next';
 import { t } from '@/i18n';
 import { useUiStore } from '@/stores/ui';
-import type { MonitorDetailsView, OpsCategory } from '@/types/contracts';
+import type { MonitorDetailsView, OpsCategory, SessionState } from '@/types/contracts';
 
 const props = defineProps<{
   focused: boolean;
   connected: boolean;
+  sessionState: SessionState;
   environment: string;
+  environmentTone: 'production' | 'staging' | 'development' | 'local';
   sessionStateLabel: string;
   encodingLabel: string;
   columns: number;
@@ -54,12 +56,18 @@ function openOps(category: OpsCategory): void {
 <template>
   <footer class="terminal-pane-status" :aria-label="t('quickOps.barLabel')">
     <div class="terminal-status-meta">
-      <span class="terminal-input-status" :class="{ active: focused }" aria-live="polite">
-        <Circle :size="7" :fill="focused ? 'currentColor' : 'none'" />
-        {{ t(focused ? 'terminal.inputActive' : 'terminal.inputInactive') }}
+      <span
+        class="terminal-state-pill"
+        :class="[sessionState, { focused }]"
+        :title="t(focused ? 'terminal.inputActive' : 'terminal.inputInactive')"
+        aria-live="polite"
+      >
+        <Circle :size="7" fill="currentColor" aria-hidden="true" />
+        <span>{{ sessionStateLabel }}</span>
       </span>
-      <span class="terminal-meta-chip">
-        <Circle :size="7" fill="currentColor" />{{ environment }}
+      <span class="terminal-env-pill" :class="environmentTone">
+        <Circle :size="6" fill="currentColor" aria-hidden="true" />
+        <span>{{ environment }}</span>
       </span>
       <span v-if="elevatedRemaining" class="elevated-badge mono" role="status">
         <ShieldAlert :size="11" />
@@ -73,15 +81,25 @@ function openOps(category: OpsCategory): void {
           {{ t('elevated.revoke') }}
         </button>
       </span>
-      <span class="terminal-meta-chip">{{ sessionStateLabel }}</span>
-      <span class="terminal-meta-chip mono">{{ encodingLabel }}</span>
-      <span class="terminal-meta-chip mono">{{ columns }} × {{ rows }}</span>
-      <span v-if="selectedChars > 0" class="terminal-meta-chip terminal-selection-chip mono">
-        {{ t('terminal.selectionChars', { count: selectedChars }) }}
-      </span>
-      <span v-else-if="cursorCell" class="terminal-meta-chip mono">
-        {{ t('terminal.cursorPosition', { row: cursorCell.row, col: cursorCell.col }) }}
-      </span>
+      <span class="terminal-meta-sep" aria-hidden="true" />
+      <span class="terminal-meta-item mono">{{ encodingLabel }}</span>
+      <span class="terminal-meta-dot" aria-hidden="true">·</span>
+      <span
+        class="terminal-meta-item mono"
+        :title="t('terminal.dimensionsTitle', { cols: columns, rows })"
+      >{{ columns }} × {{ rows }}</span>
+      <template v-if="selectedChars > 0">
+        <span class="terminal-meta-dot" aria-hidden="true">·</span>
+        <span class="terminal-meta-chip terminal-selection-chip mono">
+          {{ t('terminal.selectionChars', { count: selectedChars }) }}
+        </span>
+      </template>
+      <template v-else-if="cursorCell">
+        <span class="terminal-meta-dot" aria-hidden="true">·</span>
+        <span class="terminal-meta-item mono">
+          {{ t('terminal.cursorPosition', { row: cursorCell.row, col: cursorCell.col }) }}
+        </span>
+      </template>
     </div>
 
     <div class="terminal-quick-ops" role="toolbar" :aria-label="t('quickOps.barLabel')">

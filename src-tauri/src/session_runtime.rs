@@ -3341,7 +3341,7 @@ impl SessionRuntime {
             .execute_bounded(
                 posix_process_probe(sort_by),
                 256 * 1024,
-                Duration::from_secs(10),
+                Duration::from_secs(12),
             )
             .await
             .map_err(|error| ssh_error(&error))?;
@@ -5713,7 +5713,7 @@ if ($null -ne $networkBefore -and $null -ne $networkAfter -and $networkWatch.Ela
 "#;
 
 const NETWORK_INSPECTION_PROBE: &str = r#"LC_ALL=C; export LC_ALL
-if [ ! -d /sys/class/net ] || ! command -v ip >/dev/null 2>&1 || ! command -v od >/dev/null 2>&1 || ! command -v tr >/dev/null 2>&1; then
+if [ ! -d /sys/class/net ] || ! command -v ip >/dev/null 2>&1 || ! command -v awk >/dev/null 2>&1 || ! command -v od >/dev/null 2>&1 || ! command -v tr >/dev/null 2>&1; then
   printf 'PLATFORM=UNSUPPORTED\n'
   exit 0
 fi
@@ -5741,46 +5741,42 @@ for directory in /sys/class/net/*; do
   printf 'I\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(hex "$name")" "$(hex "$state")" "$(hex "$addresses")" "$mtu" "$received" "$transmitted" "$loopback" "$(hex "$mac")" "$speed" "$rx_packets" "$tx_packets" "$rx_errors" "$tx_errors"
 done
 if command -v ss >/dev/null 2>&1; then
-  ss -H -tunap 2>/dev/null | head -n 501 | while read -r protocol state recvq sendq local_endpoint remote_endpoint details; do
-    [ -n "$protocol" ] || continue
-    printf 'E\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(hex "$protocol")" "$(hex "$state")" "$(hex "$local_endpoint")" "$(hex "$remote_endpoint")" "$(hex "$details")" "$recvq" "$sendq"
-  done
+  ss -H -tunap 2>/dev/null | head -n 501 | awk '
+    NF >= 6 {
+      details = ""
+      for (i = 7; i <= NF; i++) details = details (i > 7 ? " " : "") $i
+      gsub(/[\t\r\n]/, " ", details)
+      printf "E2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $5, $6, substr(details, 1, 512), $3, $4
+    }'
 fi
-ip -o route show table all 2>/dev/null | head -n 501 | while IFS= read -r route; do
-  [ -n "$route" ] || continue
-  set -- $route
-  route_type='unicast'
-  destination=$1
-  case "$destination" in
-    local|broadcast|unreachable|blackhole|prohibit|throw|nat|anycast|multicast)
-      route_type=$destination
-      shift
-      destination=${1:-}
-      ;;
-  esac
-  [ -n "$destination" ] || continue
-  gateway=''
-  interface=''
-  metric=''
-  protocol=''
-  table='main'
-  scope=''
-  source_address=''
-  previous=''
-  for token in "$@"; do
-    case "$previous" in
-      via) gateway=$token ;;
-      dev) interface=$token ;;
-      metric) metric=$token ;;
-      proto) protocol=$token ;;
-      table) table=$token ;;
-      scope) scope=$token ;;
-      src) source_address=$token ;;
-    esac
-    previous=$token
-  done
-  printf 'T\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(hex "$destination")" "$(hex "$gateway")" "$(hex "$interface")" "$metric" "$(hex "$protocol")" "$(hex "$table")" "$(hex "$scope")" "$(hex "$source_address")" "$(hex "$route_type")"
-done"#;
+ip -o route show table all 2>/dev/null | head -n 501 | awk '
+  NF >= 1 {
+    idx = 1
+    route_type = "unicast"
+    if ($1 ~ /^(local|broadcast|unreachable|blackhole|prohibit|throw|nat|anycast|multicast)$/) {
+      route_type = $1
+      idx = 2
+    }
+    if (idx > NF) next
+    destination = $idx
+    gateway = ""
+    iface = ""
+    metric = ""
+    proto = ""
+    tbl = "main"
+    scope = ""
+    src = ""
+    for (i = idx + 1; i < NF; i++) {
+      if ($i == "via") { gateway = $(i + 1); i++ }
+      else if ($i == "dev") { iface = $(i + 1); i++ }
+      else if ($i == "metric") { metric = $(i + 1); i++ }
+      else if ($i == "proto") { proto = $(i + 1); i++ }
+      else if ($i == "table") { tbl = $(i + 1); i++ }
+      else if ($i == "scope") { scope = $(i + 1); i++ }
+      else if ($i == "src") { src = $(i + 1); i++ }
+    }
+    printf "T2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", destination, gateway, iface, metric, proto, tbl, scope, src, route_type
+  }'"#;
 
 const WINDOWS_NETWORK_SCRIPT: &str = r#"if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { exit 42 }
 Write-Output 'PLATFORM=WINDOWS'
@@ -5832,62 +5828,104 @@ fn windows_network_command() -> String {
 }
 
 const PROCESS_LIST_PROBE_BY_CPU: &str = r#"LC_ALL=C; export LC_ALL
-if ! command -v ps >/dev/null 2>&1 || ! command -v od >/dev/null 2>&1 || ! command -v cut >/dev/null 2>&1 || ! command -v tr >/dev/null 2>&1 || ! command -v sort >/dev/null 2>&1 || ! command -v head >/dev/null 2>&1; then
+if ! command -v ps >/dev/null 2>&1 || ! command -v awk >/dev/null 2>&1 || ! command -v sort >/dev/null 2>&1 || ! command -v head >/dev/null 2>&1; then
   printf 'PLATFORM=UNSUPPORTED\n'
   exit 0
 fi
 printf 'PLATFORM=POSIX\n'
-ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o vsz= -o stat= 2>/dev/null | sort -k4,4nr -k6,6nr | head -n 101 | while read -r pid ppid user cpu cpu_time rss vsz state; do
-  case "$pid" in ''|*[!0-9]*) continue;; esac
-  name=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '\012\015')
-  case "$name" in /*) name=${name##*/};; esac
-  name=$(printf '%s' "$name" | cut -c 1-128)
-  start=$(ps -p "$pid" -o lstart= 2>/dev/null | tr -d '\012\015')
-  elapsed=$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' \012\015')
-  threads=$(ps -p "$pid" -o nlwp= 2>/dev/null | tr -d ' \012\015')
-  exe=''
-  cwd=''
-  if [ -e "/proc/$pid/exe" ]; then exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null | tr -d '\012\015' | cut -c 1-256); fi
-  if [ -e "/proc/$pid/cwd" ]; then cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null | tr -d '\012\015' | cut -c 1-256); fi
-  cmd=$(ps -p "$pid" -o args= 2>/dev/null | tr -d '\012\015' | cut -c 1-384)
-  [ -n "$name" ] || continue
-  name_hex=$(printf '%s' "$name" | od -An -tx1 | tr -d ' \011\012\015')
-  user_hex=$(printf '%s' "$user" | cut -c 1-128 | od -An -tx1 | tr -d ' \011\012\015')
-  start_hex=$(printf '%s' "$start" | od -An -tx1 | tr -d ' \011\012\015')
-  exe_hex=$(printf '%s' "$exe" | od -An -tx1 | tr -d ' \011\012\015')
-  cwd_hex=$(printf '%s' "$cwd" | od -An -tx1 | tr -d ' \011\012\015')
-  cmd_hex=$(printf '%s' "$cmd" | od -An -tx1 | tr -d ' \011\012\015')
-  printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$user_hex" "$cpu" "$cpu_time" "$rss" "$state" "$start_hex" "$elapsed" "$name_hex" "$vsz" "$threads" "$exe_hex" "$cwd_hex" "$cmd_hex"
-done"#;
+base=$(ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o vsz= -o stat= 2>/dev/null | sort -k4,4nr -k6,6nr | head -n 101)
+[ -n "$base" ] || exit 0
+pids=$(printf '%s\n' "$base" | awk '$1 ~ /^[0-9]+$/ { printf "%s%s", sep, $1; sep="," }')
+[ -n "$pids" ] || exit 0
+{
+  printf '%s\n' "$base" | awk '$1 ~ /^[0-9]+$/ { printf "B\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4, $5, $6, $7, $8 }'
+  ps -p "$pids" -o pid= -o etimes= 2>/dev/null | awk '$1 ~ /^[0-9]+$/ { printf "E\t%s\t%s\n", $1, $2 }'
+  ps -p "$pids" -o pid= -o nlwp= 2>/dev/null | awk '$1 ~ /^[0-9]+$/ { printf "N\t%s\t%s\n", $1, $2 }'
+  ps -p "$pids" -o pid= -o lstart= 2>/dev/null | awk '{ pid=$1; if (pid ~ /^[0-9]+$/) { sub(/^[ \t]*[0-9]+[ \t]+/, ""); gsub(/[\t\r\n]/, " "); printf "S\t%s\t%s\n", pid, $0 } }'
+  ps -p "$pids" -o pid= -o comm= 2>/dev/null | awk '{ pid=$1; if (pid ~ /^[0-9]+$/) { sub(/^[ \t]*[0-9]+[ \t]+/, ""); gsub(/[\t\r\n]/, " "); printf "C\t%s\t%s\n", pid, substr($0, 1, 128) } }'
+  ps -p "$pids" -o pid= -o args= 2>/dev/null | awk '{ pid=$1; if (pid ~ /^[0-9]+$/) { sub(/^[ \t]*[0-9]+[ \t]+/, ""); gsub(/[\t\r\n]/, " "); printf "A\t%s\t%s\n", pid, substr($0, 1, 384) } }'
+  if [ -d /proc ]; then
+    paths=$(printf '%s\n' "$base" | awk '$1 ~ /^[0-9]+$/ { printf "/proc/%s/exe /proc/%s/cwd ", $1, $1 }')
+    ls -ld $paths 2>/dev/null | awk '
+      / -> / {
+        idx = index($0, " -> ")
+        left = substr($0, 1, idx - 1)
+        target = substr($0, idx + 4)
+        gsub(/[\t\r\n]/, " ", target)
+        if (match(left, /\/proc\/[0-9]+\/(exe|cwd)$/)) {
+          p = substr(left, RSTART + 6, RLENGTH - 6)
+          split(p, parts, "/")
+          if (parts[2] == "exe") printf "X\t%s\t%s\n", parts[1], substr(target, 1, 256)
+          else if (parts[2] == "cwd") printf "W\t%s\t%s\n", parts[1], substr(target, 1, 256)
+        }
+      }'
+  fi
+} | awk -F '\t' '
+  $1 == "B" { order[++n] = $2; ppid[$2]=$3; user[$2]=$4; cpu[$2]=$5; ctime[$2]=$6; rss[$2]=$7; vsz[$2]=$8; stat[$2]=$9; next }
+  $1 == "E" { etime[$2]=$3; next }
+  $1 == "N" { nlwp[$2]=$3; next }
+  $1 == "S" { lstart[$2]=$3; next }
+  $1 == "C" { comm[$2]=$3; next }
+  $1 == "A" { args[$2]=$3; next }
+  $1 == "X" { exe[$2]=$3; next }
+  $1 == "W" { cwd[$2]=$3; next }
+  END {
+    for (i = 1; i <= n; i++) {
+      p = order[i]
+      if (comm[p] == "") continue
+      printf "P2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", p, ppid[p], user[p], cpu[p], ctime[p], rss[p], stat[p], lstart[p], etime[p], comm[p], vsz[p], nlwp[p], exe[p], cwd[p], args[p]
+    }
+  }'"#;
 
 const PROCESS_LIST_PROBE_BY_MEMORY: &str = r#"LC_ALL=C; export LC_ALL
-if ! command -v ps >/dev/null 2>&1 || ! command -v od >/dev/null 2>&1 || ! command -v cut >/dev/null 2>&1 || ! command -v tr >/dev/null 2>&1 || ! command -v sort >/dev/null 2>&1 || ! command -v head >/dev/null 2>&1; then
+if ! command -v ps >/dev/null 2>&1 || ! command -v awk >/dev/null 2>&1 || ! command -v sort >/dev/null 2>&1 || ! command -v head >/dev/null 2>&1; then
   printf 'PLATFORM=UNSUPPORTED\n'
   exit 0
 fi
 printf 'PLATFORM=POSIX\n'
-ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o vsz= -o stat= 2>/dev/null | sort -k6,6nr -k4,4nr | head -n 101 | while read -r pid ppid user cpu cpu_time rss vsz state; do
-  case "$pid" in ''|*[!0-9]*) continue;; esac
-  name=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '\012\015')
-  case "$name" in /*) name=${name##*/};; esac
-  name=$(printf '%s' "$name" | cut -c 1-128)
-  start=$(ps -p "$pid" -o lstart= 2>/dev/null | tr -d '\012\015')
-  elapsed=$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' \012\015')
-  threads=$(ps -p "$pid" -o nlwp= 2>/dev/null | tr -d ' \012\015')
-  exe=''
-  cwd=''
-  if [ -e "/proc/$pid/exe" ]; then exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null | tr -d '\012\015' | cut -c 1-256); fi
-  if [ -e "/proc/$pid/cwd" ]; then cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null | tr -d '\012\015' | cut -c 1-256); fi
-  cmd=$(ps -p "$pid" -o args= 2>/dev/null | tr -d '\012\015' | cut -c 1-384)
-  [ -n "$name" ] || continue
-  name_hex=$(printf '%s' "$name" | od -An -tx1 | tr -d ' \011\012\015')
-  user_hex=$(printf '%s' "$user" | cut -c 1-128 | od -An -tx1 | tr -d ' \011\012\015')
-  start_hex=$(printf '%s' "$start" | od -An -tx1 | tr -d ' \011\012\015')
-  exe_hex=$(printf '%s' "$exe" | od -An -tx1 | tr -d ' \011\012\015')
-  cwd_hex=$(printf '%s' "$cwd" | od -An -tx1 | tr -d ' \011\012\015')
-  cmd_hex=$(printf '%s' "$cmd" | od -An -tx1 | tr -d ' \011\012\015')
-  printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$user_hex" "$cpu" "$cpu_time" "$rss" "$state" "$start_hex" "$elapsed" "$name_hex" "$vsz" "$threads" "$exe_hex" "$cwd_hex" "$cmd_hex"
-done"#;
+base=$(ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o vsz= -o stat= 2>/dev/null | sort -k6,6nr -k4,4nr | head -n 101)
+[ -n "$base" ] || exit 0
+pids=$(printf '%s\n' "$base" | awk '$1 ~ /^[0-9]+$/ { printf "%s%s", sep, $1; sep="," }')
+[ -n "$pids" ] || exit 0
+{
+  printf '%s\n' "$base" | awk '$1 ~ /^[0-9]+$/ { printf "B\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4, $5, $6, $7, $8 }'
+  ps -p "$pids" -o pid= -o etimes= 2>/dev/null | awk '$1 ~ /^[0-9]+$/ { printf "E\t%s\t%s\n", $1, $2 }'
+  ps -p "$pids" -o pid= -o nlwp= 2>/dev/null | awk '$1 ~ /^[0-9]+$/ { printf "N\t%s\t%s\n", $1, $2 }'
+  ps -p "$pids" -o pid= -o lstart= 2>/dev/null | awk '{ pid=$1; if (pid ~ /^[0-9]+$/) { sub(/^[ \t]*[0-9]+[ \t]+/, ""); gsub(/[\t\r\n]/, " "); printf "S\t%s\t%s\n", pid, $0 } }'
+  ps -p "$pids" -o pid= -o comm= 2>/dev/null | awk '{ pid=$1; if (pid ~ /^[0-9]+$/) { sub(/^[ \t]*[0-9]+[ \t]+/, ""); gsub(/[\t\r\n]/, " "); printf "C\t%s\t%s\n", pid, substr($0, 1, 128) } }'
+  ps -p "$pids" -o pid= -o args= 2>/dev/null | awk '{ pid=$1; if (pid ~ /^[0-9]+$/) { sub(/^[ \t]*[0-9]+[ \t]+/, ""); gsub(/[\t\r\n]/, " "); printf "A\t%s\t%s\n", pid, substr($0, 1, 384) } }'
+  if [ -d /proc ]; then
+    paths=$(printf '%s\n' "$base" | awk '$1 ~ /^[0-9]+$/ { printf "/proc/%s/exe /proc/%s/cwd ", $1, $1 }')
+    ls -ld $paths 2>/dev/null | awk '
+      / -> / {
+        idx = index($0, " -> ")
+        left = substr($0, 1, idx - 1)
+        target = substr($0, idx + 4)
+        gsub(/[\t\r\n]/, " ", target)
+        if (match(left, /\/proc\/[0-9]+\/(exe|cwd)$/)) {
+          p = substr(left, RSTART + 6, RLENGTH - 6)
+          split(p, parts, "/")
+          if (parts[2] == "exe") printf "X\t%s\t%s\n", parts[1], substr(target, 1, 256)
+          else if (parts[2] == "cwd") printf "W\t%s\t%s\n", parts[1], substr(target, 1, 256)
+        }
+      }'
+  fi
+} | awk -F '\t' '
+  $1 == "B" { order[++n] = $2; ppid[$2]=$3; user[$2]=$4; cpu[$2]=$5; ctime[$2]=$6; rss[$2]=$7; vsz[$2]=$8; stat[$2]=$9; next }
+  $1 == "E" { etime[$2]=$3; next }
+  $1 == "N" { nlwp[$2]=$3; next }
+  $1 == "S" { lstart[$2]=$3; next }
+  $1 == "C" { comm[$2]=$3; next }
+  $1 == "A" { args[$2]=$3; next }
+  $1 == "X" { exe[$2]=$3; next }
+  $1 == "W" { cwd[$2]=$3; next }
+  END {
+    for (i = 1; i <= n; i++) {
+      p = order[i]
+      if (comm[p] == "") continue
+      printf "P2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", p, ppid[p], user[p], cpu[p], ctime[p], rss[p], stat[p], lstart[p], etime[p], comm[p], vsz[p], nlwp[p], exe[p], cwd[p], args[p]
+    }
+  }'"#;
 
 fn posix_process_probe(sort_by: ProcessSortBy) -> &'static str {
     match sort_by {
@@ -6005,6 +6043,35 @@ printf 'PROCESS_SIGNAL_SENT\n'"#
     )
 }
 
+fn encode_hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn sanitize_plain_process_name(value: &str) -> Option<String> {
+    let trimmed = value.trim_end_matches(['\r', '\n']);
+    let basename = if trimmed.starts_with('/') || trimmed.contains('\\') {
+        trimmed.rsplit(['/', '\\']).next().unwrap_or_default()
+    } else {
+        trimmed
+    };
+    let mut name = String::new();
+    for character in basename.chars().take(96) {
+        if character.is_control() || character == '\n' || character == '\r' {
+            name.push(' ');
+        } else {
+            name.push(character);
+        }
+    }
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 fn parse_posix_process_output(
     output: &str,
     collected_at_ms: u64,
@@ -6014,34 +6081,58 @@ fn parse_posix_process_output(
     }
     let records = output
         .lines()
-        .filter(|line| line.starts_with("P\t"))
+        .filter(|line| line.starts_with("P\t") || line.starts_with("P2\t"))
         .collect::<Vec<_>>();
     let truncated = records.len() > 100;
     let mut processes = Vec::with_capacity(records.len().min(100));
     let mut identities = HashMap::new();
     for record in records.into_iter().take(100) {
         let fields = record.split('\t').collect::<Vec<_>>();
-        if fields.len() != 11 && fields.len() != 16 {
+        let is_plain = fields.first().copied() == Some("P2");
+        if is_plain {
+            if fields.len() != 16 {
+                continue;
+            }
+        } else if fields.len() != 11 && fields.len() != 16 {
             continue;
         }
         let Ok(pid) = fields[1].parse::<u32>() else {
             continue;
         };
-        let name_marker_hex = fields[10];
-        let start_marker_hex = fields[8];
-        let name =
-            decode_process_name(name_marker_hex, true).unwrap_or_else(|| "unknown".to_owned());
+        let (start_marker_hex, name_marker_hex, name, user) = if is_plain {
+            let raw_name = fields[10].trim_end_matches(['\r', '\n']);
+            let marker_name = if raw_name.starts_with('/') {
+                raw_name.rsplit('/').next().unwrap_or(raw_name)
+            } else {
+                raw_name
+            };
+            let marker_name_bounded: String = marker_name.chars().take(128).collect();
+            let raw_start = fields[8].trim_end_matches(['\r', '\n']);
+            (
+                encode_hex_bytes(raw_start.as_bytes()),
+                encode_hex_bytes(marker_name_bounded.as_bytes()),
+                sanitize_plain_process_name(raw_name).unwrap_or_else(|| "unknown".to_owned()),
+                sanitize_probe_label(fields[3], 128),
+            )
+        } else {
+            (
+                fields[8].to_owned(),
+                fields[10].to_owned(),
+                decode_process_name(fields[10], true).unwrap_or_else(|| "unknown".to_owned()),
+                decode_process_name(fields[3], true),
+            )
+        };
         let identity_valid = pid > 1
-            && is_hex_marker(start_marker_hex, 512)
+            && is_hex_marker(&start_marker_hex, 512)
             && !start_marker_hex.is_empty()
-            && is_hex_marker(name_marker_hex, 256)
+            && is_hex_marker(&name_marker_hex, 256)
             && !name_marker_hex.is_empty();
         if identity_valid {
             identities.insert(
                 pid,
                 ProcessIdentity::Posix {
-                    start_marker_hex: start_marker_hex.to_owned(),
-                    name_marker_hex: name_marker_hex.to_owned(),
+                    start_marker_hex,
+                    name_marker_hex,
                 },
             );
         }
@@ -6056,10 +6147,22 @@ fn parse_posix_process_output(
                     .ok()
                     .and_then(|kib| kib.checked_mul(1024));
                 let threads = fields[12].parse::<u32>().ok().filter(|count| *count > 0);
-                let executable_path = decode_probe_text(fields[13], true, 512);
-                let working_directory = decode_probe_text(fields[14], true, 512);
-                let command_line = decode_probe_text(fields[15], true, 512)
-                    .map(|raw| redact_process_command_line(&raw));
+                let executable_path = if is_plain {
+                    sanitize_probe_label(fields[13], 512)
+                } else {
+                    decode_probe_text(fields[13], true, 512)
+                };
+                let working_directory = if is_plain {
+                    sanitize_probe_label(fields[14], 512)
+                } else {
+                    decode_probe_text(fields[14], true, 512)
+                };
+                let raw_command = if is_plain {
+                    sanitize_probe_label(fields[15], 512)
+                } else {
+                    decode_probe_text(fields[15], true, 512)
+                };
+                let command_line = raw_command.map(|raw| redact_process_command_line(&raw));
                 (
                     virtual_memory_bytes,
                     threads,
@@ -6074,7 +6177,7 @@ fn parse_posix_process_output(
             pid,
             parent_pid: fields[2].parse::<u32>().ok(),
             name,
-            user: decode_process_name(fields[3], true),
+            user,
             cpu_percent: parse_process_float(fields[4]),
             cpu_time_seconds: parse_posix_cpu_time(fields[5]),
             memory_bytes,
@@ -6422,11 +6525,11 @@ fn parse_linux_network_output(
         .collect::<Vec<_>>();
     let endpoint_records = output
         .lines()
-        .filter(|line| line.starts_with("E\t"))
+        .filter(|line| line.starts_with("E\t") || line.starts_with("E2\t"))
         .collect::<Vec<_>>();
     let route_records = output
         .lines()
-        .filter(|line| line.starts_with("T\t"))
+        .filter(|line| line.starts_with("T\t") || line.starts_with("T2\t"))
         .collect::<Vec<_>>();
     Ok(NetworkSnapshot {
         state: MonitorState::Live,
@@ -6463,11 +6566,11 @@ fn parse_windows_network_output(
         .collect::<Vec<_>>();
     let endpoint_records = output
         .lines()
-        .filter(|line| line.starts_with("E\t"))
+        .filter(|line| line.starts_with("E\t") || line.starts_with("E2\t"))
         .collect::<Vec<_>>();
     let route_records = output
         .lines()
-        .filter(|line| line.starts_with("T\t"))
+        .filter(|line| line.starts_with("T\t") || line.starts_with("T2\t"))
         .collect::<Vec<_>>();
     Ok(NetworkSnapshot {
         state: MonitorState::Live,
@@ -6542,14 +6645,39 @@ fn parse_network_interface(line: &str, hexadecimal: bool) -> Option<NetworkInter
 
 fn parse_linux_endpoint(line: &str) -> Option<NetworkEndpoint> {
     let fields = line.split('\t').collect::<Vec<_>>();
-    if fields.len() != 6 && fields.len() != 8 {
+    let is_plain = fields.first().copied() == Some("E2");
+    if is_plain {
+        if fields.len() != 8 {
+            return None;
+        }
+    } else if fields.len() != 6 && fields.len() != 8 {
         return None;
     }
-    let protocol = decode_probe_text(fields[1], true, 16)?;
-    let state = decode_probe_text(fields[2], true, 32);
-    let local = decode_probe_text(fields[3], true, 256)?;
-    let remote = decode_probe_text(fields[4], true, 256);
-    let details = decode_probe_text(fields[5], true, 512).unwrap_or_default();
+    let protocol = if is_plain {
+        sanitize_probe_label(fields[1], 16)?
+    } else {
+        decode_probe_text(fields[1], true, 16)?
+    };
+    let state = if is_plain {
+        sanitize_probe_label(fields[2], 32)
+    } else {
+        decode_probe_text(fields[2], true, 32)
+    };
+    let local = if is_plain {
+        sanitize_probe_label(fields[3], 256)?
+    } else {
+        decode_probe_text(fields[3], true, 256)?
+    };
+    let remote = if is_plain {
+        sanitize_probe_label(fields[4], 256)
+    } else {
+        decode_probe_text(fields[4], true, 256)
+    };
+    let details = if is_plain {
+        sanitize_probe_label(fields[5], 512).unwrap_or_default()
+    } else {
+        decode_probe_text(fields[5], true, 512).unwrap_or_default()
+    };
     let (recv_q, send_q) = if fields.len() == 8 {
         (fields[6].parse::<u64>().ok(), fields[7].parse::<u64>().ok())
     } else {
@@ -6610,26 +6738,37 @@ fn parse_windows_endpoint(line: &str) -> Option<NetworkEndpoint> {
 
 fn parse_route_entry(line: &str, hexadecimal: bool) -> Option<RouteEntry> {
     let fields = line.split('\t').collect::<Vec<_>>();
-    if fields.len() != 6 && fields.len() != 10 {
+    let is_plain = fields.first().copied() == Some("T2");
+    if is_plain {
+        if fields.len() != 10 {
+            return None;
+        }
+    } else if fields.len() != 6 && fields.len() != 10 {
         return None;
     }
+    let decode = |value: &str, limit: usize| {
+        if is_plain {
+            sanitize_probe_label(value, limit)
+        } else {
+            decode_probe_text(value, hexadecimal, limit)
+        }
+    };
     let (table, scope, source_address, route_type) = if fields.len() == 10 {
         (
-            decode_probe_text(fields[6], hexadecimal, 64),
-            decode_probe_text(fields[7], hexadecimal, 64),
-            decode_probe_text(fields[8], hexadecimal, 256),
-            decode_probe_text(fields[9], hexadecimal, 64),
+            decode(fields[6], 64),
+            decode(fields[7], 64),
+            decode(fields[8], 256),
+            decode(fields[9], 64),
         )
     } else {
         (None, None, None, None)
     };
     Some(RouteEntry {
-        destination: decode_probe_text(fields[1], hexadecimal, 256)?,
-        gateway: decode_probe_text(fields[2], hexadecimal, 256)
-            .filter(|value| value != "0.0.0.0" && value != "::"),
-        interface_name: decode_probe_text(fields[3], hexadecimal, 128),
+        destination: decode(fields[1], 256)?,
+        gateway: decode(fields[2], 256).filter(|value| value != "0.0.0.0" && value != "::"),
+        interface_name: decode(fields[3], 128),
         metric: fields[4].parse::<u32>().ok(),
-        protocol: decode_probe_text(fields[5], hexadecimal, 64),
+        protocol: decode(fields[5], 64),
         table,
         scope,
         source_address,
@@ -9514,6 +9653,42 @@ mod tests {
         assert_eq!(route.route_type.as_deref(), Some("unicast"));
     }
 
+    #[test]
+    fn parses_fast_batch_p2_e2_t2_records() {
+        let proc_output = "PLATFORM=POSIX\nP2\t26126\t26105\troot\t0.4\t00:12:34\t843571\tSsl\tMon Nov 10 10:00:00 2026\t3600\tjava\t3145728\t48\t/usr/local/jdk1.8.0_251/bin/java\t/opt/kkFileView-4.1.0\tjava --token secret123 -jar /opt/app.jar\n";
+        let parsed = parse_posix_process_output(proc_output, 1_700_000_000_000)
+            .expect("P2 batch fixture should parse");
+        assert_eq!(parsed.processes.len(), 1);
+        let process = &parsed.processes[0];
+        assert_eq!(process.pid, 26126);
+        assert_eq!(process.name, "java");
+        assert_eq!(process.user.as_deref(), Some("root"));
+        assert_eq!(process.threads, Some(48));
+        assert_eq!(
+            process.executable_path.as_deref(),
+            Some("/usr/local/jdk1.8.0_251/bin/java")
+        );
+        assert_eq!(
+            process.working_directory.as_deref(),
+            Some("/opt/kkFileView-4.1.0")
+        );
+        assert_eq!(
+            process.command_line.as_deref(),
+            Some("java --token [REDACTED] -jar /opt/app.jar")
+        );
+        assert!(process.can_terminate);
+
+        let net_output = "PLATFORM=LINUX\nE2\ttcp\tESTAB\t10.0.0.2:22\t27.8.49.219:9799\tusers:((\"sshd\",pid=1069,fd=4))\t0\t64\nT2\tdefault\t10.0.0.1\teth0\t100\tdhcp\tmain\t\t10.0.0.2\tunicast\n";
+        let net = parse_linux_network_output(net_output, 1234)
+            .expect("E2/T2 batch network fixture should parse");
+        assert_eq!(net.endpoints.len(), 1);
+        assert_eq!(net.endpoints[0].pid, Some(1069));
+        assert_eq!(net.endpoints[0].send_q, Some(64));
+        assert_eq!(net.routes.len(), 1);
+        assert_eq!(net.routes[0].destination, "default");
+        assert_eq!(net.routes[0].source_address.as_deref(), Some("10.0.0.2"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn executes_posix_process_probes_with_populated_metrics_and_order() {
@@ -9522,6 +9697,7 @@ mod tests {
         use std::process::Command;
 
         for sort_by in [ProcessSortBy::Cpu, ProcessSortBy::Memory] {
+            let started = std::time::Instant::now();
             let output = Command::new("sh")
                 .arg("-c")
                 .arg(posix_process_probe(sort_by))
@@ -9530,6 +9706,10 @@ mod tests {
             assert!(
                 output.status.success(),
                 "posix process probe should succeed"
+            );
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "batch posix process probe should finish well under timeout"
             );
             let stdout = String::from_utf8_lossy(&output.stdout);
             let parsed = parse_posix_process_output(&stdout, 1_700_000_000_000)
@@ -9546,8 +9726,11 @@ mod tests {
                         && entry.user.is_some()
                         && entry.cpu_percent.is_some()
                         && entry.memory_bytes.is_some()
-                        && entry.state.is_some()),
-                "live posix probe should populate ppid, user, cpu, memory, and state"
+                        && entry.virtual_memory_bytes.is_some()
+                        && entry.command_line.is_some()
+                        && entry.state.is_some()
+                        && entry.can_terminate),
+                "live posix probe should populate ppid, user, cpu, memory, vsz, command_line, state, and termination marker"
             );
             if sort_by == ProcessSortBy::Memory {
                 let memories = parsed

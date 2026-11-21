@@ -2145,7 +2145,7 @@
 }
 
 .xterm-surface {
-  padding: 8px 10px;
+  padding: 0;
   overflow: hidden;
 }
 
@@ -6832,12 +6832,12 @@
   align-items: center;
   justify-content: space-between;
   gap: 6px 12px;
-  min-height: 38px;
-  padding: 6px 12px;
+  min-height: 36px;
+  padding: 5px 12px;
   background: hsl(var(--card));
   border-top: 1px solid hsl(var(--border-subtle));
   color: hsl(var(--text-secondary));
-  font-size: 0.7857rem;
+  font-size: 0.75rem;
   line-height: 1.35;
 }
 
@@ -6845,30 +6845,92 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 10px;
+  gap: 5px 8px;
   min-width: 0;
 }
 
-.terminal-pane-status .terminal-input-status {
+.terminal-state-pill,
+.terminal-env-pill {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 8px;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
   border-radius: 999px;
-  background: hsl(var(--secondary));
+  border: 1px solid hsl(var(--border-subtle));
+  background: hsl(var(--surface-inset));
   color: hsl(var(--text-secondary));
+  font-size: 0.75rem;
   font-weight: 500;
+  white-space: nowrap;
 }
 
-.terminal-pane-status .terminal-input-status.active {
-  background: hsl(var(--primary) / 0.14);
+.terminal-state-pill.connected {
+  color: hsl(var(--success));
+  background: hsl(var(--success) / 0.1);
+  border-color: hsl(var(--success) / 0.28);
+}
+
+.terminal-state-pill.connected.focused {
+  box-shadow: 0 0 0 1px hsl(var(--success) / 0.25);
+}
+
+.terminal-state-pill.connecting,
+.terminal-state-pill.resolving,
+.terminal-state-pill.verifying_host,
+.terminal-state-pill.trust_required,
+.terminal-state-pill.ready_to_authenticate,
+.terminal-state-pill.authenticating,
+.terminal-state-pill.reconnecting {
+  color: hsl(var(--warning));
+  background: hsl(var(--warning) / 0.1);
+  border-color: hsl(var(--warning) / 0.28);
+}
+
+.terminal-state-pill.failed {
+  color: hsl(var(--destructive));
+  background: hsl(var(--destructive) / 0.1);
+  border-color: hsl(var(--destructive) / 0.28);
+}
+
+.terminal-env-pill.production svg {
+  color: hsl(var(--destructive));
+}
+
+.terminal-env-pill.staging svg {
+  color: hsl(var(--warning));
+}
+
+.terminal-env-pill.development svg {
   color: hsl(var(--primary));
+}
+
+.terminal-env-pill.local svg {
+  color: hsl(var(--muted-foreground));
+}
+
+.terminal-meta-sep {
+  width: 1px;
+  height: 12px;
+  background: hsl(var(--border));
+}
+
+.terminal-meta-item {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.terminal-meta-dot {
+  color: hsl(var(--border));
+  user-select: none;
 }
 
 .terminal-meta-chip {
   display: inline-flex;
   align-items: center;
-  padding: 2px 7px;
+  gap: 5px;
+  padding: 1px 7px;
   border-radius: var(--radius-control);
   background: hsl(var(--surface-inset));
   border: 1px solid hsl(var(--border-subtle));

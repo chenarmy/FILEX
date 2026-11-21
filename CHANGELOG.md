@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-11-22
+
+### Fixed
+
+- Rewrote the POSIX process monitoring probe (`PROCESS_LIST_PROBE_BY_CPU` / `PROCESS_LIST_PROBE_BY_MEMORY`) and Linux `ss` / `ip route` probes in `session_runtime.rs` to use batched `ps -p` + single `ls -ld` + `awk` pipelines instead of per-process shell loops and per-field `od` forks (~12 total commands vs. ~3,500 forks), eliminating process-list SSH timeouts on cloud hosts while retaining executable path, working directory, VSZ, thread count, and Rust-redacted command lines.
+- Fixed terminal bottom-line clipping caused by `@xterm/addon-fit` measuring `padding: 8px 10px` on the `terminalHost` parent container instead of `.xterm`; moved inner padding onto `.terminal-surface-shell` (`padding: 8px 10px 10px`) with `padding: 0` on `.terminal-pane-surface` and `padding-bottom: 2px` on `.xterm`.
+
+### Changed
+
+- Refined the terminal footer status bar (`TerminalQuickOpsBar`) with fully localized session states (`已连接` / `连接中` / `已断开` / etc.) and environment badges (`开发` / `预发布` / `生产` / `本机`) with proper icon spacing, semantic colors, and clean dot-separated tabular metadata (`UTF-8 · cols × rows · 行/列`).
+
 ## [0.1.14] - 2026-11-21
 
 ### Added

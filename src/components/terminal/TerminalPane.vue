@@ -112,6 +112,35 @@ const terminalPalette = computed(() => {
   );
 });
 const terminalEncodingLabel = computed(() => TEXT_ENCODING_LABELS[settings.value.terminalEncoding]);
+const environmentTone = computed<'production' | 'staging' | 'development' | 'local'>(() => {
+  if (localSession.value) return 'local';
+  return profile.value?.environment ?? 'local';
+});
+const environmentLabel = computed(() => {
+  if (localSession.value) return t('localTerminal.badge');
+  const env = profile.value?.environment;
+  if (env === 'production') return t('profile.production');
+  if (env === 'staging') return t('profile.staging');
+  if (env === 'development') return t('profile.development');
+  return t('localTerminal.badge');
+});
+const sessionStateLabel = computed(() => {
+  switch (session.value?.state) {
+    case 'connected': return t('terminal.stateConnected');
+    case 'resolving':
+    case 'connecting': return t('terminal.stateConnecting');
+    case 'verifying_host': return t('terminal.stateVerifyingHost');
+    case 'trust_required': return t('terminal.stateTrustRequired');
+    case 'ready_to_authenticate':
+    case 'authenticating': return t('terminal.stateAuthenticating');
+    case 'reconnecting': return t('terminal.stateReconnecting');
+    case 'disconnecting': return t('terminal.stateDisconnecting');
+    case 'disconnected': return t('terminal.stateDisconnected');
+    case 'failed': return t('terminal.stateFailed');
+    case 'idle': return t('terminal.stateIdle');
+    default: return t('terminal.noSession');
+  }
+});
 
 let terminal: XTerm | null = null;
 let fitAddon: FitAddon | null = null;
@@ -1040,8 +1069,10 @@ defineExpose({ focusTerminal, sessionId: computed(() => props.sessionId) });
       v-if="visible"
       :focused="focused"
       :connected="remoteOpsConnected"
-      :environment="localSession ? t('localTerminal.badge') : (profile?.environment ?? 'local')"
-      :session-state-label="session?.state ?? t('terminal.noSession')"
+      :session-state="session?.state ?? 'idle'"
+      :environment="environmentLabel"
+      :environment-tone="environmentTone"
+      :session-state-label="sessionStateLabel"
       :encoding-label="terminalEncodingLabel"
       :columns="columns"
       :rows="rows"
@@ -1198,6 +1229,8 @@ defineExpose({ focusTerminal, sessionId: computed(() => props.sessionId) });
   position: relative;
   min-width: 0;
   min-height: 0;
+  box-sizing: border-box;
+  padding: 8px 10px 10px;
   overflow: hidden;
   background: hsl(var(--terminal-bg));
 }
@@ -1208,12 +1241,14 @@ defineExpose({ focusTerminal, sessionId: computed(() => props.sessionId) });
   min-width: 0;
   min-height: 0;
   box-sizing: border-box;
-  padding: 8px 10px;
+  padding: 0;
   overflow: hidden;
 }
 
 .terminal-pane-surface :deep(.xterm) {
   height: 100%;
+  box-sizing: border-box;
+  padding-bottom: 2px;
   cursor: text;
   font-kerning: none !important;
   font-variant-ligatures: none !important;
