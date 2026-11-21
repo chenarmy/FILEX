@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-11-21
+
+### Fixed
+
+- Fixed the POSIX process monitoring probe (`ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o stat=`) where comma-separated `pid=,ppid=...` caused `procps` to treat the remaining columns as a custom header for `pid`, leaving `PPID`, user, CPU, memory, and state blank and preventing server-side CPU/memory sorting from taking effect.
+- Preserved kernel thread process names containing `/` (such as `kworker/0:0H` and `ksoftirqd/0`) while still stripping leading filesystem paths on platforms that return full executable paths.
+- Switched the process right-click menu in `MonitorDetailsDialog` to the shared vertical `.file-context-menu` surface with proper `z-index` layering, visual action separator, and Up/Down/Home/End keyboard navigation (replacing the unapplied component-scoped `.terminal-context-menu` class that caused items to render horizontally).
+
 ## [0.1.11] - 2026-11-21
 
 ### Added

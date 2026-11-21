@@ -5778,17 +5778,17 @@ if ! command -v ps >/dev/null 2>&1 || ! command -v od >/dev/null 2>&1 || ! comma
   exit 0
 fi
 printf 'PLATFORM=POSIX\n'
-ps -e -o pid=,ppid=,user=,pcpu=,time=,rss=,stat= 2>/dev/null | sort -k4,4nr -k6,6nr | head -n 101 | while read -r pid ppid user cpu cpu_time rss state; do
+ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o stat= 2>/dev/null | sort -k4,4nr -k6,6nr | head -n 101 | while read -r pid ppid user cpu cpu_time rss state; do
   case "$pid" in ''|*[!0-9]*) continue;; esac
   name=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '\012\015')
-  name=${name##*/}
+  case "$name" in /*) name=${name##*/};; esac
   name=$(printf '%s' "$name" | cut -c 1-128)
   start=$(ps -p "$pid" -o lstart= 2>/dev/null | tr -d '\012\015')
   elapsed=$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' \012\015')
   [ -n "$name" ] || continue
-  name_hex=$(printf '%s' "$name" | od -An -tx1 | tr -d ' \012')
-  user_hex=$(printf '%s' "$user" | cut -c 1-128 | od -An -tx1 | tr -d ' \012')
-  start_hex=$(printf '%s' "$start" | od -An -tx1 | tr -d ' \012')
+  name_hex=$(printf '%s' "$name" | od -An -tx1 | tr -d ' \011\012\015')
+  user_hex=$(printf '%s' "$user" | cut -c 1-128 | od -An -tx1 | tr -d ' \011\012\015')
+  start_hex=$(printf '%s' "$start" | od -An -tx1 | tr -d ' \011\012\015')
   printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$user_hex" "$cpu" "$cpu_time" "$rss" "$state" "$start_hex" "$elapsed" "$name_hex"
 done"#;
 
@@ -5798,17 +5798,17 @@ if ! command -v ps >/dev/null 2>&1 || ! command -v od >/dev/null 2>&1 || ! comma
   exit 0
 fi
 printf 'PLATFORM=POSIX\n'
-ps -e -o pid=,ppid=,user=,pcpu=,time=,rss=,stat= 2>/dev/null | sort -k6,6nr -k4,4nr | head -n 101 | while read -r pid ppid user cpu cpu_time rss state; do
+ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o stat= 2>/dev/null | sort -k6,6nr -k4,4nr | head -n 101 | while read -r pid ppid user cpu cpu_time rss state; do
   case "$pid" in ''|*[!0-9]*) continue;; esac
   name=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '\012\015')
-  name=${name##*/}
+  case "$name" in /*) name=${name##*/};; esac
   name=$(printf '%s' "$name" | cut -c 1-128)
   start=$(ps -p "$pid" -o lstart= 2>/dev/null | tr -d '\012\015')
   elapsed=$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' \012\015')
   [ -n "$name" ] || continue
-  name_hex=$(printf '%s' "$name" | od -An -tx1 | tr -d ' \012')
-  user_hex=$(printf '%s' "$user" | cut -c 1-128 | od -An -tx1 | tr -d ' \012')
-  start_hex=$(printf '%s' "$start" | od -An -tx1 | tr -d ' \012')
+  name_hex=$(printf '%s' "$name" | od -An -tx1 | tr -d ' \011\012\015')
+  user_hex=$(printf '%s' "$user" | cut -c 1-128 | od -An -tx1 | tr -d ' \011\012\015')
+  start_hex=$(printf '%s' "$start" | od -An -tx1 | tr -d ' \011\012\015')
   printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$user_hex" "$cpu" "$cpu_time" "$rss" "$state" "$start_hex" "$elapsed" "$name_hex"
 done"#;
 
@@ -5905,10 +5905,10 @@ fn posix_terminate_command(
     let signal_flag = posix_signal_flag(signal);
     format!(
         r#"LC_ALL=C; export LC_ALL
-current_start_hex=$(ps -p {pid} -o lstart= 2>/dev/null | tr -d '\012\015' | od -An -tx1 | tr -d ' \012')
+current_start_hex=$(ps -p {pid} -o lstart= 2>/dev/null | tr -d '\012\015' | od -An -tx1 | tr -d ' \011\012\015')
 current_name=$(ps -p {pid} -o comm= 2>/dev/null | tr -d '\012\015')
-current_name=${{current_name##*/}}
-current_name_hex=$(printf '%s' "$current_name" | cut -c 1-128 | od -An -tx1 | tr -d ' \012')
+case "$current_name" in /*) current_name=${{current_name##*/}};; esac
+current_name_hex=$(printf '%s' "$current_name" | cut -c 1-128 | od -An -tx1 | tr -d ' \011\012\015')
 if [ -z "$current_start_hex" ] || [ -z "$current_name_hex" ]; then printf 'PROCESS_TARGET_MISSING\n'; exit 44; fi
 if [ "$current_start_hex" != "{start_marker_hex}" ] || [ "$current_name_hex" != "{name_marker_hex}" ]; then printf 'PROCESS_IDENTITY_CHANGED\n'; exit 44; fi
 kill -{signal_flag} {pid} 2>/dev/null || exit 45
@@ -6080,7 +6080,11 @@ fn decode_process_name(value: &str, hexadecimal: bool) -> Option<String> {
             .collect()
     };
     let decoded = String::from_utf8_lossy(&bytes);
-    let basename = decoded.rsplit(['/', '\\']).next().unwrap_or_default();
+    let basename = if decoded.starts_with('/') || decoded.contains('\\') {
+        decoded.rsplit(['/', '\\']).next().unwrap_or_default()
+    } else {
+        decoded.as_ref()
+    };
     let mut name = String::new();
     for character in basename.chars().take(96) {
         if character.is_control() || character == '\n' || character == '\r' {
@@ -9092,11 +9096,23 @@ mod tests {
 
     #[test]
     fn selects_descending_cpu_and_memory_process_probes() {
-        use super::{posix_process_probe, windows_process_script};
+        use super::{decode_process_name, posix_process_probe, windows_process_script};
         use filex_contracts::ProcessSortBy;
 
-        assert!(posix_process_probe(ProcessSortBy::Cpu).contains("sort -k4,4nr -k6,6nr"));
-        assert!(posix_process_probe(ProcessSortBy::Memory).contains("sort -k6,6nr -k4,4nr"));
+        let cpu_probe = posix_process_probe(ProcessSortBy::Cpu);
+        let memory_probe = posix_process_probe(ProcessSortBy::Memory);
+        assert!(
+            cpu_probe
+                .contains("ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o stat=")
+        );
+        assert!(
+            memory_probe
+                .contains("ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o stat=")
+        );
+        assert!(!cpu_probe.contains("pid=,ppid="));
+        assert!(!memory_probe.contains("pid=,ppid="));
+        assert!(cpu_probe.contains("sort -k4,4nr -k6,6nr"));
+        assert!(memory_probe.contains("sort -k6,6nr -k4,4nr"));
         assert!(
             windows_process_script(ProcessSortBy::Cpu)
                 .contains("Sort-Object -Property CPU,WorkingSet64 -Descending")
@@ -9105,5 +9121,62 @@ mod tests {
             windows_process_script(ProcessSortBy::Memory)
                 .contains("Sort-Object -Property WorkingSet64,CPU -Descending")
         );
+        assert_eq!(
+            decode_process_name(&hex("kworker/0:0H"), true).as_deref(),
+            Some("kworker/0:0H")
+        );
+        assert_eq!(
+            decode_process_name(&hex("/usr/sbin/sshd"), true).as_deref(),
+            Some("sshd")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executes_posix_process_probes_with_populated_metrics_and_order() {
+        use super::posix_process_probe;
+        use filex_contracts::ProcessSortBy;
+        use std::process::Command;
+
+        for sort_by in [ProcessSortBy::Cpu, ProcessSortBy::Memory] {
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(posix_process_probe(sort_by))
+                .output()
+                .expect("sh should execute posix process probe");
+            assert!(
+                output.status.success(),
+                "posix process probe should succeed"
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let parsed = parse_posix_process_output(&stdout, 1_700_000_000_000)
+                .expect("live posix probe output should parse");
+            assert!(
+                !parsed.processes.is_empty(),
+                "live posix probe should return at least one process"
+            );
+            assert!(
+                parsed
+                    .processes
+                    .iter()
+                    .any(|entry| entry.parent_pid.is_some()
+                        && entry.user.is_some()
+                        && entry.cpu_percent.is_some()
+                        && entry.memory_bytes.is_some()
+                        && entry.state.is_some()),
+                "live posix probe should populate ppid, user, cpu, memory, and state"
+            );
+            if sort_by == ProcessSortBy::Memory {
+                let memories = parsed
+                    .processes
+                    .iter()
+                    .filter_map(|entry| entry.memory_bytes)
+                    .collect::<Vec<_>>();
+                assert!(
+                    memories.windows(2).all(|pair| pair[0] >= pair[1]),
+                    "memory probe should return processes in descending memory order"
+                );
+            }
+        }
     }
 }

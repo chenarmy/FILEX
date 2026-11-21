@@ -260,12 +260,37 @@ function closeProcessMenu(): void {
 
 function openProcessMenu(event: MouseEvent, entry: ProcessEntry): void {
   selectedPid.value = entry.pid;
-  const menuWidth = 216;
-  const menuHeight = 250;
+  const menuWidth = 220;
+  const menuHeight = isPosixProcesses.value ? 268 : 160;
   const x = Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8));
   const y = Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8));
   processMenu.value = { x, y, entry };
   void nextTick(() => processMenuEl.value?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus());
+}
+
+function handleProcessMenuKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    closeProcessMenu();
+    return;
+  }
+  const items = Array.from(processMenuEl.value?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]:not(:disabled)') ?? []);
+  if (items.length === 0) return;
+  const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    items[(currentIndex + 1 + items.length) % items.length]?.focus();
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    items[(currentIndex - 1 + items.length) % items.length]?.focus();
+  } else if (event.key === 'Home') {
+    event.preventDefault();
+    items[0]?.focus();
+  } else if (event.key === 'End') {
+    event.preventDefault();
+    items[items.length - 1]?.focus();
+  }
 }
 
 async function copyProcessField(value: string): Promise<void> {
@@ -633,29 +658,31 @@ function handleDialogKeydown(event: KeyboardEvent): void {
     <div
       v-if="processMenu"
       ref="processMenuEl"
-      class="terminal-context-menu process-context-menu"
+      class="file-context-menu process-context-menu"
       role="menu"
       :aria-label="t('monitorDetails.processContextLabel')"
       :style="{ left: `${processMenu.x}px`, top: `${processMenu.y}px` }"
       @pointerdown.stop
+      @contextmenu.prevent
+      @keydown="handleProcessMenuKeydown"
     >
       <button
         type="button"
         role="menuitem"
-        class="danger-menu-item"
+        class="danger danger-menu-item"
         :disabled="!processMenu.entry.canTerminate || processes.terminatingPid !== null"
         @click="sendProcessSignal(processMenu.entry, 'SIGTERM')"
       >
-        <CircleStop :size="13" />{{ t('monitorDetails.signalTerminate') }}
+        <CircleStop :size="13" /><span>{{ t('monitorDetails.signalTerminate') }}</span>
       </button>
       <button
         type="button"
         role="menuitem"
-        class="danger-menu-item"
+        class="danger danger-menu-item"
         :disabled="!processMenu.entry.canTerminate || processes.terminatingPid !== null"
         @click="sendProcessSignal(processMenu.entry, 'SIGKILL')"
       >
-        <Skull :size="13" />{{ t('monitorDetails.signalForceKill') }}
+        <Skull :size="13" /><span>{{ t('monitorDetails.signalForceKill') }}</span>
       </button>
       <template v-if="isPosixProcesses">
         <button
@@ -664,7 +691,7 @@ function handleDialogKeydown(event: KeyboardEvent): void {
           :disabled="!processMenu.entry.canTerminate || processes.terminatingPid !== null"
           @click="sendProcessSignal(processMenu.entry, 'SIGHUP')"
         >
-          <RotateCw :size="13" />{{ t('monitorDetails.signalReload') }}
+          <RotateCw :size="13" /><span>{{ t('monitorDetails.signalReload') }}</span>
         </button>
         <button
           type="button"
@@ -672,7 +699,7 @@ function handleDialogKeydown(event: KeyboardEvent): void {
           :disabled="!processMenu.entry.canTerminate || processes.terminatingPid !== null"
           @click="sendProcessSignal(processMenu.entry, 'SIGSTOP')"
         >
-          <PauseCircle :size="13" />{{ t('monitorDetails.signalPause') }}
+          <PauseCircle :size="13" /><span>{{ t('monitorDetails.signalPause') }}</span>
         </button>
         <button
           type="button"
@@ -680,14 +707,15 @@ function handleDialogKeydown(event: KeyboardEvent): void {
           :disabled="!processMenu.entry.canTerminate || processes.terminatingPid !== null"
           @click="sendProcessSignal(processMenu.entry, 'SIGCONT')"
         >
-          <PlayCircle :size="13" />{{ t('monitorDetails.signalResume') }}
+          <PlayCircle :size="13" /><span>{{ t('monitorDetails.signalResume') }}</span>
         </button>
       </template>
+      <div class="file-context-separator" role="separator" />
       <button type="button" role="menuitem" @click="copyProcessField(String(processMenu.entry.pid))">
-        <Copy :size="13" />{{ t('monitorDetails.copyPid') }}
+        <Copy :size="13" /><span>{{ t('monitorDetails.copyPid') }}</span>
       </button>
       <button type="button" role="menuitem" @click="copyProcessField(processMenu.entry.name)">
-        <Copy :size="13" />{{ t('monitorDetails.copyProcessName') }}
+        <Copy :size="13" /><span>{{ t('monitorDetails.copyProcessName') }}</span>
       </button>
     </div>
   </div>
