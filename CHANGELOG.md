@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-11-21
+
+### Added
+
+- Descending CPU and Memory process sorting inside Host Monitoring Details (`MonitorDetailsDialog`), with a synchronized toolbar mode switch and clickable sortable `CPU` and `Memory` table headers (`aria-sort`, keyboard focusable, and localized in `zh-CN` and `en-US`).
+- Deterministic client-side process sorting (`sortProcesses` in `src/domain/monitorDetails.ts`) with Windows `cpuTimeSeconds` fallback when `cpuPercent` is unavailable, missing-value placement, and secondary metric/PID tie-breakers.
+- Backend `ProcessSortBy` (`cpu` / `memory`) support for POSIX and Windows process probes (`collect_process_snapshot`) so truncated host process lists (>100 processes) fetch the true top-100 processes for the active sort dimension while keeping snapshot refresh and process termination aligned.
+
 ## [0.1.10] - 2026-11-17
 
 ### Added

@@ -37,13 +37,13 @@ use filex_contracts::{
     HostTrustEvaluation, HostTrustRecord, ImportKnownHostsInput, ImportKnownHostsResult,
     KnownHostsImportPreview, LocalDirectoryListing, LocalFileEntry, LocalTextPreview,
     LocalTextSaveResult, MaintenanceArtifact, NetworkSnapshot, OperationResult, OpsCategory,
-    OpsSnapshot, ProcessSignal, ProcessSnapshot, QuickConnectInput, RecordHostTrustInput,
-    RemoteDirectoryListing, RemoteJobOutputChunk, RemoteJobSummary, RemotePermissionUpdateResult,
-    RemoteState, RemoteTextPreview, RemoteTextSaveResult, RuntimePaths, SafeSettings,
-    SaveCommandSnippetInput, SessionConnectionProgress, SessionSummary, SshConfigImportPreview,
-    StartRemoteJobInput, SystemMonitorSnapshot, TransferState, TransferTask, TunnelRule,
-    TunnelSummary, UpdateConnectionProfileInput, UpdateRemotePermissionsInput, UpdateStatus,
-    UpdateTunnelRuleInput,
+    OpsSnapshot, ProcessSignal, ProcessSnapshot, ProcessSortBy, QuickConnectInput,
+    RecordHostTrustInput, RemoteDirectoryListing, RemoteJobOutputChunk, RemoteJobSummary,
+    RemotePermissionUpdateResult, RemoteState, RemoteTextPreview, RemoteTextSaveResult,
+    RuntimePaths, SafeSettings, SaveCommandSnippetInput, SessionConnectionProgress, SessionSummary,
+    SshConfigImportPreview, StartRemoteJobInput, SystemMonitorSnapshot, TransferState,
+    TransferTask, TunnelRule, TunnelSummary, UpdateConnectionProfileInput,
+    UpdateRemotePermissionsInput, UpdateStatus, UpdateTunnelRuleInput,
 };
 use filex_core::{
     CommandHistoryService, HostTrustService, PathBookmarkService, ProfileService,
@@ -5031,12 +5031,18 @@ async fn collect_system_monitor(
 #[tauri::command]
 async fn collect_process_snapshot(
     session_id: String,
+    sort_by: Option<ProcessSortBy>,
     sessions: State<'_, SessionRuntime>,
 ) -> Result<OperationResult<ProcessSnapshot>, ()> {
-    Ok(match sessions.collect_process_snapshot(&session_id).await {
-        Ok(snapshot) => OperationResult::success(snapshot),
-        Err(error) => OperationResult::failure(error),
-    })
+    Ok(
+        match sessions
+            .collect_process_snapshot(&session_id, sort_by.unwrap_or_default())
+            .await
+        {
+            Ok(snapshot) => OperationResult::success(snapshot),
+            Err(error) => OperationResult::failure(error),
+        },
+    )
 }
 
 #[tauri::command]

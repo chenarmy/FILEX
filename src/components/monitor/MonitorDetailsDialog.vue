@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
+  ArrowDown,
+  ArrowDownWideNarrow,
   CircleStop,
   Copy,
   PauseCircle,
@@ -11,7 +13,12 @@ import {
   X,
 } from 'lucide-vue-next';
 import { currentLocale, t } from '@/i18n';
-import { ALL_NETWORK_INTERFACES, networkEndpointsForInterface } from '@/domain/monitorDetails';
+import {
+  ALL_NETWORK_INTERFACES,
+  DEFAULT_PROCESS_SORT,
+  networkEndpointsForInterface,
+  sortProcesses,
+} from '@/domain/monitorDetails';
 import { useMonitorPolling } from '@/composables/useMonitorPolling';
 import { useMonitorStore } from '@/stores/monitor';
 import { useNetworkStore } from '@/stores/network';
@@ -24,6 +31,7 @@ import type {
   NetworkInterface,
   ProcessEntry,
   ProcessSignal,
+  ProcessSortBy,
 } from '@/types/contracts';
 
 const props = defineProps<{ initialView: MonitorDetailsView }>();
@@ -35,6 +43,7 @@ const processes = useProcessesStore();
 const network = useNetworkStore();
 const ui = useUiStore();
 const activeView = ref<MonitorDetailsView>(props.initialView);
+const processSortBy = ref<ProcessSortBy>(DEFAULT_PROCESS_SORT);
 const selectedPid = ref<number | null>(null);
 const selectedInterfaceName = ref(ALL_NETWORK_INTERFACES);
 const selectedEndpointIndex = ref<number | null>(null);
@@ -45,7 +54,11 @@ const dialogRoot = ref<HTMLElement | null>(null);
 
 const connected = computed(() => sessions.activeSession?.state === 'connected');
 const isPosixProcesses = computed(() => processes.snapshot?.platform === 'posix');
-const selectedProcess = computed(() => processes.snapshot?.processes.find((entry) => entry.pid === selectedPid.value) ?? null);
+const sortedProcesses = computed(() => sortProcesses(
+  processes.snapshot?.processes ?? [],
+  processSortBy.value,
+));
+const selectedProcess = computed(() => sortedProcesses.value.find((entry) => entry.pid === selectedPid.value) ?? null);
 const interfaces = computed(() => network.snapshot?.interfaces ?? []);
 const selectedInterface = computed(() => interfaces.value.find((entry) => entry.name === selectedInterfaceName.value) ?? null);
 const filteredEndpoints = computed(() => networkEndpointsForInterface(
@@ -130,14 +143,35 @@ onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', handleDocumentPointerDown, true);
 });
 
+function syncSelectedProcess(): void {
+  if (selectedPid.value !== null && sortedProcesses.value.some((entry) => entry.pid === selectedPid.value)) {
+    return;
+  }
+  selectedPid.value = sortedProcesses.value[0]?.pid ?? null;
+}
+
+async function collectProcessesForCurrentSort(sessionId: string): Promise<void> {
+  await processes.collect(sessionId, processSortBy.value);
+  syncSelectedProcess();
+}
+
+function setProcessSort(nextSort: ProcessSortBy): void {
+  if (processSortBy.value === nextSort) return;
+  processSortBy.value = nextSort;
+  closeProcessMenu();
+  const sessionId = sessions.activeSessionId;
+  if (sessionId && connected.value && processes.snapshot?.truncated) {
+    void collectProcessesForCurrentSort(sessionId);
+  }
+}
+
 async function loadView(view: MonitorDetailsView): Promise<void> {
   const sessionId = sessions.activeSessionId;
   if (!sessionId || !connected.value) return;
   if (view === 'overview') {
     await monitor.collect(sessionId);
   } else if (view === 'processes') {
-    await processes.collect(sessionId);
-    selectedPid.value = processes.snapshot?.processes[0]?.pid ?? null;
+    await collectProcessesForCurrentSort(sessionId);
   } else {
     await network.collect(sessionId);
   }
@@ -411,18 +445,83 @@ function handleDialogKeydown(event: KeyboardEvent): void {
 
       <div v-else-if="activeView === 'processes'" class="monitor-details-body">
         <section class="monitor-details-primary" :aria-label="t('monitorDetails.processes')">
+          <div class="monitor-interface-toolbar monitor-process-toolbar">
+            <div class="monitor-sort-group">
+              <span class="monitor-sort-label">{{ t('monitorDetails.sortLabel') }}</span>
+              <div class="monitor-sort-switch" role="group" :aria-label="t('monitorDetails.sortLabel')">
+                <button
+                  type="button"
+                  :class="{ active: processSortBy === 'cpu' }"
+                  :aria-pressed="processSortBy === 'cpu'"
+                  :title="t('monitorDetails.sortByCpuHint')"
+                  :disabled="processes.terminatingPid !== null"
+                  @click="setProcessSort('cpu')"
+                >
+                  <ArrowDownWideNarrow :size="12" aria-hidden="true" />
+                  <span>{{ t('monitorDetails.sortByCpu') }}</span>
+                </button>
+                <button
+                  type="button"
+                  :class="{ active: processSortBy === 'memory' }"
+                  :aria-pressed="processSortBy === 'memory'"
+                  :title="t('monitorDetails.sortByMemoryHint')"
+                  :disabled="processes.terminatingPid !== null"
+                  @click="setProcessSort('memory')"
+                >
+                  <ArrowDownWideNarrow :size="12" aria-hidden="true" />
+                  <span>{{ t('monitorDetails.sortByMemory') }}</span>
+                </button>
+              </div>
+            </div>
+            <span class="mono">{{ t('monitorDetails.visibleRecords', { count: sortedProcesses.length }) }}</span>
+          </div>
           <div v-if="processes.error" class="inline-notice error" role="alert">{{ t(processes.error.messageKey as Parameters<typeof t>[0]) }}</div>
           <div v-else-if="processes.loading && !processes.snapshot" class="task-empty">{{ t('inspector.processLoading') }}</div>
           <div v-else-if="processes.snapshot?.state === 'unsupported'" class="task-empty">{{ t('inspector.processUnsupported') }}</div>
-          <div v-else-if="!processes.snapshot?.processes.length" class="task-empty">{{ t('inspector.processEmpty') }}</div>
+          <div v-else-if="!sortedProcesses.length" class="task-empty">{{ t('inspector.processEmpty') }}</div>
           <template v-else>
-            <p v-if="processes.snapshot.truncated" class="monitor-details-notice">{{ t('inspector.processTruncated') }}</p>
+            <p v-if="processes.snapshot?.truncated" class="monitor-details-notice">{{ t('inspector.processTruncated') }}</p>
             <div class="monitor-table-scroll">
               <table class="monitor-details-table">
-                <thead><tr><th>PID</th><th>{{ t('monitorDetails.user') }}</th><th>{{ t('monitorDetails.name') }}</th><th>CPU</th><th>{{ t('monitorDetails.memory') }}</th><th>{{ t('monitorDetails.state') }}</th></tr></thead>
+                <thead>
+                  <tr>
+                    <th>PID</th>
+                    <th>{{ t('monitorDetails.user') }}</th>
+                    <th>{{ t('monitorDetails.name') }}</th>
+                    <th :aria-sort="processSortBy === 'cpu' ? 'descending' : 'none'">
+                      <button
+                        type="button"
+                        class="monitor-sort-header"
+                        :class="{ active: processSortBy === 'cpu' }"
+                        :title="t('monitorDetails.sortByCpuHint')"
+                        :aria-label="t('monitorDetails.sortByCpuHint')"
+                        :disabled="processes.terminatingPid !== null"
+                        @click="setProcessSort('cpu')"
+                      >
+                        <span>CPU</span>
+                        <ArrowDown :size="11" class="monitor-sort-icon" aria-hidden="true" />
+                      </button>
+                    </th>
+                    <th :aria-sort="processSortBy === 'memory' ? 'descending' : 'none'">
+                      <button
+                        type="button"
+                        class="monitor-sort-header"
+                        :class="{ active: processSortBy === 'memory' }"
+                        :title="t('monitorDetails.sortByMemoryHint')"
+                        :aria-label="t('monitorDetails.sortByMemoryHint')"
+                        :disabled="processes.terminatingPid !== null"
+                        @click="setProcessSort('memory')"
+                      >
+                        <span>{{ t('monitorDetails.memory') }}</span>
+                        <ArrowDown :size="11" class="monitor-sort-icon" aria-hidden="true" />
+                      </button>
+                    </th>
+                    <th>{{ t('monitorDetails.state') }}</th>
+                  </tr>
+                </thead>
                 <tbody>
                   <tr
-                    v-for="entry in processes.snapshot.processes"
+                    v-for="entry in sortedProcesses"
                     :key="entry.pid"
                     tabindex="0"
                     :class="{ selected: selectedPid === entry.pid }"

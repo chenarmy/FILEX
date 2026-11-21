@@ -598,6 +598,7 @@ export interface SystemMonitorSnapshot {
 }
 
 export type ProcessPlatform = 'posix' | 'windows';
+export type ProcessSortBy = 'cpu' | 'memory';
 
 export interface ProcessEntry {
   pid: number;

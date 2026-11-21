@@ -170,6 +170,38 @@ describe('monitoring store session isolation', () => {
     expect(mocks.collectProcessSnapshot).toHaveBeenCalledTimes(2);
   });
 
+  it('forwards requested process sort mode and supersedes in-flight collections when sort changes', async () => {
+    const cpuRequest = deferred<OperationResult<ProcessSnapshot>>();
+    const memoryRequest = deferred<OperationResult<ProcessSnapshot>>();
+    mocks.collectProcessSnapshot
+      .mockImplementationOnce(() => cpuRequest.promise)
+      .mockImplementationOnce(() => memoryRequest.promise)
+      .mockResolvedValueOnce(processResult('after-memory-kill'));
+    mocks.terminateRemoteProcess.mockResolvedValueOnce({
+      ok: true,
+      requestId: 'term-mem-1',
+      data: { pid: 42, terminated: true, detailNote: null },
+    });
+
+    const store = useProcessesStore();
+    const first = store.collect('session-a', 'cpu');
+    const second = store.collect('session-a', 'memory');
+
+    memoryRequest.resolve(processResult('memory-sorted'));
+    await second;
+    expect(store.snapshot?.snapshotId).toBe('snapshot-memory-sorted');
+
+    cpuRequest.resolve(processResult('stale-cpu-sorted'));
+    await first;
+    expect(store.snapshot?.snapshotId).toBe('snapshot-memory-sorted');
+
+    const ok = await store.terminate('session-a', 42, 'SIGTERM');
+    expect(ok).toBe(true);
+    expect(mocks.collectProcessSnapshot).toHaveBeenNthCalledWith(1, 'session-a', 'cpu');
+    expect(mocks.collectProcessSnapshot).toHaveBeenNthCalledWith(2, 'session-a', 'memory');
+    expect(mocks.collectProcessSnapshot).toHaveBeenNthCalledWith(3, 'session-a', 'memory');
+  });
+
   it('collects Docker snapshots, fetches logs, and refreshes after container actions', async () => {
     const dockerSnapshot: DockerSnapshot = {
       availability: 'available',

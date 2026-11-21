@@ -5243,6 +5243,113 @@
   font-size: 0.7857rem;
 }
 
+.monitor-sort-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.monitor-sort-label {
+  color: hsl(var(--text-secondary));
+  font-size: 0.7857rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.monitor-sort-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  background: hsl(var(--surface-inset));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-control);
+}
+
+.monitor-sort-switch button {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  color: hsl(var(--muted-foreground));
+  background: transparent;
+  border: 0;
+  border-radius: calc(var(--radius-control) - 1px);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--duration-micro) var(--ease-arco),
+    background var(--duration-micro) var(--ease-arco);
+}
+
+.monitor-sort-switch button:hover:not(:disabled) {
+  color: hsl(var(--foreground));
+  background: hsl(var(--fill-subtle));
+}
+
+.monitor-sort-switch button.active {
+  color: hsl(var(--primary));
+  background: hsl(var(--primary) / 0.14);
+  font-weight: 600;
+}
+
+.monitor-sort-switch button:focus-visible,
+.monitor-sort-header:focus-visible {
+  outline: 1px solid hsl(var(--ring));
+  outline-offset: 1px;
+}
+
+.monitor-sort-switch button:disabled,
+.monitor-sort-header:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.monitor-sort-header {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 4px;
+  margin-inline-start: -4px;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  transition: color var(--duration-micro) var(--ease-arco),
+    background var(--duration-micro) var(--ease-arco);
+}
+
+.monitor-sort-header:hover:not(:disabled) {
+  color: hsl(var(--foreground));
+  background: hsl(var(--fill-subtle));
+}
+
+.monitor-sort-header.active {
+  color: hsl(var(--primary));
+}
+
+.monitor-sort-icon {
+  flex: none;
+  opacity: 0.35;
+  transition: opacity var(--duration-micro) var(--ease-arco);
+}
+
+.monitor-sort-header:hover:not(:disabled) .monitor-sort-icon,
+.monitor-sort-header:focus-visible .monitor-sort-icon,
+.monitor-sort-header.active .monitor-sort-icon {
+  opacity: 1;
+}
+
 .interface-summary {
   display: flex;
   flex-wrap: wrap;

@@ -1171,6 +1171,14 @@ pub enum ProcessPlatform {
     Windows,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessSortBy {
+    #[default]
+    Cpu,
+    Memory,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessEntry {

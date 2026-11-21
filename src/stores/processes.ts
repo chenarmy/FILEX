@@ -2,7 +2,7 @@ import { computed, ref } from 'vue';
 import { defineStore } from 'pinia';
 import { collectProcessSnapshot, terminateRemoteProcess } from '@/api/domain/processesApi';
 import { createSessionStateCache } from '@/domain/sessionStateCache';
-import type { AppError, ProcessSignal, ProcessSnapshot } from '@/types/contracts';
+import type { AppError, ProcessSignal, ProcessSnapshot, ProcessSortBy } from '@/types/contracts';
 
 interface ProcessSessionCache {
   snapshot: ProcessSnapshot | null;
@@ -17,6 +17,7 @@ export const useProcessesStore = defineStore('processes', () => {
   const displayState = computed(() => snapshot.value?.state ?? 'unprobed');
   const sessionCaches = createSessionStateCache<ProcessSessionCache>();
   let snapshotSessionId: string | null = null;
+  let activeSortBy: ProcessSortBy = 'cpu';
   let generation = 0;
 
   function persistCurrentSession(): void {
@@ -66,14 +67,16 @@ export const useProcessesStore = defineStore('processes', () => {
     }
   }
 
-  async function collect(sessionId: string): Promise<void> {
+  async function collect(sessionId: string, sortBy: ProcessSortBy = 'cpu'): Promise<void> {
     if (snapshotSessionId !== sessionId) activateSession(sessionId);
-    if (loading.value || terminatingPid.value !== null) return;
+    if (terminatingPid.value !== null) return;
+    if (loading.value && activeSortBy === sortBy) return;
     const request = ++generation;
+    activeSortBy = sortBy;
     loading.value = true;
     error.value = null;
     try {
-      const result = await collectProcessSnapshot(sessionId);
+      const result = await collectProcessSnapshot(sessionId, sortBy);
       if (request !== generation || snapshotSessionId !== sessionId) return;
       if (result.ok) snapshot.value = result.data;
       else {
@@ -105,7 +108,7 @@ export const useProcessesStore = defineStore('processes', () => {
     } finally {
       if (request === generation) terminatingPid.value = null;
     }
-    if (accepted && request === generation) await collect(sessionId);
+    if (accepted && request === generation) await collect(sessionId, activeSortBy);
     return accepted;
   }
 

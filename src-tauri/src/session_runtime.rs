@@ -29,11 +29,12 @@ use filex_contracts::{
     DirectorySyncPreviewEntry, DockerAvailability, DockerContainerAction, DockerLogsSnapshot,
     DockerSnapshot, FileChecksumComparison, HostKeyChallenge, HostTrustEvaluation, MonitorState,
     NetworkEndpoint, NetworkInterface, NetworkPlatform, NetworkSnapshot, OpsCategory, OpsSnapshot,
-    ProcessEntry, ProcessPlatform, ProcessSignal, ProcessSnapshot, RemoteDirectoryListing,
-    RemoteFileEntry, RemotePermissionScope, RemotePermissionUpdateResult, RemoteState,
-    RemoteTextPreview, RemoteTextSaveResult, RouteEntry, SessionConnectionProgress, SessionKind,
-    SessionState, SessionSummary, SystemMonitorSnapshot, TransferDirection, TransferResumeState,
-    TransferTask, TunnelKind, TunnelState, TunnelSummary, capabilities_for_ssh,
+    ProcessEntry, ProcessPlatform, ProcessSignal, ProcessSnapshot, ProcessSortBy,
+    RemoteDirectoryListing, RemoteFileEntry, RemotePermissionScope, RemotePermissionUpdateResult,
+    RemoteState, RemoteTextPreview, RemoteTextSaveResult, RouteEntry, SessionConnectionProgress,
+    SessionKind, SessionState, SessionSummary, SystemMonitorSnapshot, TransferDirection,
+    TransferResumeState, TransferTask, TunnelKind, TunnelState, TunnelSummary,
+    capabilities_for_ssh,
 };
 use filex_core::{HostTrustService, SessionMachine, parse_monitor_probe};
 use filex_ssh::{
@@ -3306,6 +3307,7 @@ impl SessionRuntime {
     pub async fn collect_process_snapshot(
         &self,
         session_id: &str,
+        sort_by: ProcessSortBy,
     ) -> Result<ProcessSnapshot, AppError> {
         self.invalidate_process_snapshot(session_id)?;
         let session = {
@@ -3317,7 +3319,7 @@ impl SessionRuntime {
         };
         let windows_output = session
             .execute_bounded(
-                &windows_process_command(),
+                &windows_process_command(sort_by),
                 64 * 1024,
                 Duration::from_secs(8),
             )
@@ -3336,7 +3338,11 @@ impl SessionRuntime {
         }
 
         let output = session
-            .execute_bounded(PROCESS_LIST_PROBE, 64 * 1024, Duration::from_secs(8))
+            .execute_bounded(
+                posix_process_probe(sort_by),
+                64 * 1024,
+                Duration::from_secs(8),
+            )
             .await
             .map_err(|error| ssh_error(&error))?;
         if output.exit_status.is_some_and(|status| status != 0) {
@@ -5766,13 +5772,13 @@ fn windows_network_command() -> String {
     powershell_script_command(WINDOWS_NETWORK_SCRIPT)
 }
 
-const PROCESS_LIST_PROBE: &str = r#"LC_ALL=C; export LC_ALL
+const PROCESS_LIST_PROBE_BY_CPU: &str = r#"LC_ALL=C; export LC_ALL
 if ! command -v ps >/dev/null 2>&1 || ! command -v od >/dev/null 2>&1 || ! command -v cut >/dev/null 2>&1 || ! command -v tr >/dev/null 2>&1 || ! command -v sort >/dev/null 2>&1 || ! command -v head >/dev/null 2>&1; then
   printf 'PLATFORM=UNSUPPORTED\n'
   exit 0
 fi
 printf 'PLATFORM=POSIX\n'
-ps -e -o pid=,ppid=,user=,pcpu=,time=,rss=,stat= 2>/dev/null | sort -k4,4nr | head -n 101 | while read -r pid ppid user cpu cpu_time rss state; do
+ps -e -o pid=,ppid=,user=,pcpu=,time=,rss=,stat= 2>/dev/null | sort -k4,4nr -k6,6nr | head -n 101 | while read -r pid ppid user cpu cpu_time rss state; do
   case "$pid" in ''|*[!0-9]*) continue;; esac
   name=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '\012\015')
   name=${name##*/}
@@ -5786,11 +5792,38 @@ ps -e -o pid=,ppid=,user=,pcpu=,time=,rss=,stat= 2>/dev/null | sort -k4,4nr | he
   printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$user_hex" "$cpu" "$cpu_time" "$rss" "$state" "$start_hex" "$elapsed" "$name_hex"
 done"#;
 
-const WINDOWS_PROCESS_SCRIPT: &str = r#"if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { exit 42 }
+const PROCESS_LIST_PROBE_BY_MEMORY: &str = r#"LC_ALL=C; export LC_ALL
+if ! command -v ps >/dev/null 2>&1 || ! command -v od >/dev/null 2>&1 || ! command -v cut >/dev/null 2>&1 || ! command -v tr >/dev/null 2>&1 || ! command -v sort >/dev/null 2>&1 || ! command -v head >/dev/null 2>&1; then
+  printf 'PLATFORM=UNSUPPORTED\n'
+  exit 0
+fi
+printf 'PLATFORM=POSIX\n'
+ps -e -o pid=,ppid=,user=,pcpu=,time=,rss=,stat= 2>/dev/null | sort -k6,6nr -k4,4nr | head -n 101 | while read -r pid ppid user cpu cpu_time rss state; do
+  case "$pid" in ''|*[!0-9]*) continue;; esac
+  name=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '\012\015')
+  name=${name##*/}
+  name=$(printf '%s' "$name" | cut -c 1-128)
+  start=$(ps -p "$pid" -o lstart= 2>/dev/null | tr -d '\012\015')
+  elapsed=$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' \012\015')
+  [ -n "$name" ] || continue
+  name_hex=$(printf '%s' "$name" | od -An -tx1 | tr -d ' \012')
+  user_hex=$(printf '%s' "$user" | cut -c 1-128 | od -An -tx1 | tr -d ' \012')
+  start_hex=$(printf '%s' "$start" | od -An -tx1 | tr -d ' \012')
+  printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$user_hex" "$cpu" "$cpu_time" "$rss" "$state" "$start_hex" "$elapsed" "$name_hex"
+done"#;
+
+fn posix_process_probe(sort_by: ProcessSortBy) -> &'static str {
+    match sort_by {
+        ProcessSortBy::Cpu => PROCESS_LIST_PROBE_BY_CPU,
+        ProcessSortBy::Memory => PROCESS_LIST_PROBE_BY_MEMORY,
+    }
+}
+
+const WINDOWS_PROCESS_SCRIPT_BY_CPU: &str = r#"if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { exit 42 }
 Write-Output 'PLATFORM=WINDOWS'
 $ErrorActionPreference = 'Continue'
 $culture = [System.Globalization.CultureInfo]::InvariantCulture
-$items = Get-Process -ErrorAction SilentlyContinue | Sort-Object -Property CPU -Descending | Select-Object -First 101
+$items = Get-Process -ErrorAction SilentlyContinue | Sort-Object -Property CPU,WorkingSet64 -Descending | Select-Object -First 101
 foreach ($process in $items) {
   $cpu = ''
   $memory = ''
@@ -5806,8 +5839,35 @@ foreach ($process in $items) {
   Write-Output ("P`t{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}" -f $process.Id, $parent, $cpu, $memory, $start, $startMs, $name)
 }"#;
 
-fn windows_process_command() -> String {
-    powershell_script_command(WINDOWS_PROCESS_SCRIPT)
+const WINDOWS_PROCESS_SCRIPT_BY_MEMORY: &str = r#"if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { exit 42 }
+Write-Output 'PLATFORM=WINDOWS'
+$ErrorActionPreference = 'Continue'
+$culture = [System.Globalization.CultureInfo]::InvariantCulture
+$items = Get-Process -ErrorAction SilentlyContinue | Sort-Object -Property WorkingSet64,CPU -Descending | Select-Object -First 101
+foreach ($process in $items) {
+  $cpu = ''
+  $memory = ''
+  $start = 0
+  $startMs = ''
+  $parent = ''
+  try { if ($null -ne $process.CPU) { $cpu = ([double]$process.CPU).ToString('0.###', $culture) } } catch {}
+  try { $memory = [int64]$process.WorkingSet64 } catch {}
+  try { $start = [int64]($process.StartTime.ToUniversalTime().Ticks) } catch {}
+  try { $startMs = [DateTimeOffset]::new($process.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds() } catch {}
+  try { if ($null -ne $process.Parent) { $parent = [int64]$process.Parent.Id } } catch {}
+  $name = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$process.ProcessName))
+  Write-Output ("P`t{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}" -f $process.Id, $parent, $cpu, $memory, $start, $startMs, $name)
+}"#;
+
+fn windows_process_script(sort_by: ProcessSortBy) -> &'static str {
+    match sort_by {
+        ProcessSortBy::Cpu => WINDOWS_PROCESS_SCRIPT_BY_CPU,
+        ProcessSortBy::Memory => WINDOWS_PROCESS_SCRIPT_BY_MEMORY,
+    }
+}
+
+fn windows_process_command(sort_by: ProcessSortBy) -> String {
+    powershell_script_command(windows_process_script(sort_by))
 }
 
 fn windows_terminate_command(pid: u32, start_time_ticks: u64) -> String {
@@ -9028,5 +9088,22 @@ mod tests {
         assert_eq!(snapshot.endpoints[0].process_name.as_deref(), Some("sshd"));
         assert_eq!(snapshot.routes[0].destination, "default");
         assert_eq!(snapshot.routes[0].gateway.as_deref(), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn selects_descending_cpu_and_memory_process_probes() {
+        use super::{posix_process_probe, windows_process_script};
+        use filex_contracts::ProcessSortBy;
+
+        assert!(posix_process_probe(ProcessSortBy::Cpu).contains("sort -k4,4nr -k6,6nr"));
+        assert!(posix_process_probe(ProcessSortBy::Memory).contains("sort -k6,6nr -k4,4nr"));
+        assert!(
+            windows_process_script(ProcessSortBy::Cpu)
+                .contains("Sort-Object -Property CPU,WorkingSet64 -Descending")
+        );
+        assert!(
+            windows_process_script(ProcessSortBy::Memory)
+                .contains("Sort-Object -Property WorkingSet64,CPU -Descending")
+        );
     }
 }

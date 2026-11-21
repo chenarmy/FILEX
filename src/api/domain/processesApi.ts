@@ -1,8 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { failure, isTauriRuntime, normalizeUnknownError } from '@/api/common';
-import type { OperationResult, ProcessSignal, ProcessSnapshot } from '@/types/contracts';
+import type { OperationResult, ProcessSignal, ProcessSnapshot, ProcessSortBy } from '@/types/contracts';
 
-export async function collectProcessSnapshot(sessionId: string): Promise<OperationResult<ProcessSnapshot>> {
+export async function collectProcessSnapshot(
+  sessionId: string,
+  sortBy: ProcessSortBy = 'cpu',
+): Promise<OperationResult<ProcessSnapshot>> {
   if (!isTauriRuntime()) {
     return failure({
       code: 'PROCESS_DESKTOP_ONLY',
@@ -12,7 +15,7 @@ export async function collectProcessSnapshot(sessionId: string): Promise<Operati
     });
   }
   try {
-    return await invoke<OperationResult<ProcessSnapshot>>('collect_process_snapshot', { sessionId });
+    return await invoke<OperationResult<ProcessSnapshot>>('collect_process_snapshot', { sessionId, sortBy });
   } catch (error: unknown) {
     return failure(normalizeUnknownError(error, 'PROCESS_PROBE_FAILED'));
   }
