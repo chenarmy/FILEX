@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-11-21
+
+### Added
+
+- GitHub and CNB repository & release links inside Settings → Updates & Diagnostics (`open_project_url` strict HTTPS allowlist + one-click copy).
+- Docker Logs tail presets (`Tail 50`, `Tail 100`, `Tail 200`, `Tail 500`), bounded in-dialog Live Follow with smart auto-scroll and Jump-to-Bottom, plus a one-click `Terminal tail -f` shortcut (`docker logs -f --tail <N>`) and a visible 256 KiB / 500-line safety bound indicator.
+- Terminal right-click menu action to attach the selected terminal output (or recent visible buffer output when unselected) directly to the AI Assistant, displaying an inline terminal context chip and focusing the composer.
+- AI Assistant `Diagnose` mode (`filex-exec-v1`) enabling multi-step server troubleshooting with a strict Rust command safety classifier (`assistant_exec.rs`): strictly allowlisted read-only diagnostic commands can auto-run (opt-in toggle, bounded to 32 KiB / 15s and redacted before leaving the host), while all other commands require explicit user confirmation on an inline approval card.
+
+### Fixed
+
+- Fixed truncated container images, status text, port mappings, and CPU/memory resource columns in `DockerDialog` by widening the modal, wrapping cells cleanly, stacking multi-port mappings as individual lines, and displaying CPU / memory / PIDs in structured multi-line cells.
+
 ## [0.1.12] - 2026-11-21
 
 ### Fixed

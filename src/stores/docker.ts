@@ -103,20 +103,25 @@ export const useDockerStore = defineStore('docker', () => {
     }
   }
 
-  async function fetchLogs(sessionId: string, containerId: string, tailLines = 200): Promise<void> {
+  async function fetchLogs(
+    sessionId: string,
+    containerId: string,
+    tailLines = 100,
+    options: { silent?: boolean } = {},
+  ): Promise<void> {
     syncSession(sessionId);
     if (logsLoading.value) return;
     const request = ++generation;
-    logsLoading.value = true;
+    if (!options.silent) logsLoading.value = true;
     error.value = null;
     try {
       const result = await collectDockerLogs(sessionId, containerId, tailLines);
       if (request !== generation || snapshotSessionId !== sessionId) return;
       if (result.ok) logs.value = result.data;
-      else error.value = result.error;
+      else if (!options.silent) error.value = result.error;
       persistCurrentSession();
     } finally {
-      if (request === generation) logsLoading.value = false;
+      if (request === generation && !options.silent) logsLoading.value = false;
     }
   }
 

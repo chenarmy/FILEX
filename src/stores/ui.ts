@@ -43,6 +43,7 @@ export const useUiStore = defineStore('ui', () => {
   const dockerDialogOpen = ref(false);
   const opsDialogCategory = ref<OpsCategory | null>(null);
   const assistantTerminalSelection = ref<{ host: string; text: string; truncated: boolean } | null>(null);
+  const assistantFocusToken = ref(0);
   const toast = ref<string | null>(null);
   const confirmation = ref<{
     title: string;
@@ -220,6 +221,10 @@ export const useUiStore = defineStore('ui', () => {
     assistantOpen.value = !assistantOpen.value;
   }
 
+  function requestAssistantFocus(): void {
+    assistantFocusToken.value += 1;
+  }
+
   function attachTerminalSelection(host: string, selectedText: string): void {
     const text = selectedText.trim();
     if (!text) return;
@@ -230,6 +235,7 @@ export const useUiStore = defineStore('ui', () => {
       truncated: characters.length > 4_000,
     };
     assistantOpen.value = true;
+    requestAssistantFocus();
   }
 
   function clearTerminalSelection(): void {
@@ -257,6 +263,7 @@ export const useUiStore = defineStore('ui', () => {
     dockerDialogOpen,
     opsDialogCategory,
     assistantTerminalSelection,
+    assistantFocusToken,
     toast,
     confirmation,
     notify,
@@ -293,6 +300,7 @@ export const useUiStore = defineStore('ui', () => {
     confirm,
     resolveConfirmation,
     toggleAssistant,
+    requestAssistantFocus,
     attachTerminalSelection,
     clearTerminalSelection,
   };

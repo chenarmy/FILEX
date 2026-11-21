@@ -3,9 +3,11 @@ import { defineStore } from 'pinia';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   cancelAssistantResponse,
+  classifyAssistantCommand,
   clearAssistantHistory,
   createAssistantConversation,
   deleteAssistantConversation,
+  executeAssistantCommand,
   getAssistantProvider,
   listAssistantConversations,
   loadAssistantHistory,
@@ -17,12 +19,20 @@ import {
   streamAssistantResponse,
   updateAssistantModel,
   type AssistantChunk,
+  type AssistantCommandExecutionResult,
+  type AssistantCommandRisk,
   type AssistantConversationSummary,
   type AssistantHistoryMessage,
+  type AssistantMode,
   type AssistantProviderStatus,
   type AssistantTurn,
 } from '@/api/domain/assistantApi';
 import { isTauriRuntime } from '@/api/common';
+import {
+  ASSISTANT_DIAGNOSE_MAX_STEPS,
+  formatAssistantExecOutputForModel,
+  parseAssistantExecRequest,
+} from '@/domain/assistantExec';
 import { parseAssistantDraftContent, type AssistantProposalNotice } from '@/domain/assistantProposalParser';
 import { useEventsStore } from '@/stores/events';
 import { useSessionsStore } from '@/stores/sessions';
@@ -32,14 +42,27 @@ import type {
   SessionSummary,
 } from '@/types/contracts';
 
+export interface AssistantExecAction {
+  command: string;
+  reason: string;
+  risk: AssistantCommandRisk;
+  status: 'pending_approval' | 'running' | 'completed' | 'denied' | 'failed' | 'blocked';
+  target: AssistantProposalTargetSnapshot | null;
+  stale: boolean;
+  stepIndex: number;
+  result?: AssistantCommandExecutionResult;
+  errorKey?: string;
+}
+
 export interface AssistantMessage {
   id: string;
   role: 'user' | 'assistant';
-  mode: 'explain' | 'draft';
+  mode: AssistantMode;
   content: string;
   status: 'complete' | 'streaming' | 'failed' | 'cancelled';
   proposal?: AssistantDraftProposalV1;
   proposalNotice?: AssistantProposalNotice;
+  execAction?: AssistantExecAction;
 }
 
 const ASSISTANT_CONVERSATION_LIMIT = 10;
@@ -55,6 +78,8 @@ export const useAssistantStore = defineStore('assistant', () => {
   const conversations = ref<AssistantConversationSummary[]>([]);
   const activeConversationId = ref('');
   const busy = ref(false);
+  const execBusy = ref(false);
+  const autoRunReadOnly = ref(true);
   const historySaving = ref(false);
   const error = ref<string | null>(null);
   const cancelError = ref<string | null>(null);
@@ -63,6 +88,8 @@ export const useAssistantStore = defineStore('assistant', () => {
   let unlisten: UnlistenFn | null = null;
   let activeCompletion: { requestId: string; resolve: () => void } | null = null;
   let initialization: Promise<void> | null = null;
+  let diagnosticCancelled = false;
+  let lastDiagnoseContext: string | null = null;
   const browserHistories = new Map<string, AssistantMessage[]>();
   const pendingProposalTargets = new Map<string, PendingProposalTarget>();
   const sessions = useSessionsStore();
@@ -87,6 +114,9 @@ export const useAssistantStore = defineStore('assistant', () => {
       for (const message of list) {
         if (message.proposal?.target && !proposalTargetMatches(message.proposal.target, active)) {
           message.proposal.stale = true;
+        }
+        if (message.execAction?.target && !proposalTargetMatches(message.execAction.target, active)) {
+          message.execAction.stale = true;
         }
       }
     }
@@ -265,22 +295,49 @@ export const useAssistantStore = defineStore('assistant', () => {
     }
   }
 
-  async function send(
-    prompt: string,
-    mode: 'explain' | 'draft',
-    context: string | null,
-    proposalTarget: AssistantProposalTargetSnapshot | null = null,
-    contextFileIds: string[] = [],
-  ): Promise<boolean> {
-    if (!provider.value.configured) return false;
-    if (!provider.value.externalDataConsent) {
-      error.value = 'errors.assistantConsentRequired';
-      return false;
+  function buildHistoryForProvider(): AssistantTurn[] {
+    const turns: AssistantTurn[] = [];
+    for (const item of messages.value) {
+      if (item.status !== 'complete' || !item.content.trim()) continue;
+      turns.push({ role: item.role, content: item.content.slice(0, 8_000) });
+      if (item.execAction?.status === 'completed' && item.execAction.result) {
+        turns.push({
+          role: 'user',
+          content: formatAssistantExecOutputForModel(item.execAction.result, 6_000),
+        });
+      } else if (item.execAction?.status === 'denied') {
+        turns.push({
+          role: 'user',
+          content: `[FILEX notice] User declined to run command: ${item.execAction.command}`,
+        });
+      }
     }
-    if (busy.value || historySaving.value || !activeConversationId.value || !prompt.trim()) return false;
+    return turns.slice(-12);
+  }
+
+  function currentConnectedSshTarget(): AssistantProposalTargetSnapshot | null {
+    const active = sessions.activeSession;
+    if (!active || active.state !== 'connected' || active.sessionKind !== 'ssh') return null;
+    return {
+      sessionId: active.id,
+      generation: active.generation,
+      host: active.host,
+      port: active.port,
+      state: active.state,
+    };
+  }
+
+  async function streamAssistantTurn(options: {
+    prompt: string;
+    mode: AssistantMode;
+    context: string | null;
+    proposalTarget: AssistantProposalTargetSnapshot | null;
+    contextFileIds: string[];
+    appendUserMessage: boolean;
+  }): Promise<AssistantMessage | null> {
     const requestId = globalThis.crypto?.randomUUID?.() ?? `assistant-${Date.now()}`;
     const pendingTarget: PendingProposalTarget = {
-      target: mode === 'draft' && proposalTarget ? { ...proposalTarget } : null,
+      target: options.mode === 'draft' && options.proposalTarget ? { ...options.proposalTarget } : null,
       stale: false,
     };
     pendingProposalTargets.set(requestId, pendingTarget);
@@ -296,28 +353,40 @@ export const useAssistantStore = defineStore('assistant', () => {
     const completionPromise = new Promise<void>((resolve) => {
       activeCompletion = { requestId, resolve };
     });
-    const history: AssistantTurn[] = messages.value
-      .filter((item) => item.status === 'complete' && item.content.trim())
-      .slice(-12)
-      .map((item) => ({ role: item.role, content: item.content.slice(0, 8_000) }));
+    const history = buildHistoryForProvider();
     activeRequestId.value = requestId;
     cancelError.value = null;
     busy.value = true;
     error.value = null;
-    messages.value.push({ id: `user-${requestId}`, role: 'user', mode, content: prompt.trim(), status: 'complete' });
-    messages.value.push({ id: requestId, role: 'assistant', mode, content: '', status: 'streaming' });
+    if (options.appendUserMessage) {
+      messages.value.push({
+        id: `user-${requestId}`,
+        role: 'user',
+        mode: options.mode,
+        content: options.prompt.trim(),
+        status: 'complete',
+      });
+    }
+    const assistantMessage: AssistantMessage = {
+      id: requestId,
+      role: 'assistant',
+      mode: options.mode,
+      content: '',
+      status: 'streaming',
+    };
+    messages.value.push(assistantMessage);
     useEventsStore().record('system', 'ASSISTANT_REQUEST_STARTED', 'info', {
       requestId,
-      mode,
-      contextAttached: context !== null || contextFileIds.length > 0,
+      mode: options.mode,
+      contextAttached: options.context !== null || options.contextFileIds.length > 0,
     });
     try {
       const result = await streamAssistantResponse({
         requestId,
-        prompt: prompt.trim(),
-        mode,
-        context,
-        contextFileIds,
+        prompt: options.prompt.trim(),
+        mode: options.mode,
+        context: options.context,
+        contextFileIds: options.contextFileIds,
         history,
       });
       if (messages.value.length > 24) messages.value.splice(0, messages.value.length - 24);
@@ -325,12 +394,12 @@ export const useAssistantStore = defineStore('assistant', () => {
         error.value = result.error.messageKey;
         const answer = messages.value.find((item) => item.id === requestId);
         if (answer) answer.status = 'failed';
-        return false;
+        return null;
       }
       await completionPromise;
       busy.value = false;
       await persistHistory();
-      return true;
+      return messages.value.find((item) => item.id === requestId) ?? null;
     } finally {
       if (activeCompletion?.requestId === requestId) {
         const completion = activeCompletion;
@@ -343,7 +412,177 @@ export const useAssistantStore = defineStore('assistant', () => {
     }
   }
 
+  async function processDiagnosticExec(
+    message: AssistantMessage,
+    context: string | null,
+    stepIndex: number,
+  ): Promise<void> {
+    if (diagnosticCancelled || message.status !== 'complete' || message.mode !== 'diagnose') return;
+    if (stepIndex >= ASSISTANT_DIAGNOSE_MAX_STEPS) return;
+    const proposal = parseAssistantExecRequest(message.content);
+    if (!proposal) return;
+    const target = currentConnectedSshTarget();
+    if (!target) {
+      message.execAction = {
+        command: proposal.command,
+        reason: proposal.reason,
+        risk: 'requires_confirmation',
+        status: 'failed',
+        target: null,
+        stale: true,
+        stepIndex,
+        errorKey: 'errors.sessionNotConnected',
+      };
+      return;
+    }
+    const classification = await classifyAssistantCommand(proposal.command);
+    if (diagnosticCancelled) return;
+    const risk: AssistantCommandRisk = classification.ok ? classification.data : 'requires_confirmation';
+    if (risk === 'blocked') {
+      message.execAction = {
+        command: proposal.command,
+        reason: proposal.reason,
+        risk,
+        status: 'blocked',
+        target,
+        stale: false,
+        stepIndex,
+        errorKey: 'errors.assistantCommandBlocked',
+      };
+      return;
+    }
+    message.execAction = {
+      command: proposal.command,
+      reason: proposal.reason,
+      risk,
+      status: 'pending_approval',
+      target,
+      stale: false,
+      stepIndex,
+    };
+    if (risk === 'read_only' && autoRunReadOnly.value) {
+      await executeActionAndContinue(message, false, context);
+    }
+  }
+
+  async function executeActionAndContinue(
+    message: AssistantMessage,
+    approvedByUser: boolean,
+    context: string | null,
+  ): Promise<void> {
+    const action = message.execAction;
+    if (!action || execBusy.value || busy.value) return;
+    if (!action.target || action.stale || !proposalTargetMatches(action.target, sessions.activeSession)) {
+      action.stale = true;
+      action.status = 'failed';
+      action.errorKey = 'errors.sessionNotConnected';
+      return;
+    }
+    execBusy.value = true;
+    action.status = 'running';
+    delete action.errorKey;
+    let execResult: AssistantCommandExecutionResult | null = null;
+    try {
+      const result = await executeAssistantCommand({
+        sessionId: action.target.sessionId,
+        generation: action.target.generation,
+        command: action.command,
+        approvedByUser,
+      });
+      if (!result.ok) {
+        action.status = 'failed';
+        action.errorKey = result.error.messageKey;
+        useEventsStore().record('system', result.error.code, 'warning');
+        return;
+      }
+      execResult = result.data;
+      action.result = execResult;
+      action.status = 'completed';
+      useEventsStore().record('system', 'ASSISTANT_COMMAND_EXECUTED', 'info', {
+        risk: execResult.risk,
+        exitCode: execResult.exitCode,
+      });
+    } finally {
+      execBusy.value = false;
+    }
+    if (!execResult || diagnosticCancelled) return;
+    const followUpPrompt = `${formatAssistantExecOutputForModel(execResult)}\n\nContinue analyzing the server issue based on this command output. If more inspection is needed, emit one more filex-exec-v1 block; otherwise give a clear root-cause diagnosis and recommended actions.`;
+    const nextMessage = await streamAssistantTurn({
+      prompt: followUpPrompt,
+      mode: 'diagnose',
+      context,
+      proposalTarget: null,
+      contextFileIds: [],
+      appendUserMessage: false,
+    });
+    if (nextMessage) {
+      await processDiagnosticExec(nextMessage, context, action.stepIndex + 1);
+    }
+  }
+
+  async function approveExecAction(messageId: string): Promise<void> {
+    if (busy.value || execBusy.value) return;
+    const message = messages.value.find((item) => item.id === messageId);
+    if (!message?.execAction || message.execAction.status !== 'pending_approval') return;
+    diagnosticCancelled = false;
+    await executeActionAndContinue(message, true, lastDiagnoseContext);
+  }
+
+  async function denyExecAction(messageId: string): Promise<void> {
+    if (busy.value || execBusy.value) return;
+    const message = messages.value.find((item) => item.id === messageId);
+    if (!message?.execAction || message.execAction.status !== 'pending_approval') return;
+    message.execAction.status = 'denied';
+    useEventsStore().record('system', 'ASSISTANT_COMMAND_DENIED', 'info');
+    diagnosticCancelled = false;
+    const followUpPrompt = `The user declined to execute the command \`${message.execAction.command}\`. Continue analyzing with the information already available, or suggest a safer read-only alternative.`;
+    const nextMessage = await streamAssistantTurn({
+      prompt: followUpPrompt,
+      mode: 'diagnose',
+      context: lastDiagnoseContext,
+      proposalTarget: null,
+      contextFileIds: [],
+      appendUserMessage: false,
+    });
+    if (nextMessage) {
+      await processDiagnosticExec(nextMessage, lastDiagnoseContext, message.execAction.stepIndex + 1);
+    }
+  }
+
+  async function send(
+    prompt: string,
+    mode: AssistantMode,
+    context: string | null,
+    proposalTarget: AssistantProposalTargetSnapshot | null = null,
+    contextFileIds: string[] = [],
+  ): Promise<boolean> {
+    if (!provider.value.configured) return false;
+    if (!provider.value.externalDataConsent) {
+      error.value = 'errors.assistantConsentRequired';
+      return false;
+    }
+    if (busy.value || execBusy.value || historySaving.value || !activeConversationId.value || !prompt.trim()) return false;
+    diagnosticCancelled = false;
+    if (mode === 'diagnose') {
+      lastDiagnoseContext = context;
+    }
+    const completed = await streamAssistantTurn({
+      prompt,
+      mode,
+      context,
+      proposalTarget,
+      contextFileIds,
+      appendUserMessage: true,
+    });
+    if (!completed) return false;
+    if (mode === 'diagnose') {
+      await processDiagnosticExec(completed, context, 0);
+    }
+    return true;
+  }
+
   async function cancel(): Promise<boolean> {
+    diagnosticCancelled = true;
     const requestId = activeRequestId.value;
     if (!requestId) return true;
 
@@ -528,6 +767,8 @@ export const useAssistantStore = defineStore('assistant', () => {
     conversations,
     activeConversationId,
     busy,
+    execBusy,
+    autoRunReadOnly,
     historySaving,
     error,
     cancelError,
@@ -539,6 +780,8 @@ export const useAssistantStore = defineStore('assistant', () => {
     setModel,
     send,
     cancel,
+    approveExecAction,
+    denyExecAction,
     clearConversation,
     createConversation,
     selectConversation,

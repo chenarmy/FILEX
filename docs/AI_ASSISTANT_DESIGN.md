@@ -21,6 +21,7 @@ Initial outcomes:
 | --- | --- | --- |
 | Explain | Interpret selected context and answer questions | Read-only |
 | Draft | Produce commands, snippets or change plans | No execution |
+| Diagnose | Iteratively inspect the active SSH host with bounded commands and analyze results | Auto-run allowlisted read-only diagnostics (opt-in toggle); explicit confirmation required for all other commands |
 | Act | Propose registered FILEX tools | Policy and confirmation required |
 
 The assistant panel displays the provider/model, attached context chips, disclosure state and current target. Generated commands are shown in a preview surface; they are never injected into an active terminal without a visible user action.
@@ -60,7 +61,12 @@ The model cannot create new tools, change risk classes, approve itself or conver
 ## Security and privacy
 
 - Apply structured redaction before request serialization and again before diagnostic persistence.
-- The Tauri request boundary accepts only `explain` and `draft`, limits attached context to 64 KiB before provider-payload construction, and allows only one active provider request per app process.
+- The Tauri request boundary accepts `explain`, `draft`, and `diagnose`, limits attached context to 64 KiB before provider-payload construction, and allows only one active provider request per app process.
+- In `diagnose` mode, the assistant may propose at most one bounded shell command per turn via a `filex-exec-v1` JSON fence (`command`, `reason`), capped at 6 diagnostic steps per user turn.
+- The Rust backend classifies every proposed command before execution (`read_only`, `requires_confirmation`, or `blocked`):
+  - `read_only` permits only single-line pipelines of strictly allowlisted inspection binaries (e.g., `ps`, `top -b -n 1`, `free`, `df`, `ss`, `systemctl status`, `journalctl`, `docker ps/stats/logs/inspect`, `cat`/`head`/`tail`/`grep` excluding secret paths such as `/etc/shadow`, `.ssh/`, `.env`, private keys, or `/proc/*/environ`) with no command chaining, subshells, or redirections.
+  - Any command classified as `requires_confirmation` is refused by Rust unless `approved_by_user` is explicitly granted for that exact command and active session generation.
+  - Every executed diagnostic command is bounded to 32 KiB output and a 15-second timeout, redacted via `redact_assistant_text` before returning to the UI or provider, and recorded in the sanitized event log.
 - The native file picker accepts at most two regular, non-symlink files with allowlisted text/configuration extensions per assistant request. Rust rechecks each extension, UTF-8 encoding, control characters and 12 KiB byte limit after selection.
 - Vue receives only a random in-memory reference, base filename, extension and byte length. The retained Rust file buffer uses `Zeroizing<String>`, is released on removal or expires after 15 minutes, and is cleared by periodic cleanup. The provider receives the file text after best-effort redaction, without its filename or path. File contents, filenames, paths and references are not saved in chat history, event logs or diagnostics.
 - Selected file text has priority within a combined 16,000-character context budget. For multiple files, FILEX divides the available space evenly and lets unused space from shorter files flow to later files; any truncation is marked. Structured FILEX context uses any remaining space. The UI warns that redaction is best-effort and shows the file category and approximate outgoing size before sending.

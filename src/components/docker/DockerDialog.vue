@@ -1,19 +1,29 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
+  ArrowDownToLine,
   Box,
   Copy,
   FileText,
   Pause,
   Play,
+  Radio,
   RefreshCw,
   RotateCw,
   Search,
   Square,
+  Terminal,
   Trash2,
   X,
 } from 'lucide-vue-next';
 import { t } from '@/i18n';
+import {
+  buildDockerFollowTerminalCommand,
+  DEFAULT_DOCKER_LOG_TAIL,
+  DOCKER_LOG_TAIL_PRESETS,
+  parseDockerPorts,
+  type DockerLogTailPreset,
+} from '@/domain/docker';
 import { useDockerStore } from '@/stores/docker';
 import { useSessionsStore } from '@/stores/sessions';
 import { useUiStore } from '@/stores/ui';
@@ -30,8 +40,13 @@ const ui = useUiStore();
 const activeTab = ref<DockerTab>('containers');
 const filterQuery = ref('');
 const selectedContainerId = ref<string | null>(null);
+const tailLines = ref<DockerLogTailPreset>(DEFAULT_DOCKER_LOG_TAIL);
+const followLogs = ref(false);
+const logsAutoScroll = ref(true);
+const logsPreRef = ref<HTMLPreElement | null>(null);
 const closeButton = ref<HTMLButtonElement | null>(null);
 const dialogRoot = ref<HTMLElement | null>(null);
+let followTimer: number | null = null;
 
 const connected = computed(() => sessions.activeSession?.state === 'connected');
 const containers = computed(() => docker.snapshot?.containers ?? []);
@@ -63,10 +78,55 @@ const selectedContainer = computed(() => (
   containers.value.find((entry) => entry.id === selectedContainerId.value) ?? null
 ));
 
+function stopFollowTimer(): void {
+  if (followTimer !== null) {
+    window.clearInterval(followTimer);
+    followTimer = null;
+  }
+}
+
+function scrollLogsToBottom(force = false): void {
+  void nextTick(() => {
+    const pre = logsPreRef.value;
+    if (!pre) return;
+    if (force || logsAutoScroll.value) {
+      pre.scrollTop = pre.scrollHeight;
+      logsAutoScroll.value = true;
+    }
+  });
+}
+
+function handleLogsScroll(): void {
+  const pre = logsPreRef.value;
+  if (!pre) return;
+  const distanceFromBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight;
+  logsAutoScroll.value = distanceFromBottom <= 32;
+}
+
+watch(
+  () => [followLogs.value, activeTab.value, selectedContainerId.value, connected.value] as const,
+  ([following, tab, containerId, isConnected]) => {
+    stopFollowTimer();
+    if (!following || tab !== 'logs' || !containerId || !isConnected) return;
+    followTimer = window.setInterval(() => {
+      const sessionId = sessions.activeSessionId;
+      if (!sessionId || !connected.value || !selectedContainerId.value || docker.logsLoading) return;
+      void docker.fetchLogs(sessionId, selectedContainerId.value, tailLines.value, { silent: true })
+        .then(() => scrollLogsToBottom(false));
+    }, 2_500);
+  },
+);
+
+watch(activeTab, (tab) => {
+  if (tab !== 'logs') followLogs.value = false;
+});
+
 watch(
   () => [sessions.activeSessionId, sessions.activeSession?.state] as const,
   ([sessionId, state], [prevId]) => {
     if ((prevId && sessionId !== prevId) || !sessionId || state !== 'connected') {
+      followLogs.value = false;
+      stopFollowTimer();
       emit('close');
     }
   },
@@ -77,12 +137,17 @@ onMounted(() => {
   void nextTick(() => closeButton.value?.focus());
 });
 
+onBeforeUnmount(() => {
+  stopFollowTimer();
+});
+
 async function refresh(): Promise<void> {
   const sessionId = sessions.activeSessionId;
   if (!sessionId || !connected.value) return;
   await docker.collect(sessionId);
   if (activeTab.value === 'logs' && selectedContainerId.value) {
-    await docker.fetchLogs(sessionId, selectedContainerId.value);
+    await docker.fetchLogs(sessionId, selectedContainerId.value, tailLines.value);
+    scrollLogsToBottom(false);
   }
 }
 
@@ -91,13 +156,42 @@ async function openContainerLogs(entry: DockerContainerEntry): Promise<void> {
   if (!sessionId || !connected.value) return;
   selectedContainerId.value = entry.id;
   activeTab.value = 'logs';
-  await docker.fetchLogs(sessionId, entry.id);
+  logsAutoScroll.value = true;
+  await docker.fetchLogs(sessionId, entry.id, tailLines.value);
+  scrollLogsToBottom(true);
 }
 
-async function refreshLogs(): Promise<void> {
+async function selectTailPreset(preset: DockerLogTailPreset): Promise<void> {
+  tailLines.value = preset;
+  await refreshLogs(true);
+}
+
+async function refreshLogs(jumpBottom = false): Promise<void> {
   const sessionId = sessions.activeSessionId;
   if (!sessionId || !connected.value || !selectedContainerId.value) return;
-  await docker.fetchLogs(sessionId, selectedContainerId.value);
+  await docker.fetchLogs(sessionId, selectedContainerId.value, tailLines.value);
+  scrollLogsToBottom(jumpBottom);
+}
+
+function toggleFollowLogs(): void {
+  followLogs.value = !followLogs.value;
+  if (followLogs.value) {
+    logsAutoScroll.value = true;
+    void refreshLogs(true);
+  }
+}
+
+async function followLogsInTerminal(): Promise<void> {
+  const sessionId = sessions.activeSessionId;
+  const containerRef = selectedContainer.value?.name || selectedContainerId.value;
+  if (!sessionId || !connected.value || !containerRef) return;
+  const command = buildDockerFollowTerminalCommand(containerRef, tailLines.value);
+  if (!command) return;
+  followLogs.value = false;
+  stopFollowTimer();
+  await sessions.writeToSession(sessionId, new TextEncoder().encode(command));
+  ui.notify(t('docker.logsTerminalStarted', { name: containerRef }));
+  emit('close');
 }
 
 async function runAction(entry: DockerContainerEntry, action: DockerContainerAction): Promise<void> {
@@ -279,15 +373,31 @@ function handleDialogKeydown(event: KeyboardEvent): void {
                       <span class="mono docker-short-id">{{ entry.id.slice(0, 12) }}</span>
                     </div>
                   </td>
-                  <td class="mono truncate-cell" :title="entry.image">{{ entry.image }}</td>
+                  <td class="mono docker-wrap-cell" :title="entry.image">{{ entry.image }}</td>
                   <td>
                     <span class="docker-state-pill" :class="`state-${entry.state}`">{{ entry.state }}</span>
                   </td>
-                  <td class="truncate-cell" :title="entry.status">{{ entry.status }}</td>
-                  <td class="mono truncate-cell" :title="entry.ports">{{ entry.ports || '—' }}</td>
-                  <td class="mono">
+                  <td class="docker-wrap-cell" :title="entry.status">{{ entry.status }}</td>
+                  <td class="mono docker-ports-cell" :title="entry.ports">
+                    <div v-if="parseDockerPorts(entry.ports).length" class="docker-port-list">
+                      <span v-for="(port, index) in parseDockerPorts(entry.ports)" :key="`${entry.id}-port-${index}`" class="docker-port-chip">{{ port }}</span>
+                    </div>
+                    <span v-else>—</span>
+                  </td>
+                  <td class="mono docker-resource-cell">
                     <template v-if="entry.cpuPercent || entry.memoryUsage">
-                      {{ entry.cpuPercent ?? '—' }} · {{ entry.memoryUsage ?? '—' }}
+                      <div class="docker-metric-line">
+                        <span class="docker-metric-tag">{{ t('docker.metrics.cpu') }}</span>
+                        <span>{{ entry.cpuPercent ?? '—' }}</span>
+                      </div>
+                      <div class="docker-metric-line">
+                        <span class="docker-metric-tag">{{ t('docker.metrics.mem') }}</span>
+                        <span>{{ entry.memoryUsage ?? '—' }}</span>
+                      </div>
+                      <div v-if="entry.pids" class="docker-metric-line muted">
+                        <span class="docker-metric-tag">{{ t('docker.metrics.pids') }}</span>
+                        <span>{{ entry.pids }}</span>
+                      </div>
                     </template>
                     <template v-else>—</template>
                   </td>
@@ -373,7 +483,7 @@ function handleDialogKeydown(event: KeyboardEvent): void {
 
         <div v-else-if="activeTab === 'images'" class="docker-table-shell">
           <div v-if="filteredImages.length" class="monitor-table-scroll">
-            <table class="monitor-details-table">
+            <table class="monitor-details-table docker-images-table">
               <thead>
                 <tr>
                   <th>{{ t('docker.columns.repository') }}</th>
@@ -385,11 +495,11 @@ function handleDialogKeydown(event: KeyboardEvent): void {
               </thead>
               <tbody>
                 <tr v-for="img in filteredImages" :key="`${img.id}-${img.repository}-${img.tag}`">
-                  <td class="mono">{{ img.repository }}</td>
-                  <td class="mono">{{ img.tag }}</td>
+                  <td class="mono docker-wrap-cell">{{ img.repository }}</td>
+                  <td class="mono docker-wrap-cell">{{ img.tag }}</td>
                   <td class="mono">{{ img.id }}</td>
                   <td class="mono">{{ img.size }}</td>
-                  <td>{{ img.createdSince }}</td>
+                  <td class="docker-wrap-cell">{{ img.createdSince }}</td>
                 </tr>
               </tbody>
             </table>
@@ -401,9 +511,42 @@ function handleDialogKeydown(event: KeyboardEvent): void {
           <div v-if="!selectedContainerId" class="task-empty">{{ t('docker.selectContainerForLogs') }}</div>
           <template v-else>
             <div class="docker-logs-toolbar">
-              <strong class="mono">{{ selectedContainer?.name ?? selectedContainerId.slice(0, 12) }}</strong>
+              <div class="docker-logs-heading">
+                <strong class="mono">{{ selectedContainer?.name ?? selectedContainerId.slice(0, 12) }}</strong>
+                <span v-if="followLogs" class="status-pill live">{{ t('docker.logsLiveActive') }}</span>
+                <div class="monitor-sort-switch" role="group" :aria-label="t('docker.logsTab')">
+                  <button
+                    v-for="preset in DOCKER_LOG_TAIL_PRESETS"
+                    :key="preset"
+                    type="button"
+                    :class="{ active: tailLines === preset }"
+                    :aria-pressed="tailLines === preset"
+                    :disabled="docker.logsLoading"
+                    @click="selectTailPreset(preset)"
+                  >
+                    {{ t('docker.logsTailPreset', { count: preset }) }}
+                  </button>
+                </div>
+              </div>
               <div class="docker-row-actions">
-                <button type="button" class="docker-action-btn" :disabled="docker.logsLoading" @click="refreshLogs">
+                <button
+                  type="button"
+                  class="docker-action-btn"
+                  :class="{ primary: followLogs }"
+                  :aria-pressed="followLogs"
+                  @click="toggleFollowLogs"
+                >
+                  <Radio :size="12" />{{ followLogs ? t('docker.actions.pauseFollow') : t('docker.actions.followLogs') }}
+                </button>
+                <button
+                  type="button"
+                  class="docker-action-btn"
+                  :disabled="!connected"
+                  @click="followLogsInTerminal"
+                >
+                  <Terminal :size="12" />{{ t('docker.actions.followInTerminal') }}
+                </button>
+                <button type="button" class="docker-action-btn" :disabled="docker.logsLoading" @click="refreshLogs(true)">
                   <RefreshCw :size="12" />{{ t('docker.actions.refreshLogs') }}
                 </button>
                 <button type="button" class="docker-action-btn" :disabled="!docker.logs?.lines.length" @click="copyLogs">
@@ -411,8 +554,24 @@ function handleDialogKeydown(event: KeyboardEvent): void {
                 </button>
               </div>
             </div>
+            <div class="docker-logs-meta">
+              <span>{{ t('docker.logsBoundedNote', { count: docker.logs?.lines.length ?? 0 }) }}</span>
+              <button
+                v-if="!logsAutoScroll && docker.logs?.lines.length"
+                type="button"
+                class="docker-action-btn"
+                @click="scrollLogsToBottom(true)"
+              >
+                <ArrowDownToLine :size="11" />{{ t('docker.logsJumpBottom') }}
+              </button>
+            </div>
             <div v-if="docker.logsLoading && !docker.logs" class="task-empty">{{ t('docker.loading') }}</div>
-            <pre v-else-if="docker.logs?.lines.length" class="ops-command-pre mono">{{ docker.logs.lines.join('\n') }}</pre>
+            <pre
+              v-else-if="docker.logs?.lines.length"
+              ref="logsPreRef"
+              class="ops-command-pre mono"
+              @scroll="handleLogsScroll"
+            >{{ docker.logs.lines.join('\n') }}</pre>
             <div v-else class="task-empty">{{ t('docker.logsEmpty') }}</div>
           </template>
         </div>

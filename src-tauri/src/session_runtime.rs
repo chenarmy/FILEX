@@ -3504,6 +3504,44 @@ impl SessionRuntime {
         parse_ops_snapshot(category, &text, now_ms()?)
     }
 
+    pub async fn execute_assistant_command(
+        &self,
+        session_id: &str,
+        expected_generation: u64,
+        command: &str,
+        max_output_bytes: usize,
+        timeout: Duration,
+    ) -> Result<(Option<u32>, String, String, bool, u64), AppError> {
+        {
+            let machines = self.machines.lock().map_err(|_| session_lock_error())?;
+            let machine = machines
+                .get(session_id)
+                .ok_or_else(session_not_found_error)?;
+            let summary = machine.summary();
+            if summary.state != SessionState::Connected || summary.generation != expected_generation
+            {
+                return Err(AppError {
+                    code: "SESSION_STALE".to_owned(),
+                    message_key: "errors.sessionNotConnected".to_owned(),
+                    retryable: false,
+                    remote_state: RemoteState::Unchanged,
+                    field: None,
+                });
+            }
+        }
+        let session = self.session_handle(session_id).await?;
+        let started = std::time::Instant::now();
+        let output = session
+            .execute_bounded(command, max_output_bytes, timeout)
+            .await
+            .map_err(|error| ssh_error(&error))?;
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let truncated = output.stdout.len().saturating_add(output.stderr.len()) >= max_output_bytes;
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        Ok((output.exit_status, stdout, stderr, truncated, duration_ms))
+    }
+
     pub async fn compare_file_checksums(
         &self,
         operation_id: &str,

@@ -2,7 +2,9 @@
 import { computed, onMounted, reactive, ref } from 'vue';
 import {
   Bot,
+  Copy,
   Database,
+  ExternalLink,
   FolderOpen,
   Keyboard,
   Palette,
@@ -13,7 +15,13 @@ import {
   TerminalSquare,
   X,
 } from 'lucide-vue-next';
-import { getCredentialStoreStatus, getRuntimePaths } from '@/api/domain/runtimeApi';
+import {
+  getCredentialStoreStatus,
+  getRuntimePaths,
+  openProjectUrl,
+  PROJECT_URLS,
+  type ProjectUrlTarget,
+} from '@/api/domain/runtimeApi';
 import { selectExternalEditorExecutable } from '@/api/domain/filePickerApi';
 import {
   createBackup,
@@ -73,6 +81,33 @@ const maintenanceBusy = ref(false);
 const backupRestorePath = ref('');
 const runtimePaths = ref<RuntimePaths | null>(null);
 const assistantSettingsRef = ref<{ save: () => Promise<boolean>; reset: () => void } | null>(null);
+
+const projectLinks: Array<{
+  target: ProjectUrlTarget;
+  label: Parameters<typeof t>[0];
+  url: string;
+}> = [
+  { target: 'github_repo', label: 'settings.openGithub', url: PROJECT_URLS.github_repo },
+  { target: 'github_releases', label: 'settings.openGithubReleases', url: PROJECT_URLS.github_releases },
+  { target: 'cnb_repo', label: 'settings.openCnb', url: PROJECT_URLS.cnb_repo },
+  { target: 'cnb_releases', label: 'settings.openCnbReleases', url: PROJECT_URLS.cnb_releases },
+];
+
+async function openProjectLink(target: ProjectUrlTarget): Promise<void> {
+  const result = await openProjectUrl(target);
+  if (!result.ok) {
+    ui.notify(t(result.error.messageKey as Parameters<typeof t>[0]));
+  }
+}
+
+async function copyProjectLink(url: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(url);
+    ui.notify(t('settings.linkCopied', { url }));
+  } catch {
+    ui.notify(t('terminal.copyFailed'));
+  }
+}
 
 async function chooseExternalEditor(): Promise<void> {
   const selected = await selectExternalEditorExecutable(t('externalEditor.chooseTitle'));
@@ -673,6 +708,30 @@ onMounted(async () => {
             <h2>{{ t('settings.updates') }}</h2>
             <div class="setting-row"><div><strong>{{ t('settings.updateChannel') }}</strong></div><select v-model="draft.updateChannel"><option value="stable">{{ t('settings.stable') }}</option><option value="beta">Beta</option></select></div>
             <div class="setting-row"><div><strong>{{ t('settings.version') }}</strong></div><span class="mono">FILEX {{ updates.currentVersion }}</span></div>
+            <div class="setting-row project-links-row">
+              <div>
+                <strong>{{ t('settings.projectLinks') }}</strong>
+                <small>{{ t('settings.projectLinksHelp') }}</small>
+              </div>
+              <div class="project-links-list">
+                <div v-for="item in projectLinks" :key="item.target" class="project-link-item">
+                  <button type="button" class="button project-link-open" :title="item.url" @click="openProjectLink(item.target)">
+                    <ExternalLink :size="12" aria-hidden="true" />
+                    <span>{{ t(item.label) }}</span>
+                  </button>
+                  <span class="mono project-link-url" :title="item.url">{{ item.url }}</span>
+                  <button
+                    type="button"
+                    class="icon-button"
+                    :aria-label="`${t('settings.copyLink')}: ${item.url}`"
+                    :title="t('settings.copyLink')"
+                    @click="copyProjectLink(item.url)"
+                  >
+                    <Copy :size="12" />
+                  </button>
+                </div>
+              </div>
+            </div>
             <div class="setting-row"><div><strong>{{ t('settings.updaterStatus') }}</strong><small>{{ updates.configured ? t('settings.updaterConfigured') : t('settings.updaterNeedsSigning') }}</small><small v-if="updateChannelPending">{{ t('settings.updateChannelSaveHint') }}</small><small v-if="updates.errorMessage" role="alert">{{ updates.errorMessage }}</small></div><span class="mono">{{ updates.channel }}</span></div>
             <div class="setting-row"><div><strong>{{ t('settings.checkUpdates') }}</strong><small v-if="updates.availableVersion">{{ t('settings.updateAvailable', { version: updates.availableVersion }) }}</small><small v-if="updates.phase === 'downloading'" aria-live="polite">{{ updateProgressLabel }}</small><small v-else-if="updates.phase === 'installing'" aria-live="polite">{{ t('settings.updateInstalling') }}</small></div><div class="setting-control-group"><button type="button" class="button" :disabled="updates.isBusy || !updates.configured || updateChannelPending" @click="checkForUpdatesNow">{{ updates.phase === 'checking' ? t('settings.checkingUpdates') : updates.phase === 'downloading' ? t('settings.updateDownloading') : updates.phase === 'installing' ? t('settings.updateInstallingShort') : t('settings.checkUpdates') }}</button><button v-if="updates.phase === 'downloading'" type="button" class="button danger" :disabled="updates.cancelling" @click="cancelUpdateDownload">{{ updates.cancelling ? t('settings.updateCancelling') : t('settings.cancelUpdateDownload') }}</button><button v-else-if="updates.availableVersion" type="button" class="button primary" :disabled="updates.isBusy || updateChannelPending" @click="installAvailableUpdate">{{ t('settings.installUpdate') }}</button></div></div>
             <div v-if="updates.releaseNotes" class="setting-row update-notes-row"><div><strong>{{ t('settings.updateNotes') }}</strong><pre>{{ updates.releaseNotes }}</pre></div></div>

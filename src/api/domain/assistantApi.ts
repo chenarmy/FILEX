@@ -28,10 +28,23 @@ export interface AssistantContextFileReference {
   byteLength: number;
 }
 
+export type AssistantMode = 'explain' | 'draft' | 'diagnose';
+export type AssistantCommandRisk = 'read_only' | 'requires_confirmation' | 'blocked';
+
+export interface AssistantCommandExecutionResult {
+  command: string;
+  risk: AssistantCommandRisk;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  truncated: boolean;
+  durationMs: number;
+}
+
 export interface AssistantHistoryMessage {
   id: string;
   role: 'user' | 'assistant';
-  mode: 'explain' | 'draft';
+  mode: AssistantMode;
   content: string;
 }
 
@@ -208,7 +221,7 @@ export async function releaseAssistantContextFile(id: string): Promise<Operation
 export async function streamAssistantResponse(request: {
   requestId: string;
   prompt: string;
-  mode: 'explain' | 'draft';
+  mode: AssistantMode;
   context: string | null;
   contextFileIds: string[];
   history: AssistantTurn[];
@@ -218,6 +231,43 @@ export async function streamAssistantResponse(request: {
   }
   try {
     return await invoke<OperationResult<null>>('stream_assistant_response', { request: request });
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'ASSISTANT_PROVIDER_FAILED'));
+  }
+}
+
+export async function classifyAssistantCommand(command: string): Promise<OperationResult<AssistantCommandRisk>> {
+  if (!isTauriRuntime()) {
+    return failure({
+      code: 'DESKTOP_RUNTIME_REQUIRED',
+      messageKey: 'errors.desktopRuntimeRequired',
+      retryable: false,
+      remoteState: 'not_applicable',
+    });
+  }
+  try {
+    return await invoke<OperationResult<AssistantCommandRisk>>('classify_assistant_command', { command });
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'ASSISTANT_COMMAND_BLOCKED'));
+  }
+}
+
+export async function executeAssistantCommand(input: {
+  sessionId: string;
+  generation: number;
+  command: string;
+  approvedByUser: boolean;
+}): Promise<OperationResult<AssistantCommandExecutionResult>> {
+  if (!isTauriRuntime()) {
+    return failure({
+      code: 'DESKTOP_RUNTIME_REQUIRED',
+      messageKey: 'errors.desktopRuntimeRequired',
+      retryable: false,
+      remoteState: 'not_applicable',
+    });
+  }
+  try {
+    return await invoke<OperationResult<AssistantCommandExecutionResult>>('execute_assistant_command', input);
   } catch (error: unknown) {
     return failure(normalizeUnknownError(error, 'ASSISTANT_PROVIDER_FAILED'));
   }

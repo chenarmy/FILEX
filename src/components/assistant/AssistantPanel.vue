@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
+  Activity,
   Bot,
   Check,
   ChevronDown,
@@ -14,12 +15,15 @@ import {
   MessageSquare,
   Paperclip,
   Pencil,
+  Play,
   Plus,
   Send,
   Settings2,
   ShieldAlert,
+  ShieldCheck,
   Sparkles,
   Square,
+  Terminal,
   Trash2,
   WandSparkles,
   X,
@@ -29,7 +33,9 @@ import {
   releaseAssistantContextFile,
   selectAssistantContextFile,
   type AssistantContextFileReference,
+  type AssistantMode,
 } from '@/api/domain/assistantApi';
+import { stripAssistantExecFence } from '@/domain/assistantExec';
 import {
   assistantSuggestedModels,
   matchAssistantProviderPreset,
@@ -54,7 +60,7 @@ const transfers = useTransfersStore();
 const tunnels = useTunnelsStore();
 const ui = useUiStore();
 
-const mode = ref<'explain' | 'draft'>('explain');
+const mode = ref<AssistantMode>('explain');
 const prompt = ref('');
 const attachSession = ref(false);
 const attachEvents = ref(false);
@@ -83,6 +89,13 @@ let releaseContextOnCompletion = false;
 let panelUnmounted = false;
 const copyTimers = new Set<number>();
 
+const connectedSshSession = computed(() => (
+  sessions.activeSession?.state === 'connected' && sessions.activeSession.sessionKind === 'ssh'
+    ? sessions.activeSession
+    : null
+));
+const assistantWorking = computed(() => assistant.busy || assistant.execBusy);
+
 const activeConversation = computed(() => assistant.conversations.find((conversation) => conversation.id === assistant.activeConversationId));
 const activeConversationTitle = computed(() => activeConversation.value?.title || t('assistant.newConversation'));
 const providerPreset = computed(() => matchAssistantProviderPreset(assistant.provider.endpoint));
@@ -98,7 +111,14 @@ const providerDestination = computed(() => {
 
 watch(() => ui.assistantTerminalSelection, (selection) => {
   attachTerminalSelection.value = selection !== null;
+  if (selection && connectedSshSession.value) {
+    attachSession.value = true;
+  }
 }, { immediate: true });
+
+watch(() => ui.assistantFocusToken, () => {
+  void nextTick(() => composerRef.value?.focus());
+});
 
 const errorText = computed(() => assistant.error ? t(assistant.error as Parameters<typeof t>[0]) : '');
 const contextFileErrorText = computed(() => contextFileError.value
@@ -261,7 +281,7 @@ const contextCount = computed(() => selectedContext.value.labels.length + contex
 watch(
   () => {
     const last = assistant.messages[assistant.messages.length - 1];
-    return `${assistant.messages.length}:${last?.status ?? ''}:${last?.content.length ?? 0}`;
+    return `${assistant.messages.length}:${last?.status ?? ''}:${last?.content.length ?? 0}:${last?.execAction?.status ?? ''}`;
   },
   () => void scrollToBottom(),
 );
@@ -399,12 +419,16 @@ async function setModel(model: string): Promise<void> {
   }
 }
 
-function useQuickPrompt(kind: 'failure' | 'monitor' | 'plan'): void {
-  mode.value = kind === 'plan' ? 'draft' : 'explain';
+function useQuickPrompt(kind: 'failure' | 'monitor' | 'plan' | 'diagnose'): void {
+  mode.value = kind === 'plan' ? 'draft' : kind === 'diagnose' ? 'diagnose' : 'explain';
+  if (kind === 'diagnose' && connectedSshSession.value) {
+    attachSession.value = true;
+  }
   const keys = {
     failure: 'assistant.quickExplainFailure',
     monitor: 'assistant.quickReviewMonitor',
     plan: 'assistant.quickDraftPlan',
+    diagnose: 'assistant.quickDiagnoseServer',
   } as const;
   prompt.value = t(keys[kind]);
   void nextTick(() => composerRef.value?.focus());
@@ -413,16 +437,20 @@ function useQuickPrompt(kind: 'failure' | 'monitor' | 'plan'): void {
 function handleComposerKeydown(event: KeyboardEvent): void {
   if (event.isComposing || event.key !== 'Enter' || event.shiftKey) return;
   event.preventDefault();
-  if (!assistant.busy) void send();
+  if (!assistantWorking.value) void send();
 }
 
 async function send(): Promise<void> {
-  if (consentSaving.value || assistantSendInProgress.value || assistant.busy) return;
+  if (consentSaving.value || assistantSendInProgress.value || assistantWorking.value) return;
+  if (mode.value === 'diagnose' && !connectedSshSession.value) {
+    ui.notify(t('assistant.diagnoseRequiresSsh'));
+    return;
+  }
   const sentContextFiles = [...contextFiles.value];
   const sentContextFileIds = sentContextFiles.map((file) => file.id);
   assistantSendInProgress.value = true;
   try {
-    const active = attachSession.value ? sessions.activeSession : null;
+    const active = (attachSession.value || mode.value === 'diagnose') ? sessions.activeSession : null;
     const proposalTarget: AssistantProposalTargetSnapshot | null = mode.value === 'draft' && active
       ? {
         sessionId: active.id,
@@ -469,11 +497,27 @@ function proposalIsStale(proposal: AssistantDraftProposalV1): boolean {
 }
 
 function visibleAssistantText(message: AssistantMessage): string {
-  if (!message.proposal) return message.content;
+  let content = message.content;
+  if (message.mode === 'diagnose' || message.execAction) {
+    content = stripAssistantExecFence(content);
+  }
+  if (!message.proposal) return content;
   const proposalFence = message.proposal.kind === 'change-plan.draft'
     ? /\x60{3}filex-change-plan-v1[ \t]*\r?\n[\s\S]*?\x60{3}/i
     : /\x60{3}(?:bash|sh|zsh|shell|powershell|pwsh|cmd)[ \t]*\r?\n[\s\S]*?\x60{3}/gi;
-  return message.content.replace(proposalFence, '').trim();
+  return content.replace(proposalFence, '').trim();
+}
+
+function modeBadgeLabel(messageMode: AssistantMode): string {
+  if (messageMode === 'diagnose') return t('assistant.diagnoseMode');
+  if (messageMode === 'draft') return t('assistant.draftMode');
+  return t('assistant.explainMode');
+}
+
+function execOutputLineCount(stdout: string, stderr: string): number {
+  const combined = [stdout.trim(), stderr.trim()].filter(Boolean).join('\n');
+  if (!combined) return 0;
+  return combined.split('\n').length;
 }
 
 async function clearChat(): Promise<void> {
@@ -778,6 +822,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="assistant-quick-prompts">
           <span>{{ t('assistant.quickSuggestions') }}</span>
+          <button v-if="connectedSshSession" type="button" @click="useQuickPrompt('diagnose')">{{ t('assistant.quickDiagnoseServer') }}</button>
           <button type="button" @click="useQuickPrompt('failure')">{{ t('assistant.quickExplainFailure') }}</button>
           <button type="button" @click="useQuickPrompt('monitor')">{{ t('assistant.quickReviewMonitor') }}</button>
           <button type="button" @click="useQuickPrompt('plan')">{{ t('assistant.quickDraftPlan') }}</button>
@@ -788,7 +833,7 @@ onBeforeUnmount(() => {
         <header>
           <span v-if="message.role === 'assistant'" class="assistant-message-avatar"><Sparkles :size="11" /></span>
           <strong>{{ message.role === 'user' ? t('assistant.you') : t('assistant.assistantLabel') }}</strong>
-          <small>{{ message.mode === 'draft' ? t('assistant.draftMode') : t('assistant.explainMode') }}</small>
+          <small>{{ modeBadgeLabel(message.mode) }}</small>
           <span v-if="message.status === 'cancelled'">{{ t('assistant.cancel') }}</span>
         </header>
         <div class="assistant-message-body">
@@ -801,6 +846,69 @@ onBeforeUnmount(() => {
           <p v-else-if="message.status === 'streaming'" class="assistant-thinking">
             <Sparkles :size="12" />{{ t('assistant.thinking') }}
           </p>
+          <section v-if="message.execAction" class="assistant-exec-card" :class="`exec-${message.execAction.status}`" :aria-label="t('assistant.execCardTitle')">
+            <div class="assistant-exec-head">
+              <div class="assistant-exec-title">
+                <Terminal :size="12" aria-hidden="true" />
+                <strong>{{ t('assistant.execCardTitle') }}</strong>
+                <span class="assistant-exec-step">{{ t('assistant.execStepLabel', { step: message.execAction.stepIndex + 1 }) }}</span>
+              </div>
+              <span class="assistant-exec-risk" :class="`risk-${message.execAction.risk}`">
+                <ShieldCheck v-if="message.execAction.risk === 'read_only'" :size="11" aria-hidden="true" />
+                <ShieldAlert v-else :size="11" aria-hidden="true" />
+                {{
+                  message.execAction.risk === 'read_only'
+                    ? t('assistant.execRiskReadOnly')
+                    : message.execAction.risk === 'blocked'
+                      ? t('assistant.execRiskBlocked')
+                      : t('assistant.execRiskConfirm')
+                }}
+              </span>
+            </div>
+            <p v-if="message.execAction.reason" class="assistant-exec-reason">{{ message.execAction.reason }}</p>
+            <div class="assistant-proposal-command">
+              <header>
+                <small class="mono">{{ message.execAction.target ? `${message.execAction.target.host}:${message.execAction.target.port}` : '—' }}</small>
+                <button type="button" :aria-label="t('assistant.copyCode')" :title="t('assistant.copyCode')" @click="copyText(message.execAction.command, `exec-${message.id}`)">
+                  <Check v-if="copiedCommands[`exec-${message.id}`]" :size="11" />
+                  <Copy v-else :size="11" />
+                </button>
+              </header>
+              <pre>{{ message.execAction.command }}</pre>
+            </div>
+            <div class="assistant-exec-status-row">
+              <span v-if="message.execAction.status === 'running'" class="assistant-exec-status">{{ t('assistant.execStatusRunning') }}</span>
+              <span v-else-if="message.execAction.status === 'completed' && message.execAction.result" class="assistant-exec-status">
+                {{ t('assistant.execStatusCompleted', { code: message.execAction.result.exitCode ?? '—', ms: message.execAction.result.durationMs }) }}
+              </span>
+              <span v-else-if="message.execAction.status === 'denied'" class="assistant-exec-status">{{ t('assistant.execStatusDenied') }}</span>
+              <span v-else-if="message.execAction.status === 'pending_approval'" class="assistant-exec-status">{{ t('assistant.execStatusPending') }}</span>
+              <span v-else-if="message.execAction.errorKey" class="form-error">{{ t(message.execAction.errorKey as Parameters<typeof t>[0]) }}</span>
+            </div>
+            <div v-if="message.execAction.status === 'pending_approval'" class="assistant-exec-actions">
+              <button
+                type="button"
+                class="button primary"
+                :disabled="assistantWorking || message.execAction.stale"
+                @click="assistant.approveExecAction(message.id)"
+              >
+                <Play :size="11" />{{ t('assistant.execApprove') }}
+              </button>
+              <button
+                type="button"
+                class="button"
+                :disabled="assistantWorking"
+                @click="assistant.denyExecAction(message.id)"
+              >
+                {{ t('assistant.execDeny') }}
+              </button>
+            </div>
+            <details v-if="message.execAction.status === 'completed' && message.execAction.result" class="assistant-exec-output">
+              <summary>{{ t('assistant.execOutputToggle', { lines: execOutputLineCount(message.execAction.result.stdout, message.execAction.result.stderr) }) }}</summary>
+              <p v-if="message.execAction.result.truncated" class="assistant-exec-truncated">{{ t('assistant.execOutputTruncated') }}</p>
+              <pre class="mono">{{ [message.execAction.result.stdout.trim(), message.execAction.result.stderr.trim()].filter(Boolean).join('\n') || t('assistant.execOutputEmpty') }}</pre>
+            </details>
+          </section>
           <section v-if="message.proposal" class="assistant-command-proposal" :class="{ 'is-stale': proposalIsStale(message.proposal) }" :aria-label="t(message.proposal.kind === 'change-plan.draft' ? 'assistant.changePlanTitle' : 'assistant.proposalTitle')">
             <div class="assistant-proposal-heading"><strong>{{ t(message.proposal.kind === 'change-plan.draft' ? 'assistant.changePlanTitle' : 'assistant.proposalTitle') }}</strong><code>{{ message.proposal.kind }}@{{ message.proposal.version }}</code></div>
             <div class="assistant-proposal-meta">
@@ -883,17 +991,26 @@ onBeforeUnmount(() => {
     <div class="assistant-compose">
       <div class="assistant-compose-toolbar">
         <div class="assistant-mode" role="group" :aria-label="t('assistant.mode')">
-          <button type="button" :aria-pressed="mode === 'explain'" :disabled="assistant.busy" @click="mode = 'explain'">
+          <button type="button" :aria-pressed="mode === 'explain'" :disabled="assistantWorking" @click="mode = 'explain'">
             <MessageSquare :size="11" />{{ t('assistant.explainMode') }}
           </button>
-          <button type="button" :aria-pressed="mode === 'draft'" :disabled="assistant.busy" @click="mode = 'draft'">
+          <button type="button" :aria-pressed="mode === 'draft'" :disabled="assistantWorking" @click="mode = 'draft'">
             <WandSparkles :size="11" />{{ t('assistant.draftMode') }}
+          </button>
+          <button
+            type="button"
+            :aria-pressed="mode === 'diagnose'"
+            :disabled="assistantWorking || !connectedSshSession"
+            :title="connectedSshSession ? t('assistant.diagnoseMode') : t('assistant.diagnoseRequiresSsh')"
+            @click="mode = 'diagnose'"
+          >
+            <Activity :size="11" />{{ t('assistant.diagnoseMode') }}
           </button>
         </div>
         <button
           type="button"
           class="assistant-attach-button"
-          :disabled="assistant.busy || contextFileBusy || assistantSendInProgress || contextFiles.length >= 2"
+          :disabled="assistantWorking || contextFileBusy || assistantSendInProgress || contextFiles.length >= 2"
           :aria-label="t('assistant.attachContextFile')"
           :title="t('assistant.attachContextFile')"
           @click="chooseContextFile"
@@ -901,12 +1018,25 @@ onBeforeUnmount(() => {
           <Paperclip :size="12" />
         </button>
       </div>
+      <label v-if="mode === 'diagnose'" class="assistant-diagnose-toggle">
+        <input v-model="assistant.autoRunReadOnly" type="checkbox" :disabled="assistantWorking">
+        <span>{{ t('assistant.diagnoseAutoRunReadOnly') }}</span>
+      </label>
+      <div v-if="attachTerminalSelection && ui.assistantTerminalSelection" class="assistant-file-chips">
+        <div class="assistant-file-chip assistant-terminal-chip">
+          <Terminal :size="11" />
+          <span :title="ui.assistantTerminalSelection.text">
+            {{ t('assistant.terminalChipLabel', { host: ui.assistantTerminalSelection.host, chars: Array.from(ui.assistantTerminalSelection.text).length }) }}
+          </span>
+          <button type="button" class="icon-button" :aria-label="t('assistant.clearTerminalSelection')" :disabled="assistantWorking" @click="clearTerminalContext"><X :size="11" /></button>
+        </div>
+      </div>
       <div v-if="contextFiles.length > 0" class="assistant-file-chips">
         <div v-for="contextFile in contextFiles" :key="contextFile.id" class="assistant-file-chip">
           <Paperclip :size="11" />
           <span :title="contextFile.fileName">{{ contextFile.fileName }}</span>
           <small>{{ contextFile.extension.toUpperCase() }} · {{ formatByteLength(contextFile.byteLength) }}</small>
-          <button type="button" class="icon-button" :aria-label="t('assistant.removeContextFile')" :disabled="assistant.busy || assistantSendInProgress" @click="removeContextFile(contextFile.id)"><X :size="11" /></button>
+          <button type="button" class="icon-button" :aria-label="t('assistant.removeContextFile')" :disabled="assistantWorking || assistantSendInProgress" @click="removeContextFile(contextFile.id)"><X :size="11" /></button>
         </div>
       </div>
       <p v-if="contextFiles.length > 0" class="assistant-file-note">{{ t('assistant.localFileSelectionNotice') }}</p>
@@ -916,17 +1046,17 @@ onBeforeUnmount(() => {
         v-model="prompt"
         :placeholder="t('assistant.promptPlaceholder')"
         maxlength="20000"
-        :disabled="consentSaving || assistant.busy"
+        :disabled="consentSaving || assistantWorking"
         @keydown="handleComposerKeydown"
       />
       <div class="assistant-compose-footer">
-        <small>{{ t('assistant.neverExecutes') }} {{ t('assistant.sendHint') }}</small>
-        <button v-if="assistant.busy" type="button" class="button" @click="stop"><Square :size="12" />{{ t('assistant.cancel') }}</button>
+        <small>{{ mode === 'diagnose' ? t('assistant.diagnoseFooterHint') : `${t('assistant.neverExecutes')} ${t('assistant.sendHint')}` }}</small>
+        <button v-if="assistantWorking" type="button" class="button" @click="stop"><Square :size="12" />{{ t('assistant.cancel') }}</button>
         <button
           v-else
           type="button"
           class="button primary"
-          :disabled="assistant.historySaving || consentSaving || !assistant.provider.configured || !assistant.provider.externalDataConsent || !prompt.trim()"
+          :disabled="assistant.historySaving || consentSaving || !assistant.provider.configured || !assistant.provider.externalDataConsent || !prompt.trim() || (mode === 'diagnose' && !connectedSshSession)"
           @click="send"
         >
           <Send :size="12" />{{ t('assistant.send') }}

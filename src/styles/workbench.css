@@ -6685,8 +6685,8 @@
 /* --- docker management modal ---------------------------------------------- */
 
 .docker-dialog {
-  width: min(1060px, 94vw);
-  height: min(680px, 88vh);
+  width: min(1320px, calc(100vw - 24px));
+  height: min(760px, calc(100vh - 24px));
 }
 
 .docker-filter-box {
@@ -6712,34 +6712,125 @@
 
 .docker-table-shell {
   grid-column: 1 / -1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .docker-table {
-  min-width: 820px;
+  min-width: 1080px;
+}
+
+.docker-table td,
+.docker-images-table td {
+  height: auto;
+  padding: 8px 10px;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  vertical-align: top;
+  line-height: 1.45;
+}
+
+.docker-wrap-cell {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .docker-table th:nth-child(1),
 .docker-table td:nth-child(1) {
-  width: 17%;
+  width: 13%;
   text-align: start;
 }
 
 .docker-table th:nth-child(2),
 .docker-table td:nth-child(2) {
-  width: 19%;
+  width: 18%;
   text-align: start;
 }
 
-.docker-table th:nth-last-child(-n+3),
-.docker-table td:nth-last-child(-n+3) {
-  width: auto;
+.docker-table th:nth-child(3),
+.docker-table td:nth-child(3) {
+  width: 88px;
+  text-align: start;
+}
+
+.docker-table th:nth-child(4),
+.docker-table td:nth-child(4) {
+  width: 12%;
+  text-align: start;
+}
+
+.docker-table th:nth-child(5),
+.docker-table td:nth-child(5) {
+  width: 21%;
+  text-align: start;
+}
+
+.docker-table th:nth-child(6),
+.docker-table td:nth-child(6) {
+  width: 17%;
   text-align: start;
 }
 
 .docker-table th:last-child,
 .docker-table td:last-child {
-  width: 290px;
-  white-space: nowrap;
+  width: 196px;
+  text-align: start;
+}
+
+.docker-images-table th:nth-child(1),
+.docker-images-table td:nth-child(1) {
+  width: 34%;
+}
+
+.docker-images-table th:nth-child(2),
+.docker-images-table td:nth-child(2) {
+  width: 22%;
+}
+
+.docker-images-table th:nth-last-child(-n+3),
+.docker-images-table td:nth-last-child(-n+3) {
+  width: auto;
+}
+
+.docker-port-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.docker-port-chip {
+  display: inline-block;
+  font-size: 0.75rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.docker-resource-cell {
+  font-size: 0.75rem;
+}
+
+.docker-metric-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.docker-metric-line.muted {
+  color: hsl(var(--muted-foreground));
+}
+
+.docker-metric-tag {
+  flex: 0 0 auto;
+  min-width: 28px;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+  font-weight: 600;
 }
 
 .dialog-title-with-icon {
@@ -6752,6 +6843,7 @@
   display: grid;
   gap: 2px;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .docker-short-id {
@@ -6790,9 +6882,9 @@
 
 .docker-row-actions {
   display: inline-flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
 }
 
 .docker-action-btn {
@@ -6838,10 +6930,10 @@
 .docker-logs-shell {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   min-height: 0;
   padding: 12px;
-  gap: 10px;
+  gap: 8px;
 }
 
 .docker-logs-toolbar {
@@ -6852,6 +6944,24 @@
   gap: 8px;
 }
 
+.docker-logs-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.docker-logs-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 24px;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+}
+
 .docker-logs-toolbar select {
   max-width: 280px;
   height: 28px;
@@ -6860,6 +6970,176 @@
   border-radius: var(--radius-control);
   background: hsl(var(--surface-inset));
   color: hsl(var(--foreground));
+}
+
+/* --- project repository links in settings --------------------------------- */
+
+.project-links-row {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.project-links-list {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+}
+
+.project-link-item {
+  display: grid;
+  grid-template-columns: 124px minmax(0, 1fr) 26px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  background: hsl(var(--surface-inset));
+  border: 1px solid hsl(var(--border-subtle));
+  border-radius: var(--radius-control);
+}
+
+.project-link-open {
+  justify-content: flex-start;
+  gap: 6px;
+  height: 26px;
+  padding-inline: 8px;
+  font-size: 0.75rem;
+}
+
+.project-link-url {
+  overflow: hidden;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- assistant diagnose execution cards ----------------------------------- */
+
+.assistant-diagnose-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.assistant-diagnose-toggle input {
+  margin: 0;
+}
+
+.assistant-terminal-chip {
+  border-color: hsl(var(--primary) / 0.4);
+  background: hsl(var(--primary) / 0.08);
+}
+
+.assistant-exec-card {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-control);
+  background: hsl(var(--surface-inset));
+  display: grid;
+  gap: 6px;
+}
+
+.assistant-exec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.assistant-exec-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+}
+
+.assistant-exec-step {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.7143rem;
+}
+
+.assistant-exec-risk {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+
+.assistant-exec-risk.risk-read_only {
+  background: hsl(var(--success) / 0.14);
+  color: hsl(var(--success));
+}
+
+.assistant-exec-risk.risk-requires_confirmation {
+  background: hsl(var(--warning) / 0.16);
+  color: hsl(var(--warning));
+}
+
+.assistant-exec-risk.risk-blocked {
+  background: hsl(var(--destructive) / 0.14);
+  color: hsl(var(--destructive));
+}
+
+.assistant-exec-reason {
+  margin: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.assistant-exec-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.7143rem;
+}
+
+.assistant-exec-status {
+  color: hsl(var(--muted-foreground));
+}
+
+.assistant-exec-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.assistant-exec-output {
+  font-size: 0.75rem;
+}
+
+.assistant-exec-output summary {
+  color: hsl(var(--text-secondary));
+  cursor: pointer;
+  user-select: none;
+}
+
+.assistant-exec-output pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  max-height: 220px;
+  overflow: auto;
+  background: hsl(var(--background));
+  border: 1px solid hsl(var(--border-subtle));
+  border-radius: var(--radius-control);
+  font-size: 0.7143rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.assistant-exec-truncated {
+  margin: 4px 0 0;
+  color: hsl(var(--warning));
+  font-size: 0.7143rem;
 }
 
 /* --- common devops diagnostics modal ------------------------------------- */

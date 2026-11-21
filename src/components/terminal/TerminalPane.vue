@@ -313,6 +313,35 @@ function searchSelection(): void {
   void nextTick(() => refreshMatch(searchQuery.value, 'next', true));
 }
 
+function readRecentTerminalOutput(maxLines = 80): string {
+  if (!terminal) return '';
+  const buffer = terminal.buffer.active;
+  const end = buffer.length;
+  const start = Math.max(0, end - maxLines);
+  const lines: string[] = [];
+  for (let index = start; index < end; index += 1) {
+    const line = buffer.getLine(index);
+    if (line) lines.push(line.translateToString(true));
+  }
+  while (lines.length > 0 && !lines[lines.length - 1]?.trim()) {
+    lines.pop();
+  }
+  return lines.join('\n').trim();
+}
+
+function askAssistantFromTerminal(): void {
+  const text = contextMenu.value?.selection.trim() || readRecentTerminalOutput(80);
+  closeContextMenu();
+  if (!text) {
+    ui.notify(t('terminal.askAssistantEmpty'));
+    return;
+  }
+  const hostLabel = session.value
+    ? `${session.value.username}@${session.value.host}:${session.value.port}`
+    : (profile.value?.host ?? 'terminal');
+  ui.attachTerminalSelection(hostLabel, text);
+}
+
 async function pasteFromClipboard(): Promise<void> {
   closeContextMenu();
   if (!terminal) return;
@@ -994,6 +1023,9 @@ defineExpose({ focusTerminal, sessionId: computed(() => props.sessionId) });
         </button>
         <button v-if="contextMenu.selection" type="button" role="menuitem" @click="searchSelection">
           <Search :size="13" />{{ t('terminal.searchSelection') }}
+        </button>
+        <button type="button" role="menuitem" @click="askAssistantFromTerminal">
+          <Bot :size="13" />{{ t(contextMenu.selection ? 'terminal.askAssistantSelection' : 'terminal.askAssistantRecent') }}
         </button>
         <button v-if="contextMenu.includeClear" type="button" role="menuitem" @click="selectAllTerminal">
           <CheckSquare :size="13" />{{ t('terminal.selectAll') }}
