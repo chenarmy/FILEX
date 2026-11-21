@@ -3320,8 +3320,8 @@ impl SessionRuntime {
         let windows_output = session
             .execute_bounded(
                 &windows_process_command(sort_by),
-                64 * 1024,
-                Duration::from_secs(8),
+                256 * 1024,
+                Duration::from_secs(10),
             )
             .await
             .map_err(|error| ssh_error(&error))?;
@@ -3340,8 +3340,8 @@ impl SessionRuntime {
         let output = session
             .execute_bounded(
                 posix_process_probe(sort_by),
-                64 * 1024,
-                Duration::from_secs(8),
+                256 * 1024,
+                Duration::from_secs(10),
             )
             .await
             .map_err(|error| ssh_error(&error))?;
@@ -5717,7 +5717,7 @@ if [ ! -d /sys/class/net ] || ! command -v ip >/dev/null 2>&1 || ! command -v od
   printf 'PLATFORM=UNSUPPORTED\n'
   exit 0
 fi
-hex() { printf '%s' "$1" | od -An -tx1 | tr -d ' \012'; }
+hex() { printf '%s' "$1" | od -An -tx1 | tr -d ' \011\012\015'; }
 printf 'PLATFORM=LINUX\n'
 interface_count=0
 for directory in /sys/class/net/*; do
@@ -5729,25 +5729,43 @@ for directory in /sys/class/net/*; do
   mtu=$(cat "$directory/mtu" 2>/dev/null | tr -d '\012\015')
   received=$(cat "$directory/statistics/rx_bytes" 2>/dev/null | tr -d '\012\015')
   transmitted=$(cat "$directory/statistics/tx_bytes" 2>/dev/null | tr -d '\012\015')
+  mac=$(cat "$directory/address" 2>/dev/null | tr -d '\012\015')
+  speed=$(cat "$directory/speed" 2>/dev/null | tr -d '\012\015')
+  rx_packets=$(cat "$directory/statistics/rx_packets" 2>/dev/null | tr -d '\012\015')
+  tx_packets=$(cat "$directory/statistics/tx_packets" 2>/dev/null | tr -d '\012\015')
+  rx_errors=$(cat "$directory/statistics/rx_errors" 2>/dev/null | tr -d '\012\015')
+  tx_errors=$(cat "$directory/statistics/tx_errors" 2>/dev/null | tr -d '\012\015')
   addresses=$(ip -o addr show dev "$name" 2>/dev/null | awk '{print $4}' | paste -sd, -)
   loopback=0
   [ "$name" = lo ] && loopback=1
-  printf 'I\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(hex "$name")" "$(hex "$state")" "$(hex "$addresses")" "$mtu" "$received" "$transmitted" "$loopback"
+  printf 'I\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(hex "$name")" "$(hex "$state")" "$(hex "$addresses")" "$mtu" "$received" "$transmitted" "$loopback" "$(hex "$mac")" "$speed" "$rx_packets" "$tx_packets" "$rx_errors" "$tx_errors"
 done
 if command -v ss >/dev/null 2>&1; then
   ss -H -tunap 2>/dev/null | head -n 501 | while read -r protocol state recvq sendq local_endpoint remote_endpoint details; do
     [ -n "$protocol" ] || continue
-    printf 'E\t%s\t%s\t%s\t%s\t%s\n' "$(hex "$protocol")" "$(hex "$state")" "$(hex "$local_endpoint")" "$(hex "$remote_endpoint")" "$(hex "$details")"
+    printf 'E\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(hex "$protocol")" "$(hex "$state")" "$(hex "$local_endpoint")" "$(hex "$remote_endpoint")" "$(hex "$details")" "$recvq" "$sendq"
   done
 fi
 ip -o route show table all 2>/dev/null | head -n 501 | while IFS= read -r route; do
   [ -n "$route" ] || continue
   set -- $route
+  route_type='unicast'
   destination=$1
+  case "$destination" in
+    local|broadcast|unreachable|blackhole|prohibit|throw|nat|anycast|multicast)
+      route_type=$destination
+      shift
+      destination=${1:-}
+      ;;
+  esac
+  [ -n "$destination" ] || continue
   gateway=''
   interface=''
   metric=''
   protocol=''
+  table='main'
+  scope=''
+  source_address=''
   previous=''
   for token in "$@"; do
     case "$previous" in
@@ -5755,10 +5773,13 @@ ip -o route show table all 2>/dev/null | head -n 501 | while IFS= read -r route;
       dev) interface=$token ;;
       metric) metric=$token ;;
       proto) protocol=$token ;;
+      table) table=$token ;;
+      scope) scope=$token ;;
+      src) source_address=$token ;;
     esac
     previous=$token
   done
-  printf 'T\t%s\t%s\t%s\t%s\t%s\n' "$(hex "$destination")" "$(hex "$gateway")" "$(hex "$interface")" "$metric" "$(hex "$protocol")"
+  printf 'T\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(hex "$destination")" "$(hex "$gateway")" "$(hex "$interface")" "$metric" "$(hex "$protocol")" "$(hex "$table")" "$(hex "$scope")" "$(hex "$source_address")" "$(hex "$route_type")"
 done"#;
 
 const WINDOWS_NETWORK_SCRIPT: &str = r#"if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { exit 42 }
@@ -5816,18 +5837,27 @@ if ! command -v ps >/dev/null 2>&1 || ! command -v od >/dev/null 2>&1 || ! comma
   exit 0
 fi
 printf 'PLATFORM=POSIX\n'
-ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o stat= 2>/dev/null | sort -k4,4nr -k6,6nr | head -n 101 | while read -r pid ppid user cpu cpu_time rss state; do
+ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o vsz= -o stat= 2>/dev/null | sort -k4,4nr -k6,6nr | head -n 101 | while read -r pid ppid user cpu cpu_time rss vsz state; do
   case "$pid" in ''|*[!0-9]*) continue;; esac
   name=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '\012\015')
   case "$name" in /*) name=${name##*/};; esac
   name=$(printf '%s' "$name" | cut -c 1-128)
   start=$(ps -p "$pid" -o lstart= 2>/dev/null | tr -d '\012\015')
   elapsed=$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' \012\015')
+  threads=$(ps -p "$pid" -o nlwp= 2>/dev/null | tr -d ' \012\015')
+  exe=''
+  cwd=''
+  if [ -e "/proc/$pid/exe" ]; then exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null | tr -d '\012\015' | cut -c 1-256); fi
+  if [ -e "/proc/$pid/cwd" ]; then cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null | tr -d '\012\015' | cut -c 1-256); fi
+  cmd=$(ps -p "$pid" -o args= 2>/dev/null | tr -d '\012\015' | cut -c 1-384)
   [ -n "$name" ] || continue
   name_hex=$(printf '%s' "$name" | od -An -tx1 | tr -d ' \011\012\015')
   user_hex=$(printf '%s' "$user" | cut -c 1-128 | od -An -tx1 | tr -d ' \011\012\015')
   start_hex=$(printf '%s' "$start" | od -An -tx1 | tr -d ' \011\012\015')
-  printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$user_hex" "$cpu" "$cpu_time" "$rss" "$state" "$start_hex" "$elapsed" "$name_hex"
+  exe_hex=$(printf '%s' "$exe" | od -An -tx1 | tr -d ' \011\012\015')
+  cwd_hex=$(printf '%s' "$cwd" | od -An -tx1 | tr -d ' \011\012\015')
+  cmd_hex=$(printf '%s' "$cmd" | od -An -tx1 | tr -d ' \011\012\015')
+  printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$user_hex" "$cpu" "$cpu_time" "$rss" "$state" "$start_hex" "$elapsed" "$name_hex" "$vsz" "$threads" "$exe_hex" "$cwd_hex" "$cmd_hex"
 done"#;
 
 const PROCESS_LIST_PROBE_BY_MEMORY: &str = r#"LC_ALL=C; export LC_ALL
@@ -5836,18 +5866,27 @@ if ! command -v ps >/dev/null 2>&1 || ! command -v od >/dev/null 2>&1 || ! comma
   exit 0
 fi
 printf 'PLATFORM=POSIX\n'
-ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o stat= 2>/dev/null | sort -k6,6nr -k4,4nr | head -n 101 | while read -r pid ppid user cpu cpu_time rss state; do
+ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o vsz= -o stat= 2>/dev/null | sort -k6,6nr -k4,4nr | head -n 101 | while read -r pid ppid user cpu cpu_time rss vsz state; do
   case "$pid" in ''|*[!0-9]*) continue;; esac
   name=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '\012\015')
   case "$name" in /*) name=${name##*/};; esac
   name=$(printf '%s' "$name" | cut -c 1-128)
   start=$(ps -p "$pid" -o lstart= 2>/dev/null | tr -d '\012\015')
   elapsed=$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' \012\015')
+  threads=$(ps -p "$pid" -o nlwp= 2>/dev/null | tr -d ' \012\015')
+  exe=''
+  cwd=''
+  if [ -e "/proc/$pid/exe" ]; then exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null | tr -d '\012\015' | cut -c 1-256); fi
+  if [ -e "/proc/$pid/cwd" ]; then cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null | tr -d '\012\015' | cut -c 1-256); fi
+  cmd=$(ps -p "$pid" -o args= 2>/dev/null | tr -d '\012\015' | cut -c 1-384)
   [ -n "$name" ] || continue
   name_hex=$(printf '%s' "$name" | od -An -tx1 | tr -d ' \011\012\015')
   user_hex=$(printf '%s' "$user" | cut -c 1-128 | od -An -tx1 | tr -d ' \011\012\015')
   start_hex=$(printf '%s' "$start" | od -An -tx1 | tr -d ' \011\012\015')
-  printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$user_hex" "$cpu" "$cpu_time" "$rss" "$state" "$start_hex" "$elapsed" "$name_hex"
+  exe_hex=$(printf '%s' "$exe" | od -An -tx1 | tr -d ' \011\012\015')
+  cwd_hex=$(printf '%s' "$cwd" | od -An -tx1 | tr -d ' \011\012\015')
+  cmd_hex=$(printf '%s' "$cmd" | od -An -tx1 | tr -d ' \011\012\015')
+  printf 'P\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$ppid" "$user_hex" "$cpu" "$cpu_time" "$rss" "$state" "$start_hex" "$elapsed" "$name_hex" "$vsz" "$threads" "$exe_hex" "$cwd_hex" "$cmd_hex"
 done"#;
 
 fn posix_process_probe(sort_by: ProcessSortBy) -> &'static str {
@@ -5865,16 +5904,22 @@ $items = Get-Process -ErrorAction SilentlyContinue | Sort-Object -Property CPU,W
 foreach ($process in $items) {
   $cpu = ''
   $memory = ''
+  $virtualMemory = ''
+  $threads = ''
+  $path = ''
   $start = 0
   $startMs = ''
   $parent = ''
   try { if ($null -ne $process.CPU) { $cpu = ([double]$process.CPU).ToString('0.###', $culture) } } catch {}
   try { $memory = [int64]$process.WorkingSet64 } catch {}
+  try { $virtualMemory = [int64]$process.VirtualMemorySize64 } catch {}
+  try { $threads = [int64]$process.Threads.Count } catch {}
+  try { if ($process.Path) { $path = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$process.Path)) } } catch {}
   try { $start = [int64]($process.StartTime.ToUniversalTime().Ticks) } catch {}
   try { $startMs = [DateTimeOffset]::new($process.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds() } catch {}
   try { if ($null -ne $process.Parent) { $parent = [int64]$process.Parent.Id } } catch {}
   $name = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$process.ProcessName))
-  Write-Output ("P`t{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}" -f $process.Id, $parent, $cpu, $memory, $start, $startMs, $name)
+  Write-Output ("P`t{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}`t{7}`t{8}`t{9}" -f $process.Id, $parent, $cpu, $memory, $start, $startMs, $name, $virtualMemory, $threads, $path)
 }"#;
 
 const WINDOWS_PROCESS_SCRIPT_BY_MEMORY: &str = r#"if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { exit 42 }
@@ -5885,16 +5930,22 @@ $items = Get-Process -ErrorAction SilentlyContinue | Sort-Object -Property Worki
 foreach ($process in $items) {
   $cpu = ''
   $memory = ''
+  $virtualMemory = ''
+  $threads = ''
+  $path = ''
   $start = 0
   $startMs = ''
   $parent = ''
   try { if ($null -ne $process.CPU) { $cpu = ([double]$process.CPU).ToString('0.###', $culture) } } catch {}
   try { $memory = [int64]$process.WorkingSet64 } catch {}
+  try { $virtualMemory = [int64]$process.VirtualMemorySize64 } catch {}
+  try { $threads = [int64]$process.Threads.Count } catch {}
+  try { if ($process.Path) { $path = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$process.Path)) } } catch {}
   try { $start = [int64]($process.StartTime.ToUniversalTime().Ticks) } catch {}
   try { $startMs = [DateTimeOffset]::new($process.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds() } catch {}
   try { if ($null -ne $process.Parent) { $parent = [int64]$process.Parent.Id } } catch {}
   $name = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$process.ProcessName))
-  Write-Output ("P`t{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}" -f $process.Id, $parent, $cpu, $memory, $start, $startMs, $name)
+  Write-Output ("P`t{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}`t{7}`t{8}`t{9}" -f $process.Id, $parent, $cpu, $memory, $start, $startMs, $name, $virtualMemory, $threads, $path)
 }"#;
 
 fn windows_process_script(sort_by: ProcessSortBy) -> &'static str {
@@ -5970,7 +6021,7 @@ fn parse_posix_process_output(
     let mut identities = HashMap::new();
     for record in records.into_iter().take(100) {
         let fields = record.split('\t').collect::<Vec<_>>();
-        if fields.len() != 11 {
+        if fields.len() != 11 && fields.len() != 16 {
             continue;
         }
         let Ok(pid) = fields[1].parse::<u32>() else {
@@ -5998,6 +6049,27 @@ fn parse_posix_process_output(
             .parse::<u64>()
             .ok()
             .and_then(|kib| kib.checked_mul(1024));
+        let (virtual_memory_bytes, threads, executable_path, working_directory, command_line) =
+            if fields.len() == 16 {
+                let virtual_memory_bytes = fields[11]
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(|kib| kib.checked_mul(1024));
+                let threads = fields[12].parse::<u32>().ok().filter(|count| *count > 0);
+                let executable_path = decode_probe_text(fields[13], true, 512);
+                let working_directory = decode_probe_text(fields[14], true, 512);
+                let command_line = decode_probe_text(fields[15], true, 512)
+                    .map(|raw| redact_process_command_line(&raw));
+                (
+                    virtual_memory_bytes,
+                    threads,
+                    executable_path,
+                    working_directory,
+                    command_line,
+                )
+            } else {
+                (None, None, None, None, None)
+            };
         processes.push(ProcessEntry {
             pid,
             parent_pid: fields[2].parse::<u32>().ok(),
@@ -6006,12 +6078,17 @@ fn parse_posix_process_output(
             cpu_percent: parse_process_float(fields[4]),
             cpu_time_seconds: parse_posix_cpu_time(fields[5]),
             memory_bytes,
+            virtual_memory_bytes,
+            threads,
             state: sanitize_process_state(fields[7]),
             started_at_ms: fields[9]
                 .parse::<u64>()
                 .ok()
                 .and_then(|seconds| seconds.checked_mul(1_000))
                 .and_then(|milliseconds| collected_at_ms.checked_sub(milliseconds)),
+            executable_path,
+            working_directory,
+            command_line,
             can_terminate: identity_valid,
         });
     }
@@ -6035,7 +6112,7 @@ fn parse_windows_process_output(output: &str) -> Result<ParsedProcesses, AppErro
     let mut identities = HashMap::new();
     for record in records.into_iter().take(100) {
         let fields = record.split('\t').collect::<Vec<_>>();
-        if fields.len() != 8 {
+        if fields.len() != 8 && fields.len() != 11 {
             continue;
         }
         let Ok(pid) = fields[1].parse::<u32>() else {
@@ -6047,6 +6124,15 @@ fn parse_windows_process_output(output: &str) -> Result<ParsedProcesses, AppErro
         if identity_valid {
             identities.insert(pid, ProcessIdentity::Windows { start_time_ticks });
         }
+        let (virtual_memory_bytes, threads, executable_path) = if fields.len() == 11 {
+            (
+                fields[8].parse::<u64>().ok(),
+                fields[9].parse::<u32>().ok().filter(|count| *count > 0),
+                decode_probe_text(fields[10], false, 512),
+            )
+        } else {
+            (None, None, None)
+        };
         processes.push(ProcessEntry {
             pid,
             parent_pid: fields[2].parse::<u32>().ok(),
@@ -6055,8 +6141,13 @@ fn parse_windows_process_output(output: &str) -> Result<ParsedProcesses, AppErro
             cpu_percent: None,
             cpu_time_seconds: parse_process_float(fields[3]),
             memory_bytes: fields[4].parse::<u64>().ok(),
+            virtual_memory_bytes,
+            threads,
             state: None,
             started_at_ms: fields[6].parse::<u64>().ok(),
+            executable_path,
+            working_directory: None,
+            command_line: None,
             can_terminate: identity_valid,
         });
     }
@@ -6065,6 +6156,129 @@ fn parse_windows_process_output(output: &str) -> Result<ParsedProcesses, AppErro
         identities,
         truncated,
     })
+}
+
+fn is_sensitive_command_key(key: &str) -> bool {
+    let normalized = key
+        .trim_start_matches('-')
+        .trim_start_matches('D')
+        .to_ascii_lowercase();
+    let sensitive_fragments = [
+        "password",
+        "passwd",
+        "passphrase",
+        "secret",
+        "token",
+        "api_key",
+        "apikey",
+        "api-key",
+        "access_key",
+        "access-key",
+        "accesskey",
+        "private_key",
+        "private-key",
+        "credential",
+        "client_secret",
+        "client-secret",
+        "auth_key",
+        "auth-key",
+        "mysql_pwd",
+        "pgpassword",
+        "redis_password",
+    ];
+    sensitive_fragments
+        .iter()
+        .any(|fragment| normalized.contains(fragment))
+}
+
+fn is_sensitive_flag_taking_next_token(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "--password"
+            | "-password"
+            | "--passwd"
+            | "-passwd"
+            | "--pass"
+            | "-pass"
+            | "--passphrase"
+            | "--secret"
+            | "-secret"
+            | "--token"
+            | "-token"
+            | "--auth-token"
+            | "--access-token"
+            | "--api-key"
+            | "--apikey"
+            | "--client-secret"
+            | "--private-key"
+            | "-pw"
+            | "-pwd"
+            | "--pwd"
+    )
+}
+
+fn is_non_secret_boolean_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "false" | "on" | "off" | "yes" | "no"
+    )
+}
+
+fn redact_url_credentials(token: &str) -> String {
+    let Some(scheme_index) = token.find("://") else {
+        return token.to_owned();
+    };
+    let authority_start = scheme_index + 3;
+    let rest = &token[authority_start..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let Some(at_index) = authority.rfind('@') else {
+        return token.to_owned();
+    };
+    let userinfo = &authority[..at_index];
+    let Some(colon_index) = userinfo.find(':') else {
+        return token.to_owned();
+    };
+    let username = &userinfo[..colon_index];
+    format!(
+        "{}{}:[REDACTED]{}",
+        &token[..authority_start],
+        username,
+        &rest[at_index..]
+    )
+}
+
+fn redact_process_command_line(value: &str) -> String {
+    let mut output = Vec::new();
+    let mut redact_next = false;
+    for raw_token in value.split_whitespace() {
+        if redact_next {
+            output.push("[REDACTED]".to_owned());
+            redact_next = false;
+            continue;
+        }
+        let lower = raw_token.to_ascii_lowercase();
+        if lower == "bearer" || lower == "basic" {
+            output.push(raw_token.to_owned());
+            redact_next = true;
+            continue;
+        }
+        if is_sensitive_flag_taking_next_token(raw_token) {
+            output.push(raw_token.to_owned());
+            redact_next = true;
+            continue;
+        }
+        if let Some((key, val)) = raw_token.split_once('=') {
+            if is_sensitive_command_key(key) && !val.is_empty() && !is_non_secret_boolean_value(val)
+            {
+                output.push(format!("{key}=[REDACTED]"));
+                continue;
+            }
+        }
+        output.push(redact_url_credentials(raw_token));
+    }
+    output.join(" ")
 }
 
 fn parse_process_float(value: &str) -> Option<f64> {
@@ -6277,7 +6491,7 @@ fn parse_windows_network_output(
 
 fn parse_network_interface(line: &str, hexadecimal: bool) -> Option<NetworkInterface> {
     let fields = line.split('\t').collect::<Vec<_>>();
-    if fields.len() != 8 {
+    if fields.len() != 8 && fields.len() != 14 {
         return None;
     }
     let name = decode_probe_text(fields[1], hexadecimal, 128)?;
@@ -6292,20 +6506,43 @@ fn parse_network_interface(line: &str, hexadecimal: bool) -> Option<NetworkInter
                 .collect()
         })
         .unwrap_or_default();
+    let (mac_address, speed_mbps, rx_packets, tx_packets, rx_errors, tx_errors) = if fields.len()
+        == 14
+    {
+        (
+            decode_probe_text(fields[8], hexadecimal, 64).filter(|mac| mac != "00:00:00:00:00:00"),
+            fields[9]
+                .parse::<i64>()
+                .ok()
+                .and_then(|value| (value > 0).then_some(value as u64)),
+            fields[10].parse::<u64>().ok(),
+            fields[11].parse::<u64>().ok(),
+            fields[12].parse::<u64>().ok(),
+            fields[13].parse::<u64>().ok(),
+        )
+    } else {
+        (None, None, None, None, None, None)
+    };
     Some(NetworkInterface {
         name,
         state: decode_probe_text(fields[2], hexadecimal, 64),
         addresses,
         mtu: fields[4].parse::<u64>().ok(),
+        mac_address,
+        speed_mbps,
         received_bytes: fields[5].parse::<u64>().ok(),
         transmitted_bytes: fields[6].parse::<u64>().ok(),
+        rx_packets,
+        tx_packets,
+        rx_errors,
+        tx_errors,
         loopback: fields[7] == "1",
     })
 }
 
 fn parse_linux_endpoint(line: &str) -> Option<NetworkEndpoint> {
     let fields = line.split('\t').collect::<Vec<_>>();
-    if fields.len() != 6 {
+    if fields.len() != 6 && fields.len() != 8 {
         return None;
     }
     let protocol = decode_probe_text(fields[1], true, 16)?;
@@ -6313,6 +6550,11 @@ fn parse_linux_endpoint(line: &str) -> Option<NetworkEndpoint> {
     let local = decode_probe_text(fields[3], true, 256)?;
     let remote = decode_probe_text(fields[4], true, 256);
     let details = decode_probe_text(fields[5], true, 512).unwrap_or_default();
+    let (recv_q, send_q) = if fields.len() == 8 {
+        (fields[6].parse::<u64>().ok(), fields[7].parse::<u64>().ok())
+    } else {
+        (None, None)
+    };
     let (local_address, local_port) = split_network_endpoint(&local);
     let (remote_address, remote_port) = remote
         .as_deref()
@@ -6339,6 +6581,8 @@ fn parse_linux_endpoint(line: &str) -> Option<NetworkEndpoint> {
             .then_some(remote_address),
         remote_port,
         state,
+        recv_q,
+        send_q,
         pid,
         process_name,
     })
@@ -6357,6 +6601,8 @@ fn parse_windows_endpoint(line: &str) -> Option<NetworkEndpoint> {
         remote_address: decode_probe_text(fields[5], false, 256)
             .filter(|value| value != "0.0.0.0" && value != "::" && value != "*"),
         remote_port: fields[6].parse::<u16>().ok().filter(|port| *port > 0),
+        recv_q: None,
+        send_q: None,
         pid: fields[7].parse::<u32>().ok().filter(|pid| *pid > 0),
         process_name: decode_probe_text(fields[8], false, 128),
     })
@@ -6364,9 +6610,19 @@ fn parse_windows_endpoint(line: &str) -> Option<NetworkEndpoint> {
 
 fn parse_route_entry(line: &str, hexadecimal: bool) -> Option<RouteEntry> {
     let fields = line.split('\t').collect::<Vec<_>>();
-    if fields.len() != 6 {
+    if fields.len() != 6 && fields.len() != 10 {
         return None;
     }
+    let (table, scope, source_address, route_type) = if fields.len() == 10 {
+        (
+            decode_probe_text(fields[6], hexadecimal, 64),
+            decode_probe_text(fields[7], hexadecimal, 64),
+            decode_probe_text(fields[8], hexadecimal, 256),
+            decode_probe_text(fields[9], hexadecimal, 64),
+        )
+    } else {
+        (None, None, None, None)
+    };
     Some(RouteEntry {
         destination: decode_probe_text(fields[1], hexadecimal, 256)?,
         gateway: decode_probe_text(fields[2], hexadecimal, 256)
@@ -6374,6 +6630,10 @@ fn parse_route_entry(line: &str, hexadecimal: bool) -> Option<RouteEntry> {
         interface_name: decode_probe_text(fields[3], hexadecimal, 128),
         metric: fields[4].parse::<u32>().ok(),
         protocol: decode_probe_text(fields[5], hexadecimal, 64),
+        table,
+        scope,
+        source_address,
+        route_type,
     })
 }
 
@@ -9139,14 +9399,12 @@ mod tests {
 
         let cpu_probe = posix_process_probe(ProcessSortBy::Cpu);
         let memory_probe = posix_process_probe(ProcessSortBy::Memory);
-        assert!(
-            cpu_probe
-                .contains("ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o stat=")
-        );
-        assert!(
-            memory_probe
-                .contains("ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o stat=")
-        );
+        assert!(cpu_probe.contains(
+            "ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o vsz= -o stat="
+        ));
+        assert!(memory_probe.contains(
+            "ps -e -o pid= -o ppid= -o user= -o pcpu= -o time= -o rss= -o vsz= -o stat="
+        ));
         assert!(!cpu_probe.contains("pid=,ppid="));
         assert!(!memory_probe.contains("pid=,ppid="));
         assert!(cpu_probe.contains("sort -k4,4nr -k6,6nr"));
@@ -9167,6 +9425,93 @@ mod tests {
             decode_process_name(&hex("/usr/sbin/sshd"), true).as_deref(),
             Some("sshd")
         );
+    }
+
+    #[test]
+    fn parses_enriched_posix_process_and_redacts_command_line_secrets() {
+        let cmd = "java -Dfile.encoding=UTF-8 -Ddb.password=s3cr3t --token mytok123 --mysql-native-password=on mysql://root:topsecret@127.0.0.1:3306/app -jar /opt/app.jar";
+        let output = format!(
+            "PLATFORM=POSIX\nP\t26126\t26105\t{}\t0.4\t00:12:34\t843571\tSsl\t{}\t3600\t{}\t3145728\t48\t{}\t{}\t{}\n",
+            hex("root"),
+            hex("Mon Nov 10 10:00:00 2026"),
+            hex("java"),
+            hex("/usr/local/jdk1.8.0_251/bin/java"),
+            hex("/opt/kkFileView-4.1.0"),
+            hex(cmd),
+        );
+
+        let parsed = parse_posix_process_output(&output, 1_700_000_000_000)
+            .expect("enriched process fixture should parse");
+        assert_eq!(parsed.processes.len(), 1);
+        let process = &parsed.processes[0];
+        assert_eq!(process.virtual_memory_bytes, Some(3_145_728 * 1024));
+        assert_eq!(process.threads, Some(48));
+        assert_eq!(
+            process.executable_path.as_deref(),
+            Some("/usr/local/jdk1.8.0_251/bin/java")
+        );
+        assert_eq!(
+            process.working_directory.as_deref(),
+            Some("/opt/kkFileView-4.1.0")
+        );
+        let redacted = process
+            .command_line
+            .as_deref()
+            .expect("command line should be populated");
+        assert!(redacted.contains("-Dfile.encoding=UTF-8"));
+        assert!(redacted.contains("-Ddb.password=[REDACTED]"));
+        assert!(redacted.contains("--token [REDACTED]"));
+        assert!(redacted.contains("--mysql-native-password=on"));
+        assert!(redacted.contains("mysql://root:[REDACTED]@127.0.0.1:3306/app"));
+        assert!(!redacted.contains("s3cr3t"));
+        assert!(!redacted.contains("mytok123"));
+        assert!(!redacted.contains("topsecret"));
+    }
+
+    #[test]
+    fn parses_enriched_linux_interfaces_endpoints_and_routes() {
+        let output = format!(
+            "PLATFORM=LINUX\nI\t{}\t{}\t{}\t1500\t1000\t2000\t0\t{}\t10000\t120\t240\t1\t2\nE\t{}\t{}\t{}\t{}\t{}\t12\t34\nT\t{}\t{}\t{}\t100\t{}\t{}\t{}\t{}\t{}\n",
+            hex("eth0"),
+            hex("up"),
+            hex("10.0.0.2/24"),
+            hex("00:16:3e:11:22:33"),
+            hex("tcp"),
+            hex("ESTAB"),
+            hex("10.0.0.2:22"),
+            hex("27.8.49.219:9799"),
+            hex("users:((\"sshd\",pid=1069,fd=4))"),
+            hex("10.0.0.0/24"),
+            hex(""),
+            hex("eth0"),
+            hex("kernel"),
+            hex("main"),
+            hex("link"),
+            hex("10.0.0.2"),
+            hex("unicast"),
+        );
+
+        let snapshot = parse_linux_network_output(&output, 1234)
+            .expect("enriched network fixture should parse");
+        let iface = &snapshot.interfaces[0];
+        assert_eq!(iface.mac_address.as_deref(), Some("00:16:3e:11:22:33"));
+        assert_eq!(iface.speed_mbps, Some(10000));
+        assert_eq!(iface.rx_packets, Some(120));
+        assert_eq!(iface.tx_packets, Some(240));
+        assert_eq!(iface.rx_errors, Some(1));
+        assert_eq!(iface.tx_errors, Some(2));
+
+        let endpoint = &snapshot.endpoints[0];
+        assert_eq!(endpoint.recv_q, Some(12));
+        assert_eq!(endpoint.send_q, Some(34));
+        assert_eq!(endpoint.remote_address.as_deref(), Some("27.8.49.219"));
+        assert_eq!(endpoint.remote_port, Some(9799));
+
+        let route = &snapshot.routes[0];
+        assert_eq!(route.table.as_deref(), Some("main"));
+        assert_eq!(route.scope.as_deref(), Some("link"));
+        assert_eq!(route.source_address.as_deref(), Some("10.0.0.2"));
+        assert_eq!(route.route_type.as_deref(), Some("unicast"));
     }
 
     #[cfg(unix)]

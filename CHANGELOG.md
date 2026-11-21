@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-11-21
+
+### Added
+
+- Enriched Host Monitoring Details (`MonitorDetailsDialog`) **Processes** view with executable path (`位置`), working directory (`工作目录`), Rust-redacted command line (`命令行`), virtual memory (`VSZ`), thread count, inline memory/CPU usage bars, instant search filtering, and one-click copy actions in both the detail pane and vertical context menu (environment variables remain uncollected).
+- Enriched **Network** view with three sub-views: **Listening Services** (aggregated per-listener `PID`, process, protocol, listen address, port, unique remote IP count, and active connection count with click-to-inspect peer connections), **All Connections** (with `Recv-Q`, `Send-Q`, state filter pills, and search), and **Interfaces** (full table with MAC address, link speed, MTU, RX/TX bytes, packets, and errors).
+- Enriched **Routes** view with **OS Route Table** extended columns (`table`, `routeType`, `sourceAddress`, `scope`) plus route-table/search filtering, and an on-demand **Route Trace** sub-view (`run_route_trace`) showing hop-by-hop IP, latency, and packet loss alongside optional user-triggered Whois ownership lookup.
+
 ## [0.1.13] - 2026-11-21
 
 ### Added

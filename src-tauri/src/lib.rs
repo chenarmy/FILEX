@@ -11,6 +11,7 @@ mod profile_export;
 mod remote_jobs;
 mod remote_ops;
 mod remote_relay;
+mod route_trace;
 mod session_runtime;
 mod terminal_logging;
 mod text_encoding;
@@ -41,10 +42,11 @@ use filex_contracts::{
     OpsSnapshot, ProcessSignal, ProcessSnapshot, ProcessSortBy, QuickConnectInput,
     RecordHostTrustInput, RemoteDirectoryListing, RemoteJobOutputChunk, RemoteJobSummary,
     RemotePermissionUpdateResult, RemoteState, RemoteTextPreview, RemoteTextSaveResult,
-    RuntimePaths, SafeSettings, SaveCommandSnippetInput, SessionConnectionProgress, SessionSummary,
-    SshConfigImportPreview, StartRemoteJobInput, SystemMonitorSnapshot, TransferState,
-    TransferTask, TunnelRule, TunnelSummary, UpdateConnectionProfileInput,
-    UpdateRemotePermissionsInput, UpdateStatus, UpdateTunnelRuleInput,
+    RouteTraceResult, RuntimePaths, SafeSettings, SaveCommandSnippetInput,
+    SessionConnectionProgress, SessionSummary, SshConfigImportPreview, StartRemoteJobInput,
+    SystemMonitorSnapshot, TransferState, TransferTask, TunnelRule, TunnelSummary,
+    UpdateConnectionProfileInput, UpdateRemotePermissionsInput, UpdateStatus,
+    UpdateTunnelRuleInput,
 };
 use filex_core::{
     CommandHistoryService, HostTrustService, PathBookmarkService, ProfileService,
@@ -5177,6 +5179,21 @@ async fn collect_network_snapshot(
 }
 
 #[tauri::command]
+async fn run_route_trace(
+    target: String,
+    include_whois: Option<bool>,
+    max_hops: Option<u32>,
+) -> Result<OperationResult<RouteTraceResult>, ()> {
+    Ok(
+        match route_trace::run_route_trace(&target, include_whois.unwrap_or(false), max_hops).await
+        {
+            Ok(result) => OperationResult::success(result),
+            Err(error) => OperationResult::failure(error),
+        },
+    )
+}
+
+#[tauri::command]
 async fn compare_file_checksums(
     operation_id: String,
     session_id: String,
@@ -6224,6 +6241,7 @@ pub fn run() {
             collect_system_monitor,
             collect_process_snapshot,
             collect_network_snapshot,
+            run_route_trace,
             terminate_remote_process,
             collect_docker_snapshot,
             collect_docker_logs,

@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { failure, isTauriRuntime, normalizeUnknownError } from '@/api/common';
-import type { NetworkSnapshot, OperationResult } from '@/types/contracts';
+import type { NetworkSnapshot, OperationResult, RouteTraceResult } from '@/types/contracts';
 
 export async function collectNetworkSnapshot(sessionId: string): Promise<OperationResult<NetworkSnapshot>> {
   if (!isTauriRuntime()) {
@@ -15,5 +15,29 @@ export async function collectNetworkSnapshot(sessionId: string): Promise<Operati
     return await invoke<OperationResult<NetworkSnapshot>>('collect_network_snapshot', { sessionId });
   } catch (error: unknown) {
     return failure(normalizeUnknownError(error, 'NETWORK_PROBE_FAILED'));
+  }
+}
+
+export async function runRouteTrace(
+  target: string,
+  includeWhois: boolean,
+  maxHops = 24,
+): Promise<OperationResult<RouteTraceResult>> {
+  if (!isTauriRuntime()) {
+    return failure({
+      code: 'ROUTE_TRACE_DESKTOP_ONLY',
+      messageKey: 'errors.sshDesktopOnly',
+      retryable: false,
+      remoteState: 'not_applicable',
+    });
+  }
+  try {
+    return await invoke<OperationResult<RouteTraceResult>>('run_route_trace', {
+      target,
+      includeWhois,
+      maxHops,
+    });
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'ROUTE_TRACE_FAILED'));
   }
 }

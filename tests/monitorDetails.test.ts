@@ -1,11 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import {
   ALL_NETWORK_INTERFACES,
+  ALL_ROUTE_TABLES,
   DEFAULT_PROCESS_SORT,
+  aggregateNetworkServices,
+  filterNetworkEndpoints,
+  filterNetworkServices,
+  filterProcesses,
+  filterRoutes,
   networkEndpointsForInterface,
+  routeTableNames,
   sortProcesses,
+  summarizeEndpointStates,
 } from '@/domain/monitorDetails';
-import type { NetworkEndpoint, NetworkInterface, ProcessEntry } from '@/types/contracts';
+import type { NetworkEndpoint, NetworkInterface, ProcessEntry, RouteEntry } from '@/types/contracts';
 
 const eth0: NetworkInterface = {
   name: 'eth0',
@@ -128,5 +136,145 @@ describe('monitor process sorting', () => {
 
     const byMemory = sortProcesses(windowsProcesses, 'memory');
     expect(byMemory.map((entry) => entry.pid)).toEqual([100, 150, 300, 200]);
+  });
+
+  it('filters processes by PID, path, working directory, or command line', () => {
+    const entries: ProcessEntry[] = [
+      makeProcess({
+        pid: 26126,
+        name: 'java',
+        executablePath: '/usr/local/jdk1.8.0_251/bin/java',
+        workingDirectory: '/opt/kkFileView-4.1.0',
+        commandLine: 'java -jar /opt/kkFileView-4.1.0/bin/kkFileView-4.1.0.jar',
+      }),
+      makeProcess({
+        pid: 1601,
+        name: 'mysqld',
+        user: 'polkitd',
+        executablePath: '/usr/sbin/mysqld',
+        commandLine: 'mysqld --mysql-native-password=on',
+      }),
+    ];
+
+    expect(filterProcesses(entries, '/jdk1.8').map((e) => e.pid)).toEqual([26126]);
+    expect(filterProcesses(entries, 'kkfileview').map((e) => e.pid)).toEqual([26126]);
+    expect(filterProcesses(entries, 'polkitd').map((e) => e.pid)).toEqual([1601]);
+    expect(filterProcesses(entries, '1601').map((e) => e.pid)).toEqual([1601]);
+  });
+});
+
+describe('monitor network service aggregation and route filtering', () => {
+  it('aggregates listening services with unique remote IP and connection counts plus outbound connections', () => {
+    const sampleEndpoints: NetworkEndpoint[] = [
+      {
+        protocol: 'tcp',
+        localAddress: '0.0.0.0',
+        localPort: 22,
+        remoteAddress: null,
+        remotePort: null,
+        state: 'LISTEN',
+        pid: 1069,
+        processName: 'sshd',
+      },
+      {
+        protocol: 'tcp',
+        localAddress: '0.0.0.0',
+        localPort: 80,
+        remoteAddress: null,
+        remotePort: null,
+        state: 'LISTEN',
+        pid: 1623,
+        processName: 'nginx',
+      },
+      {
+        protocol: 'tcp',
+        localAddress: '10.0.0.2',
+        localPort: 22,
+        remoteAddress: '27.8.49.219',
+        remotePort: 9799,
+        state: 'ESTAB',
+        recvQ: 0,
+        sendQ: 128,
+        pid: 1069,
+        processName: 'sshd',
+      },
+      {
+        protocol: 'tcp',
+        localAddress: '10.0.0.2',
+        localPort: 22,
+        remoteAddress: '27.8.49.219',
+        remotePort: 9127,
+        state: 'ESTAB',
+        pid: 1069,
+        processName: 'sshd',
+      },
+      {
+        protocol: 'tcp',
+        localAddress: '10.0.0.2',
+        localPort: 54321,
+        remoteAddress: '100.100.30.25',
+        remotePort: 80,
+        state: 'ESTAB',
+        pid: 1698,
+        processName: 'AliYunDun',
+      },
+    ];
+
+    const services = aggregateNetworkServices(sampleEndpoints);
+    expect(services).toHaveLength(3);
+    expect(services[0]?.processName).toBe('sshd');
+    expect(services[0]?.uniqueRemoteIps).toBe(1);
+    expect(services[0]?.connectionCount).toBe(2);
+    expect(services[0]?.establishedCount).toBe(2);
+
+    expect(services[1]?.processName).toBe('AliYunDun');
+    expect(services[1]?.isListener).toBe(false);
+    expect(services[1]?.connectionCount).toBe(1);
+
+    expect(services[2]?.processName).toBe('nginx');
+    expect(services[2]?.connectionCount).toBe(0);
+
+    expect(filterNetworkServices(services, '27.8.49.219').map((s) => s.processName)).toEqual(['sshd']);
+
+    const stateSummary = summarizeEndpointStates(sampleEndpoints);
+    expect(stateSummary).toEqual({
+      all: 5,
+      listen: 2,
+      established: 3,
+      time_wait: 0,
+      other: 0,
+    });
+    expect(filterNetworkEndpoints(sampleEndpoints, null, 'established', '9799')).toHaveLength(1);
+  });
+
+  it('lists route tables with main first and filters by table and search query', () => {
+    const routes: RouteEntry[] = [
+      {
+        destination: '10.0.0.2',
+        gateway: null,
+        interfaceName: 'eth0',
+        metric: null,
+        protocol: 'kernel',
+        table: 'local',
+        scope: 'host',
+        sourceAddress: '10.0.0.2',
+        routeType: 'local',
+      },
+      {
+        destination: 'default',
+        gateway: '10.0.0.1',
+        interfaceName: 'eth0',
+        metric: 100,
+        protocol: 'dhcp',
+        table: 'main',
+        scope: null,
+        sourceAddress: null,
+        routeType: 'unicast',
+      },
+    ];
+
+    expect(routeTableNames(routes)).toEqual(['main', 'local']);
+    expect(filterRoutes(routes, ALL_ROUTE_TABLES, '10.0.0.1')).toHaveLength(1);
+    expect(filterRoutes(routes, 'local', '')).toHaveLength(1);
   });
 });

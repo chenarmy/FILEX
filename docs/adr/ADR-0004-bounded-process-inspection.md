@@ -24,3 +24,10 @@ Operators need to inspect processes on a connected host and stop an individual p
 - Platforms without the required process utilities can still use the rest of the monitor panel and receive an explicit unsupported state.
 - PID identity is checked immediately before signaling, but operating-system process APIs do not provide a portable atomic check-and-signal operation over SSH; a narrow PID-reuse race remains on POSIX systems.
 - Build, type, runtime, and live-host verification are required before accepting this implementation for release.
+
+## Addendum (2026-11-21)
+
+- Expanded bounded process inspection (256 KiB / 10s output bound, still capped at 100 rows) to include executable path (`/proc/<pid>/exe` on Linux, `Process.Path` on Windows), working directory (`/proc/<pid>/cwd`), virtual memory (`vsz` / `VirtualMemorySize64`), thread count (`nlwp` / `Threads.Count`), and bounded command line (`ps -o args=`, truncated to 384 chars).
+- Process environment variables (`/proc/<pid>/environ`) remain strictly uncollected.
+- Command lines are redacted in Rust (`redact_process_command_line`) before crossing the IPC boundary to mask passwords, tokens, secrets, bearer/basic credentials, and embedded URL passwords.
+- All process inspection metadata remains ephemeral in memory and is never persisted to SQLite or written to logs.

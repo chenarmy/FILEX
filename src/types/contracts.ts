@@ -608,8 +608,13 @@ export interface ProcessEntry {
   cpuPercent: number | null;
   cpuTimeSeconds: number | null;
   memoryBytes: number | null;
+  virtualMemoryBytes?: number | null;
+  threads?: number | null;
   state: string | null;
   startedAtMs?: number | null;
+  executablePath?: string | null;
+  workingDirectory?: string | null;
+  commandLine?: string | null;
   canTerminate: boolean;
 }
 
@@ -631,6 +636,12 @@ export interface NetworkInterface {
   mtu: number | null;
   receivedBytes: number | null;
   transmittedBytes: number | null;
+  macAddress?: string | null;
+  speedMbps?: number | null;
+  rxPackets?: number | null;
+  txPackets?: number | null;
+  rxErrors?: number | null;
+  txErrors?: number | null;
   loopback: boolean;
 }
 
@@ -643,6 +654,8 @@ export interface NetworkEndpoint {
   state: string | null;
   pid: number | null;
   processName: string | null;
+  recvQ?: number | null;
+  sendQ?: number | null;
 }
 
 export interface RouteEntry {
@@ -651,6 +664,29 @@ export interface RouteEntry {
   interfaceName: string | null;
   metric: number | null;
   protocol: string | null;
+  table?: string | null;
+  scope?: string | null;
+  sourceAddress?: string | null;
+  routeType?: string | null;
+}
+
+export interface RouteTraceHop {
+  hop: number;
+  address: string | null;
+  avgLatencyMs: number | null;
+  minLatencyMs: number | null;
+  maxLatencyMs: number | null;
+  lossPercent: number;
+  responded: boolean;
+}
+
+export interface RouteTraceResult {
+  target: string;
+  resolvedIp: string | null;
+  hops: RouteTraceHop[];
+  whoisLines: string[];
+  whoisSummary: string | null;
+  truncated: boolean;
 }
 
 export interface NetworkSnapshot {

@@ -1191,9 +1191,19 @@ pub struct ProcessEntry {
     pub cpu_percent: Option<f64>,
     pub cpu_time_seconds: Option<f64>,
     pub memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtual_memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads: Option<u32>,
     pub state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_line: Option<String>,
     pub can_terminate: bool,
 }
 
@@ -1224,6 +1234,18 @@ pub struct NetworkInterface {
     pub mtu: Option<u64>,
     pub received_bytes: Option<u64>,
     pub transmitted_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_mbps: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rx_packets: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_packets: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rx_errors: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_errors: Option<u64>,
     pub loopback: bool,
 }
 
@@ -1238,6 +1260,10 @@ pub struct NetworkEndpoint {
     pub state: Option<String>,
     pub pid: Option<u32>,
     pub process_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recv_q: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_q: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1248,6 +1274,37 @@ pub struct RouteEntry {
     pub interface_name: Option<String>,
     pub metric: Option<u32>,
     pub protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteTraceHop {
+    pub hop: u32,
+    pub address: Option<String>,
+    pub avg_latency_ms: Option<f64>,
+    pub min_latency_ms: Option<f64>,
+    pub max_latency_ms: Option<f64>,
+    pub loss_percent: f64,
+    pub responded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteTraceResult {
+    pub target: String,
+    pub resolved_ip: Option<String>,
+    pub hops: Vec<RouteTraceHop>,
+    pub whois_lines: Vec<String>,
+    pub whois_summary: Option<String>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
