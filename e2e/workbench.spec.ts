@@ -861,6 +861,10 @@ test('inspects complete session-scoped process, network, interface and route vie
   const interfaceSelect = dialog.getByLabel('网口');
   await expect(interfaceSelect).toHaveValue('');
   await expect(interfaceSelect.locator('option').first()).toHaveText('全部网口');
+  await expect(dialog.getByRole('button', { name: '监听服务' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(dialog.getByRole('row', { name: /postgres.*127\.0\.0\.1.*5432/ })).toBeVisible();
+
+  await dialog.getByRole('button', { name: '全部连接' }).click();
   await expect(dialog.getByRole('cell', { name: '127.0.0.1:5432' })).toBeVisible();
   await page.screenshot({ path: 'test-results/monitor-details-network-all-1440.png' });
 
