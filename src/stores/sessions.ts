@@ -2,6 +2,13 @@ import { computed, ref, shallowRef } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { defineStore } from 'pinia';
 import {
+  connectExternalLaunchSession,
+  discardExternalLaunch,
+  drainExternalLaunchEvents,
+  listenExternalLaunchEvents,
+  probeExternalLaunchHostKey,
+} from '@/api/domain/externalLaunchApi';
+import {
   connectAgentSession,
   connectPrivateKeySession,
   connectPasswordSession,
@@ -33,15 +40,23 @@ import {
   MAX_PROFILE_COMMAND_HISTORY_ENTRIES,
   shouldExcludeCommandFromHistory,
 } from '@/domain/commandHistory';
+import {
+  externalLaunchProfileName,
+  shouldPromptExternalLaunchUsername,
+} from '@/domain/externalLaunch';
+import { t } from '@/i18n';
 import { recordHostTrust } from '@/api/domain/trustApi';
 import { isLocalSession } from '@/domain/sessionCapabilities';
 import { useConnectionsStore } from '@/stores/connections';
 import { useEventsStore } from '@/stores/events';
 import { useTunnelsStore } from '@/stores/tunnels';
 import { useSettingsStore } from '@/stores/settings';
+import { useUiStore } from '@/stores/ui';
 import type {
   AppError,
   ConnectionProfile,
+  ExternalLaunchEvent,
+  ExternalLaunchRequest,
   HostKeyChallenge,
   LocalShellKind,
   LocalShellOption,
@@ -58,6 +73,7 @@ export const useSessionsStore = defineStore('sessions', () => {
   const currentRouteProfileId = ref<string | null>(null);
   const pendingConnectionSessionId = ref<string | null>(null);
   const quickProfiles = shallowRef<Record<string, ConnectionProfile>>({});
+  const quickLaunchMeta = shallowRef<Record<string, { hasPresetPassword: boolean; openSftp: boolean }>>({});
   const passwordProfileId = ref<string | null>(null);
   const privateKeyPassphraseProfileId = ref<string | null>(null);
   const busy = ref(false);
@@ -76,6 +92,9 @@ export const useSessionsStore = defineStore('sessions', () => {
     workingDirectory: string;
   }>>({});
   let unlistenTerminal: UnlistenFn | null = null;
+  let unlistenExternalLaunch: UnlistenFn | null = null;
+  const externalLaunchQueue: ExternalLaunchEvent[] = [];
+  let externalLaunchProcessing = false;
   const autoReconnectInFlight = new Set<string>();
   const suppressAutoReconnect = new Set<string>();
   const activeSession = computed(() => summaries.value.find((item) => item.id === activeSessionId.value) ?? null);
@@ -184,11 +203,52 @@ export const useSessionsStore = defineStore('sessions', () => {
     quickProfiles.value = { ...quickProfiles.value, [profileId]: profile };
   }
 
+  function bindExternalLaunchProfile(
+    profileId: string,
+    request: ExternalLaunchRequest,
+    fallbackName: string,
+  ): void {
+    const profile: ConnectionProfile = {
+      id: profileId,
+      name: externalLaunchProfileName(request, fallbackName),
+      group: '',
+      host: request.host.trim(),
+      port: request.port,
+      username: request.username.trim(),
+      environment: 'development',
+      favorite: false,
+      tags: [],
+      authenticationMethod: request.authenticationMethod,
+      identityFile: request.identityFile,
+      proxyJump: null,
+      proxyJumpProfileIds: [],
+      credentialRef: null,
+      state: 'idle',
+      latencyMs: null,
+      lastUsedAt: null,
+    };
+    quickProfiles.value = { ...quickProfiles.value, [profileId]: profile };
+    quickLaunchMeta.value = {
+      ...quickLaunchMeta.value,
+      [profileId]: {
+        hasPresetPassword: request.hasPresetPassword,
+        openSftp: request.openSftp,
+      },
+    };
+  }
+
   function clearQuickProfile(profileId: string | null | undefined): void {
-    if (!profileId || !quickProfiles.value[profileId]) return;
-    const next = { ...quickProfiles.value };
-    delete next[profileId];
-    quickProfiles.value = next;
+    if (!profileId) return;
+    if (quickProfiles.value[profileId]) {
+      const next = { ...quickProfiles.value };
+      delete next[profileId];
+      quickProfiles.value = next;
+    }
+    if (quickLaunchMeta.value[profileId]) {
+      const nextMeta = { ...quickLaunchMeta.value };
+      delete nextMeta[profileId];
+      quickLaunchMeta.value = nextMeta;
+    }
   }
 
   function markQuickProfileUsed(profileId: string): void {
@@ -404,6 +464,162 @@ export const useSessionsStore = defineStore('sessions', () => {
     }
   }
 
+  function canStartExternalLaunch(): boolean {
+    return !busy.value
+      && !challenge.value
+      && !passwordProfileId.value
+      && !privateKeyPassphraseProfileId.value;
+  }
+
+  function scheduleNextExternalLaunch(): void {
+    if (externalLaunchQueue.length > 0 && canStartExternalLaunch() && !externalLaunchProcessing) {
+      void processNextExternalLaunch();
+    }
+  }
+
+  function enqueueExternalLaunch(event: ExternalLaunchEvent): void {
+    externalLaunchQueue.push(event);
+    scheduleNextExternalLaunch();
+  }
+
+  async function beginExternalLaunch(request: ExternalLaunchRequest): Promise<boolean> {
+    if (busy.value) return false;
+    if (pendingConnectionSessionId.value) await cancelPendingAttempt();
+    error.value = null;
+    challenge.value = null;
+    currentRouteProfileId.value = null;
+    pendingConnectionSessionId.value = null;
+    passwordProfileId.value = null;
+    privateKeyPassphraseProfileId.value = null;
+    busy.value = true;
+    try {
+      const result = await probeExternalLaunchHostKey(request.launchId);
+      if (!result.ok) {
+        error.value = result.error;
+        useEventsStore().record('session', result.error.code, 'error');
+        useUiStore().notify(t(result.error.messageKey as Parameters<typeof t>[0]));
+        return false;
+      }
+      bindExternalLaunchProfile(result.data.profileId, request, result.data.profileName);
+      challenge.value = result.data;
+      currentRouteProfileId.value = result.data.profileId;
+      pendingConnectionSessionId.value = result.data.session.id;
+      upsert(result.data.session);
+      useEventsStore().record(
+        'security',
+        `HOST_KEY_${result.data.trust.toUpperCase()}`,
+        result.data.trust === 'changed' ? 'warning' : 'info',
+        { sessionId: result.data.session.id },
+      );
+      if (result.data.trust === 'trusted') {
+        challenge.value = null;
+        const profile = profileForId(result.data.profileId);
+        if (profile) await requestAuthentication(profile);
+      }
+      return true;
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  async function processNextExternalLaunch(): Promise<void> {
+    if (externalLaunchProcessing) return;
+    externalLaunchProcessing = true;
+    try {
+      while (externalLaunchQueue.length > 0 && canStartExternalLaunch()) {
+        const next = externalLaunchQueue.shift();
+        if (!next) break;
+        if (next.kind === 'error') {
+          error.value = next.error;
+          useEventsStore().record('session', next.error.code, 'error');
+          useUiStore().notify(t(next.error.messageKey as Parameters<typeof t>[0]));
+          continue;
+        }
+        if (shouldPromptExternalLaunchUsername(next.request)) {
+          await discardExternalLaunch(next.request.launchId);
+          useUiStore().openQuickConnectWithPrefill({
+            host: next.request.host,
+            port: next.request.port,
+          });
+          continue;
+        }
+        await beginExternalLaunch(next.request);
+      }
+    } finally {
+      externalLaunchProcessing = false;
+    }
+  }
+
+  async function connectExternalLaunch(
+    sessionId: string,
+    profile: ConnectionProfile,
+    passphrase?: string,
+  ): Promise<void> {
+    const meta = quickLaunchMeta.value[profile.id];
+    const result = await connectExternalLaunchSession(sessionId, passphrase);
+    if (!result.ok) {
+      if (
+        profile.authenticationMethod === 'private_key'
+        && result.error.code === 'SSH_PRIVATE_KEY_PASSPHRASE_REQUIRED'
+      ) {
+        error.value = null;
+        privateKeyPassphraseProfileId.value = profile.id;
+        return;
+      }
+      if (
+        profile.authenticationMethod === 'private_key'
+        && result.error.code === 'SSH_PRIVATE_KEY_INVALID'
+        && passphrase !== undefined
+      ) {
+        error.value = result.error;
+        privateKeyPassphraseProfileId.value = profile.id;
+        return;
+      }
+      if (
+        profile.authenticationMethod === 'password'
+        && result.error.code === 'CREDENTIAL_NOT_CONFIGURED'
+      ) {
+        error.value = null;
+        passwordProfileId.value = profile.id;
+        return;
+      }
+      suppressAutoReconnect.add(sessionId);
+      await refreshSummary(sessionId);
+      clearQuickProfile(profile.id);
+      passwordProfileId.value = null;
+      privateKeyPassphraseProfileId.value = null;
+      challenge.value = null;
+      currentRouteProfileId.value = null;
+      pendingConnectionSessionId.value = null;
+      error.value = result.error;
+      useEventsStore().record('session', result.error.code, 'error', { sessionId });
+      useUiStore().notify(t(result.error.messageKey as Parameters<typeof t>[0]));
+      return;
+    }
+    upsert(result.data.session);
+    markQuickProfileUsed(profile.id);
+    if (meta) {
+      quickLaunchMeta.value = {
+        ...quickLaunchMeta.value,
+        [profile.id]: { ...meta, hasPresetPassword: false },
+      };
+    }
+    passwordProfileId.value = null;
+    privateKeyPassphraseProfileId.value = null;
+    challenge.value = null;
+    currentRouteProfileId.value = null;
+    pendingConnectionSessionId.value = null;
+    useEventsStore().record('session', 'SSH_CONNECTED', 'success', {
+      sessionId: result.data.session.id,
+      generation: result.data.session.generation,
+    });
+    if (meta?.openSftp) {
+      const settings = useSettingsStore();
+      settings.value.fileBrowserOpen = true;
+      settings.value.inspectorTab = 'files';
+    }
+  }
+
   async function reconnectActive(): Promise<void> {
     const session = activeSession.value;
     if (!session) return;
@@ -510,6 +726,7 @@ export const useSessionsStore = defineStore('sessions', () => {
       await requestAuthentication(profile);
     } finally {
       busy.value = false;
+      scheduleNextExternalLaunch();
     }
   }
 
@@ -517,6 +734,18 @@ export const useSessionsStore = defineStore('sessions', () => {
     if (blockUnsupportedProfile(profile)) {
       await cancelPendingAttempt();
       return;
+    }
+    if (isQuickProfile(profile.id)) {
+      const meta = quickLaunchMeta.value[profile.id];
+      const sessionId = pendingConnectionSessionId.value ?? activeSessionId.value;
+      if (
+        sessionId
+        && ((profile.authenticationMethod === 'password' && meta?.hasPresetPassword)
+          || profile.authenticationMethod === 'private_key')
+      ) {
+        await connectExternalLaunch(sessionId, profile);
+        return;
+      }
     }
     if (profile.authenticationMethod === 'password') {
       if (!profile.credentialRef?.startsWith('password:')) {
@@ -591,6 +820,7 @@ export const useSessionsStore = defineStore('sessions', () => {
         return;
       } finally {
         busy.value = false;
+        scheduleNextExternalLaunch();
       }
     }
     busy.value = true;
@@ -626,6 +856,28 @@ export const useSessionsStore = defineStore('sessions', () => {
     if (blockUnsupportedProfile(profile)) {
       privateKeyPassphraseProfileId.value = null;
       await cancelPendingAttempt();
+      return;
+    }
+    if (isQuickProfile(profileId)) {
+      const session = summaries.value.find((item) => item.profileId === profileId);
+      if (!session) {
+        error.value = {
+          code: 'SESSION_NOT_FOUND',
+          messageKey: 'errors.sessionNotFound',
+          retryable: false,
+          remoteState: 'not_applicable',
+        };
+        await cancelPendingAttempt();
+        return;
+      }
+      busy.value = true;
+      error.value = null;
+      try {
+        await connectExternalLaunch(session.id, profile, passphrase);
+      } finally {
+        busy.value = false;
+        scheduleNextExternalLaunch();
+      }
       return;
     }
     busy.value = true;
@@ -1015,6 +1267,23 @@ export const useSessionsStore = defineStore('sessions', () => {
     if (!result.ok) error.value = result.error;
     summaries.value = summaries.value.filter((item) => item.id !== sessionId);
     if (activeSessionId.value === sessionId) activeSessionId.value = summaries.value.at(-1)?.id ?? null;
+    scheduleNextExternalLaunch();
+  }
+
+  async function initializeExternalLaunchEvents(): Promise<void> {
+    if (!unlistenExternalLaunch) {
+      unlistenExternalLaunch = await listenExternalLaunchEvents((event) => {
+        enqueueExternalLaunch(event);
+      });
+    }
+    const result = await drainExternalLaunchEvents();
+    if (!result.ok) {
+      error.value = result.error;
+      return;
+    }
+    for (const event of result.data) {
+      enqueueExternalLaunch(event);
+    }
   }
 
   function dismissChallenge(): void {
@@ -1099,6 +1368,8 @@ export const useSessionsStore = defineStore('sessions', () => {
     selectSession,
     closeSession,
     initializeTerminalEvents,
+    initializeExternalLaunchEvents,
+    enqueueExternalLaunch,
     dismissChallenge,
     dismissPassword,
     dismissPrivateKeyPassphrase,

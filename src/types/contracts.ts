@@ -405,6 +405,22 @@ export interface QuickConnectInput {
   username: string;
 }
 
+export interface ExternalLaunchRequest {
+  launchId: string;
+  host: string;
+  port: number;
+  username: string;
+  displayName: string | null;
+  authenticationMethod: AuthenticationMethod;
+  identityFile: string | null;
+  hasPresetPassword: boolean;
+  openSftp: boolean;
+}
+
+export type ExternalLaunchEvent =
+  | { kind: 'launch'; request: ExternalLaunchRequest }
+  | { kind: 'error'; error: AppError };
+
 export interface SessionConnectionProgress {
   session: SessionSummary;
   challenge: HostKeyChallenge | null;

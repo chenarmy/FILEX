@@ -768,8 +768,7 @@ async function queueNativeUpload(
   destinationDirectory = sftp.path,
 ): Promise<void> {
   const session = sessions.activeSession;
-  if (!session || !remoteReady.value || quickSession.value) {
-    if (quickSession.value) ui.notify(t('quick.savedHint'));
+  if (!session || !remoteReady.value) {
     return;
   }
   const selected = await selectUploadPaths(
@@ -966,10 +965,6 @@ async function dropRemoteFileOnLocal(event: DragEvent, pane: 'local' | 'remote')
   if (!raw) return;
   event.preventDefault();
   localDropActive.value = false;
-  if (quickSession.value) {
-    ui.notify(t('quick.savedHint'));
-    return;
-  }
   try {
     const payload = JSON.parse(raw) as { path?: unknown; sessionId?: unknown };
     if (typeof payload.path !== 'string' || typeof payload.sessionId !== 'string') return;
@@ -1004,10 +999,6 @@ async function openUpload(): Promise<void> {
 
 async function openDownloadEntry(source: RemoteFileEntry): Promise<void> {
   if (!remoteReady.value) return;
-  if (quickSession.value) {
-    ui.notify(t('quick.savedHint'));
-    return;
-  }
   if (source.isSymlink) return;
   if (!localFiles.listing) await localFiles.load();
   const directory = localFiles.listing?.path;
@@ -1647,8 +1638,8 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
         </button>
         <span class="file-browser-panel-spacer" />
         <div class="file-toolbar-group">
-          <button type="button" class="icon-button" :disabled="quickSession || !remoteReady || sftp.loading || (dualPaneEnabled && (activePane !== 'local' || !selectedLocalEntry || selectedLocalEntry.isSymlink))" :aria-label="t('inspector.uploadFile')" :title="quickSession ? t('quick.savedHint') : t('inspector.uploadFile')" @click="openUpload"><Upload :size="12" /></button>
-          <button type="button" class="icon-button" :disabled="quickSession || !remoteReady || sftp.loading || activePane !== 'remote' || !selectedRemoteEntry || selectedRemoteEntry.isSymlink" :aria-label="t('inspector.downloadFile')" :title="quickSession ? t('quick.savedHint') : t('inspector.downloadFile')" @click="openDownload"><Download :size="12" /></button>
+          <button type="button" class="icon-button" :disabled="!remoteReady || sftp.loading || (dualPaneEnabled && (activePane !== 'local' || !selectedLocalEntry || selectedLocalEntry.isSymlink))" :aria-label="t('inspector.uploadFile')" :title="t('inspector.uploadFile')" @click="openUpload"><Upload :size="12" /></button>
+          <button type="button" class="icon-button" :disabled="!remoteReady || sftp.loading || activePane !== 'remote' || !selectedRemoteEntry || selectedRemoteEntry.isSymlink" :aria-label="t('inspector.downloadFile')" :title="t('inspector.downloadFile')" @click="openDownload"><Download :size="12" /></button>
         </div>
         <span class="toolbar-divider" />
         <div class="file-toolbar-group">
@@ -1927,12 +1918,12 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
       :remote-ready="remoteReady"
       :quick-session="quickSession"
       :can-edit="fileMenu.entry ? !fileMenu.entry.isSymlink && (fileMenu.pane === 'local' || remoteReady) : true"
-      :can-download="fileMenu.pane === 'remote' && Boolean(fileMenu.entry) && !fileMenu.entry?.isSymlink && !quickSession"
+      :can-download="fileMenu.pane === 'remote' && Boolean(fileMenu.entry) && !fileMenu.entry?.isSymlink"
       :can-remote-relay="fileMenu.pane === 'remote' && Boolean(fileMenu.entry) && !fileMenu.entry?.isSymlink && !quickSession && remoteReady"
       :can-permissions="fileMenu.pane === 'remote' && Boolean(fileMenu.entry) && !fileMenu.entry?.isSymlink && remoteReady"
       :can-quick-delete="fileMenu.pane === 'remote' && Boolean(fileMenu.entry) && fileMenu.entry?.path !== '/' && !fileMenu.entry?.isSymlink && remoteReady"
       :can-create="fileMenu.pane === 'local' ? Boolean(localFiles.listing) : remoteReady"
-      :can-upload="remoteReady && !quickSession"
+      :can-upload="remoteReady"
       :can-rename="fileMenu.pane === 'local' ? Boolean(fileMenu.entry) && !localFiles.mutating : Boolean(fileMenu.entry) && remoteReady && !sftp.renaming"
       :can-delete="fileMenu.pane === 'local' ? Boolean(fileMenu.entry) && !localFiles.mutating : Boolean(fileMenu.entry) && remoteReady && !sftp.deleting"
       @action="runFileMenuAction"

@@ -26,7 +26,6 @@ import {
 import { hasCapability } from '@/domain/sessionCapabilities';
 import { canResumeTransferTask, resumeStateLabelKey } from '@/domain/transferResume';
 import { t } from '@/i18n';
-import { useConnectionsStore } from '@/stores/connections';
 import { type ConsoleEvent, useEventsStore } from '@/stores/events';
 import { isRemoteJobActiveState, useRemoteJobsStore } from '@/stores/remoteJobs';
 import { useSessionsStore } from '@/stores/sessions';
@@ -65,7 +64,6 @@ interface UnifiedActivityRow {
 }
 
 const settings = useSettingsStore();
-const connections = useConnectionsStore();
 const sessions = useSessionsStore();
 const transfers = useTransfersStore();
 const tunnels = useTunnelsStore();
@@ -178,7 +176,7 @@ function canResumeTransfer(task: TransferTask): boolean {
 
 function profileDisplayName(profileId: string | null): string {
   if (!profileId) return '';
-  return connections.profiles.find((item) => item.id === profileId)?.name ?? profileId;
+  return sessions.profileForId(profileId)?.name ?? profileId;
 }
 
 function transferPrimaryLabel(task: TransferTask): string {

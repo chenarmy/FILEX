@@ -398,6 +398,29 @@ pub struct QuickConnectInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct ExternalLaunchRequest {
+    pub launch_id: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub authentication_method: AuthenticationMethod,
+    pub identity_file: Option<String>,
+    pub has_preset_password: bool,
+    pub open_sftp: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ExternalLaunchEvent {
+    #[serde(rename_all = "camelCase")]
+    Launch { request: ExternalLaunchRequest },
+    #[serde(rename_all = "camelCase")]
+    Error { error: AppError },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateConnectionProfileInput {
     pub name: String,
     pub group: String,

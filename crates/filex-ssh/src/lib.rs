@@ -6,6 +6,7 @@ pub use proxy::{
 };
 
 use std::{
+    borrow::Cow,
     future::Future,
     path::Path,
     sync::{Arc, Mutex},
@@ -15,7 +16,12 @@ use std::{
 use filex_contracts::HostTrustEvaluation;
 use russh::{
     Channel, ChannelMsg, ChannelOpenFailure, ChannelReadHalf, ChannelWriteHalf, Disconnect,
-    client::{self, ChannelOpenHandle, Config, Handler, Session},
+    MethodKind, Preferred, cipher,
+    client::{
+        self, AuthResult, ChannelOpenHandle, Config, Handler, KeyboardInteractiveAuthResponse,
+        Session,
+    },
+    kex,
     keys::{
         HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate,
         agent::{
@@ -23,6 +29,7 @@ use russh::{
             client::{AgentClient, AgentStream},
         },
     },
+    mac,
 };
 use russh_sftp::{
     client::{RawSftpSession, error::Error as SftpClientError},
@@ -114,6 +121,29 @@ pub enum SshError {
     Transport(#[from] russh::Error),
 }
 
+impl SshError {
+    pub fn diagnostic_reason(&self) -> Option<String> {
+        let Self::Transport(error) = self else {
+            return None;
+        };
+        let label = match error {
+            russh::Error::IO(io_error) => format!("io:{:?}", io_error.kind()),
+            russh::Error::KexInit => "kex_init_mismatch".to_owned(),
+            russh::Error::Kex => "kex_failed".to_owned(),
+            russh::Error::Disconnect => "remote_disconnect".to_owned(),
+            russh::Error::InactivityTimeout => "inactivity_timeout".to_owned(),
+            russh::Error::KeepaliveTimeout => "keepalive_timeout".to_owned(),
+            russh::Error::UnknownKey => "unknown_key".to_owned(),
+            russh::Error::WrongServerSig => "wrong_server_sig".to_owned(),
+            russh::Error::NoCommonAlgo { kind, theirs, .. } => {
+                format!("no_common_algo({kind:?}):{theirs:?}")
+            }
+            other => format!("russh:{other}"),
+        };
+        Some(label)
+    }
+}
+
 #[derive(Clone)]
 struct HostKeyHandler {
     expected: Option<PresentedHostKey>,
@@ -182,6 +212,102 @@ pub struct ConnectedSshSession {
     handle: client::Handle<HostKeyHandler>,
     remote_forward_routes: RemoteForwardRoutes,
     connect_timeout: Duration,
+}
+
+pub struct ProbedSshHandle {
+    handle: client::Handle<HostKeyHandler>,
+    remote_forward_routes: RemoteForwardRoutes,
+    presented: PresentedHostKey,
+    connect_timeout: Duration,
+}
+
+impl ProbedSshHandle {
+    pub fn presented_host_key(&self) -> &PresentedHostKey {
+        &self.presented
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.handle.is_closed()
+    }
+
+    pub async fn authenticate_password(
+        mut self,
+        username: &str,
+        password: &str,
+    ) -> Result<ConnectedSshSession, SshError> {
+        if !authenticate_password_or_none(
+            &mut self.handle,
+            username,
+            password,
+            self.connect_timeout,
+        )
+        .await?
+        {
+            let _ = self
+                .handle
+                .disconnect(
+                    Disconnect::ByApplication,
+                    "FILEX authentication rejected",
+                    "en",
+                )
+                .await;
+            return Err(SshError::AuthenticationRejected);
+        }
+        Ok(ConnectedSshSession {
+            handle: self.handle,
+            remote_forward_routes: self.remote_forward_routes,
+            connect_timeout: self.connect_timeout,
+        })
+    }
+
+    pub async fn authenticate_private_key(
+        mut self,
+        username: &str,
+        key: PreparedPrivateKey,
+    ) -> Result<ConnectedSshSession, SshError> {
+        let rsa_hash =
+            tokio::time::timeout(self.connect_timeout, self.handle.best_supported_rsa_hash())
+                .await
+                .map_err(|_| SshError::Timeout)??
+                .flatten();
+        let auth = tokio::time::timeout(
+            self.connect_timeout,
+            self.handle.authenticate_publickey(
+                username.to_owned(),
+                PrivateKeyWithHashAlg::new(key.key, rsa_hash),
+            ),
+        )
+        .await
+        .map_err(|_| SshError::Timeout)??;
+        if !auth.success() {
+            let _ = self
+                .handle
+                .disconnect(
+                    Disconnect::ByApplication,
+                    "FILEX public-key authentication rejected",
+                    "en",
+                )
+                .await;
+            return Err(SshError::AuthenticationRejected);
+        }
+        Ok(ConnectedSshSession {
+            handle: self.handle,
+            remote_forward_routes: self.remote_forward_routes,
+            connect_timeout: self.connect_timeout,
+        })
+    }
+
+    pub async fn disconnect(self) {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.handle.disconnect(
+                Disconnect::ByApplication,
+                "FILEX host-key probe cancelled",
+                "en",
+            ),
+        )
+        .await;
+    }
 }
 
 pub struct PreparedPrivateKey {
@@ -677,6 +803,42 @@ impl RusshEngine {
         self.finish_host_key_probe(handle, presented).await
     }
 
+    pub async fn probe_host_key_keepalive(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<ProbedSshHandle, SshError> {
+        let presented = Arc::new(Mutex::new(None));
+        let remote_forward_routes = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let handler = HostKeyHandler {
+            expected: None,
+            presented: presented.clone(),
+            remote_forward_routes: remote_forward_routes.clone(),
+        };
+        let handle = tokio::time::timeout(
+            self.connect_timeout,
+            client::connect(
+                client_config(self.keepalive_interval),
+                (host, port),
+                handler,
+            ),
+        )
+        .await
+        .map_err(|_| SshError::Timeout)??;
+        let Some(host_key) = presented.lock().ok().and_then(|slot| slot.clone()) else {
+            let _ = handle
+                .disconnect(Disconnect::ByApplication, "FILEX host key missing", "en")
+                .await;
+            return Err(SshError::HostKeyMissing);
+        };
+        Ok(ProbedSshHandle {
+            handle,
+            remote_forward_routes,
+            presented: host_key,
+            connect_timeout: self.connect_timeout,
+        })
+    }
+
     pub async fn probe_host_key_stream<S>(&self, stream: S) -> Result<PresentedHostKey, SshError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -725,13 +887,10 @@ impl RusshEngine {
     ) -> Result<ConnectedSshSession, SshError> {
         let (mut handle, remote_forward_routes) =
             self.open_handle(host, port, expected_host_key).await?;
-        let auth = tokio::time::timeout(
-            self.connect_timeout,
-            handle.authenticate_password(username.to_owned(), password.to_owned()),
-        )
-        .await
-        .map_err(|_| SshError::Timeout)??;
-        if !auth.success() {
+        if !self
+            .authenticate_password_or_none(&mut handle, username, password)
+            .await?
+        {
             let _ = handle
                 .disconnect(
                     Disconnect::ByApplication,
@@ -760,13 +919,10 @@ impl RusshEngine {
     {
         let (mut handle, remote_forward_routes) =
             self.open_handle_stream(stream, expected_host_key).await?;
-        let auth = tokio::time::timeout(
-            self.connect_timeout,
-            handle.authenticate_password(username.to_owned(), password.to_owned()),
-        )
-        .await
-        .map_err(|_| SshError::Timeout)??;
-        if !auth.success() {
+        if !self
+            .authenticate_password_or_none(&mut handle, username, password)
+            .await?
+        {
             let _ = handle
                 .disconnect(
                     Disconnect::ByApplication,
@@ -781,6 +937,15 @@ impl RusshEngine {
             remote_forward_routes,
             connect_timeout: self.connect_timeout,
         })
+    }
+
+    async fn authenticate_password_or_none(
+        &self,
+        handle: &mut client::Handle<HostKeyHandler>,
+        username: &str,
+        password: &str,
+    ) -> Result<bool, SshError> {
+        authenticate_password_or_none(handle, username, password, self.connect_timeout).await
     }
 
     pub async fn load_private_key(
@@ -1164,11 +1329,133 @@ async fn collect_bounded_channel_output(
         .map_err(|_| SshError::Timeout)?
 }
 
+async fn authenticate_password_or_none(
+    handle: &mut client::Handle<HostKeyHandler>,
+    username: &str,
+    password: &str,
+    timeout: Duration,
+) -> Result<bool, SshError> {
+    if password.is_empty() {
+        let none_auth =
+            tokio::time::timeout(timeout, handle.authenticate_none(username.to_owned()))
+                .await
+                .map_err(|_| SshError::Timeout)??;
+        if none_auth.success() {
+            return Ok(true);
+        }
+    }
+    let auth = tokio::time::timeout(
+        timeout,
+        handle.authenticate_password(username.to_owned(), password.to_owned()),
+    )
+    .await
+    .map_err(|_| SshError::Timeout)??;
+    if auth.success() {
+        return Ok(true);
+    }
+    let can_try_kb_interactive = matches!(
+        auth,
+        AuthResult::Failure {
+            ref remaining_methods,
+            partial_success: false,
+        } if remaining_methods.contains(&MethodKind::KeyboardInteractive)
+    );
+    if !can_try_kb_interactive {
+        return Ok(false);
+    }
+    authenticate_keyboard_interactive_password(handle, username, password, timeout).await
+}
+
+async fn authenticate_keyboard_interactive_password(
+    handle: &mut client::Handle<HostKeyHandler>,
+    username: &str,
+    password: &str,
+    timeout: Duration,
+) -> Result<bool, SshError> {
+    let mut response = tokio::time::timeout(
+        timeout,
+        handle.authenticate_keyboard_interactive_start(username.to_owned(), None::<String>),
+    )
+    .await
+    .map_err(|_| SshError::Timeout)??;
+    let mut password_sent = false;
+    for _ in 0..4 {
+        match response {
+            KeyboardInteractiveAuthResponse::Success => return Ok(true),
+            KeyboardInteractiveAuthResponse::Failure { .. } => return Ok(false),
+            KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => {
+                let answers = if prompts.is_empty() {
+                    Vec::new()
+                } else if prompts.len() == 1 && !prompts[0].echo && !password_sent {
+                    password_sent = true;
+                    vec![password.to_owned()]
+                } else {
+                    return Ok(false);
+                };
+                response = tokio::time::timeout(
+                    timeout,
+                    handle.authenticate_keyboard_interactive_respond(answers),
+                )
+                .await
+                .map_err(|_| SshError::Timeout)??;
+            }
+        }
+    }
+    Ok(false)
+}
+
+const COMPAT_KEX_ORDER: &[kex::Name] = &[
+    kex::MLKEM768X25519_SHA256,
+    kex::CURVE25519,
+    kex::CURVE25519_PRE_RFC_8731,
+    kex::ECDH_SHA2_NISTP256,
+    kex::ECDH_SHA2_NISTP384,
+    kex::ECDH_SHA2_NISTP521,
+    kex::DH_GEX_SHA256,
+    kex::DH_G18_SHA512,
+    kex::DH_G17_SHA512,
+    kex::DH_G16_SHA512,
+    kex::DH_G15_SHA512,
+    kex::DH_G14_SHA256,
+    kex::DH_G14_SHA1,
+    kex::DH_GEX_SHA1,
+    kex::DH_G1_SHA1,
+    kex::EXTENSION_SUPPORT_AS_CLIENT,
+    kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+];
+
+const COMPAT_CIPHER_ORDER: &[cipher::Name] = &[
+    cipher::CHACHA20_POLY1305,
+    cipher::AES_256_GCM,
+    cipher::AES_128_GCM,
+    cipher::AES_256_CTR,
+    cipher::AES_192_CTR,
+    cipher::AES_128_CTR,
+    cipher::AES_256_CBC,
+    cipher::AES_192_CBC,
+    cipher::AES_128_CBC,
+];
+
+const COMPAT_HMAC_ORDER: &[mac::Name] = &[
+    mac::HMAC_SHA512_ETM,
+    mac::HMAC_SHA256_ETM,
+    mac::HMAC_SHA512,
+    mac::HMAC_SHA256,
+    mac::HMAC_SHA1_ETM,
+    mac::HMAC_SHA1,
+];
+
 fn client_config(keepalive_interval: Option<Duration>) -> Arc<Config> {
     Arc::new(Config {
         inactivity_timeout: Some(Duration::from_secs(60)),
         keepalive_interval,
         keepalive_max: 3,
+        preferred: Preferred {
+            kex: Cow::Borrowed(COMPAT_KEX_ORDER),
+            cipher: Cow::Borrowed(COMPAT_CIPHER_ORDER),
+            mac: Cow::Borrowed(COMPAT_HMAC_ORDER),
+            ..Preferred::DEFAULT
+        },
         ..Config::default()
     })
 }
@@ -1584,6 +1871,35 @@ mod tests {
             .await
             .expect("stop fixture server")
             .expect("fixture server exits cleanly");
+    }
+
+    #[tokio::test]
+    async fn probe_host_key_keepalive_authenticates_on_the_same_connection() {
+        let fixture = RunningFixture::spawn().await;
+        let engine = RusshEngine::with_timeout(Duration::from_secs(5));
+        let probed = engine
+            .probe_host_key_keepalive("127.0.0.1", fixture.port)
+            .await
+            .expect("probe host key keepalive");
+        assert!(!probed.is_closed());
+        assert_eq!(probed.presented_host_key().algorithm, "ssh-ed25519");
+
+        let session = probed
+            .authenticate_password("fixture-user", "fixture-password")
+            .await
+            .expect("authenticate on probed handle");
+        let (_input, mut output) = session
+            .open_terminal(80, 24)
+            .await
+            .expect("open terminal on reused handle");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), output.next())
+                .await
+                .expect("read terminal banner"),
+            TerminalOutputEvent::Data(b"fixture-ready\r\n".to_vec())
+        );
+        session.disconnect().await.expect("disconnect session");
+        fixture.shutdown().await;
     }
 
     pub(crate) struct RunningFixture {

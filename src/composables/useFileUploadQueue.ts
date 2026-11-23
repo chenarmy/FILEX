@@ -48,10 +48,6 @@ export function useFileUploadQueue() {
       if (options.source === 'paste') ui.notify(t('files.pasteUploadRequiresSession'));
       return 0;
     }
-    if (options.quickSession) {
-      ui.notify(t('quick.savedHint'));
-      return 0;
-    }
 
     const distinctPaths = [...new Set(paths)];
     if (distinctPaths.length === 0) return 0;
@@ -145,10 +141,6 @@ export function useFileUploadQueue() {
     }
     if (!options.remoteReady) {
       ui.notify(t('files.pasteUploadRequiresSession'));
-      return 0;
-    }
-    if (options.quickSession) {
-      ui.notify(t('quick.savedHint'));
       return 0;
     }
 

@@ -18,6 +18,7 @@ export const useUiStore = defineStore('ui', () => {
   const settingsOpen = ref(false);
   const settingsSection = ref<SettingsSection>('appearance');
   const quickConnectOpen = ref(false);
+  const quickConnectPrefill = ref<{ host: string; port: number; username?: string } | null>(null);
   const localTerminalDialogOpen = ref(false);
   const elevatedAccessSessionId = ref<string | null>(null);
   const keyProxyLibraryOpen = ref(false);
@@ -105,11 +106,22 @@ export const useUiStore = defineStore('ui', () => {
   }
 
   function openQuickConnect(): void {
+    quickConnectPrefill.value = null;
+    quickConnectOpen.value = true;
+  }
+
+  function openQuickConnectWithPrefill(prefill: {
+    host: string;
+    port: number;
+    username?: string;
+  }): void {
+    quickConnectPrefill.value = prefill;
     quickConnectOpen.value = true;
   }
 
   function closeQuickConnect(): void {
     quickConnectOpen.value = false;
+    quickConnectPrefill.value = null;
   }
 
   function openLocalTerminalDialog(): void {
@@ -278,7 +290,9 @@ export const useUiStore = defineStore('ui', () => {
     closeOpsDialog,
     closeSettings,
     openQuickConnect,
+    openQuickConnectWithPrefill,
     closeQuickConnect,
+    quickConnectPrefill,
     openLocalTerminalDialog,
     closeLocalTerminalDialog,
     openKeyProxyLibrary,

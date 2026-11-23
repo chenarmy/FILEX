@@ -3,6 +3,7 @@ mod clipboard_files;
 mod command_history;
 mod elevated_access;
 mod external_editor;
+mod external_launch;
 mod key_proxy_library;
 mod known_hosts;
 mod local_terminal;
@@ -16,6 +17,7 @@ mod session_runtime;
 mod terminal_logging;
 mod text_encoding;
 mod transfer_resume;
+mod transient_transfers;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -31,6 +33,7 @@ use std::{
 };
 
 use external_editor::ExternalEditorRuntime;
+use external_launch::{EXTERNAL_LAUNCH_EVENT_NAME, ExternalLaunchRuntime};
 use filex_contracts::{
     AppError, AuthenticationMethod, CommandSnippet, ConnectionProfile, ConnectionState,
     CreateConnectionProfileInput, CreateLocalTunnelInput, CreateTransferInput,
@@ -6016,6 +6019,9 @@ fn schedule_graceful_exit<R: tauri::Runtime>(
         if let Some(editors) = app.try_state::<ExternalEditorRuntime>() {
             editors.shutdown().await;
         }
+        if let Some(launches) = app.try_state::<ExternalLaunchRuntime>() {
+            launches.clear_all();
+        }
         if let Some(local_terminals) = app.try_state::<LocalTerminalRuntime>() {
             local_terminals.shutdown();
         }
@@ -6045,11 +6051,16 @@ pub fn run() {
     let setup_shutdown_state = shutdown_state.clone();
     let run_shutdown_state = shutdown_state;
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
+            }
+            if let Some(launches) = app.try_state::<ExternalLaunchRuntime>()
+                && let Some(event) = launches.ingest_args(&args, Some(Path::new(&cwd)))
+            {
+                let _ = app.emit(EXTERNAL_LAUNCH_EVENT_NAME, &event);
             }
         }))
         .plugin(tauri_plugin_dialog::init())
@@ -6091,7 +6102,9 @@ pub fn run() {
             app.manage(PathBookmarkService::new(repository.clone()));
             app.manage(HostTrustService::new(repository.clone()));
             app.manage(SettingsService::new(repository.clone()));
-            let transfers = TransferService::new(repository.clone());
+            let transfers = TransferService::new(Arc::new(
+                transient_transfers::HybridTransferRepository::new(repository.clone()),
+            ));
             transfers
                 .recover_interrupted()
                 .map_err(|error| io::Error::other(error.code))?;
@@ -6102,6 +6115,11 @@ pub fn run() {
             app.manage(SessionRuntime::default());
             app.manage(RemoteJobRuntime::default());
             app.manage(ExternalEditorRuntime::default());
+            let external_launches = ExternalLaunchRuntime::default();
+            let startup_args = std::env::args().collect::<Vec<_>>();
+            let startup_cwd = std::env::current_dir().ok();
+            let _ = external_launches.ingest_args(&startup_args, startup_cwd.as_deref());
+            app.manage(external_launches);
             app.manage(CopyOperationRuntime::default());
             app.manage(Arc::new(UpdateDownloadRuntime::default()));
             #[cfg(not(target_os = "macos"))]
@@ -6202,6 +6220,10 @@ pub fn run() {
             connect_quick_password_session,
             connect_private_key_session,
             connect_agent_session,
+            external_launch::commands::drain_external_launch_events,
+            external_launch::commands::discard_external_launch,
+            external_launch::commands::probe_external_launch_host_key,
+            external_launch::commands::connect_external_launch_session,
             cancel_session_attempt,
             terminal_logging::start_terminal_logging,
             terminal_logging::stop_terminal_logging,
@@ -6418,7 +6440,7 @@ fn quick_connection_profile(input: QuickConnectInput) -> Result<ConnectionProfil
             "port",
         ));
     }
-    if candidate.username.chars().count() > 128
+    if candidate.username.chars().count() > 256
         || candidate
             .username
             .chars()

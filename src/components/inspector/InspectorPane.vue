@@ -604,10 +604,6 @@ async function dropRemoteFileOnLocal(event: DragEvent, pane: 'local' | 'remote')
   if (!raw) return;
   event.preventDefault();
   localDropActive.value = false;
-  if (quickSession.value) {
-    ui.notify(t('quick.savedHint'));
-    return;
-  }
   try {
     const payload = JSON.parse(raw) as { path?: unknown; sessionId?: unknown };
     if (typeof payload.path !== 'string' || typeof payload.sessionId !== 'string') return;
@@ -643,10 +639,6 @@ function defaultCopyName(name: string, isDirectory: boolean): string {
 
 function openUpload(): void {
   if (!remoteReady.value) return;
-  if (quickSession.value) {
-    ui.notify(t('quick.savedHint'));
-    return;
-  }
   const source = selectedLocalEntry.value;
   if (source && !source.isSymlink) {
     ui.openTransfer('upload', remoteJoin(sftp.path, source.name), source.path, sessions.activeSession?.profileId);
@@ -657,10 +649,6 @@ function openUpload(): void {
 
 async function openDownload(): Promise<void> {
   if (!remoteReady.value) return;
-  if (quickSession.value) {
-    ui.notify(t('quick.savedHint'));
-    return;
-  }
   const source = selectedRemoteEntry.value;
   if (!source || source.isSymlink) return;
   if (!localFiles.listing) await localFiles.load();
@@ -1040,8 +1028,8 @@ defineExpose({ focusInspector });
       <div class="inspector-toolbar">
         <strong>{{ t('inspector.browserPath') }}</strong>
         <span>
-          <button type="button" class="icon-button" :disabled="quickSession || !remoteReady || sftp.loading || (dualPaneEnabled && (activePane !== 'local' || !selectedLocalEntry || selectedLocalEntry.isSymlink))" :aria-label="t('inspector.uploadFile')" :title="quickSession ? t('quick.savedHint') : t('inspector.uploadFile')" @click="openUpload"><Upload :size="12" /></button>
-          <button type="button" class="icon-button" :disabled="quickSession || !remoteReady || sftp.loading || activePane !== 'remote' || !selectedRemoteEntry || selectedRemoteEntry.isSymlink" :aria-label="t('inspector.downloadFile')" :title="quickSession ? t('quick.savedHint') : t('inspector.downloadFile')" @click="openDownload"><Download :size="12" /></button>
+          <button type="button" class="icon-button" :disabled="!remoteReady || sftp.loading || (dualPaneEnabled && (activePane !== 'local' || !selectedLocalEntry || selectedLocalEntry.isSymlink))" :aria-label="t('inspector.uploadFile')" :title="t('inspector.uploadFile')" @click="openUpload"><Upload :size="12" /></button>
+          <button type="button" class="icon-button" :disabled="!remoteReady || sftp.loading || activePane !== 'remote' || !selectedRemoteEntry || selectedRemoteEntry.isSymlink" :aria-label="t('inspector.downloadFile')" :title="t('inspector.downloadFile')" @click="openDownload"><Download :size="12" /></button>
           <button v-if="dualPaneEnabled" type="button" class="icon-button" :disabled="!canCompareChecksums || checksums.loading" :aria-label="t('inspector.compareChecksums')" :title="t('inspector.compareChecksums')" @click="openChecksumComparison"><ShieldCheck :size="12" /></button>
           <button v-if="dualPaneEnabled" type="button" class="icon-button" :disabled="!canPreviewDirectorySync || syncPreviews.loading" :aria-label="t('inspector.previewSync')" :title="t('inspector.previewSync')" @click="openSyncPreviewDialog"><ArrowLeftRight :size="12" /></button>
           <button type="button" class="icon-button" :disabled="activePane === 'local' ? (!selectedLocalEntry || localFiles.mutating) : (!remoteReady || !selectedRemoteEntry || sftp.deleting)" :aria-label="t(activePane === 'local' ? 'inspector.deleteLocal' : 'inspector.deleteRemote')" :title="t(activePane === 'local' ? 'inspector.deleteLocal' : 'inspector.deleteRemote')" @click="deleteActiveEntry"><Trash2 :size="12" /></button>

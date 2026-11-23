@@ -2,16 +2,15 @@
 import { computed, nextTick, onMounted, ref } from 'vue';
 import { KeyRound, ShieldCheck, X } from 'lucide-vue-next';
 import { t } from '@/i18n';
-import { useConnectionsStore } from '@/stores/connections';
 import { useSessionsStore } from '@/stores/sessions';
 
 const sessions = useSessionsStore();
-const connections = useConnectionsStore();
 const passphrase = ref('');
 const passphraseInput = ref<HTMLInputElement | null>(null);
-const profile = computed(() => connections.profiles.find(
-  (item) => item.id === sessions.privateKeyPassphraseProfileId,
-) ?? null);
+const profile = computed(() => sessions.profileForId(sessions.privateKeyPassphraseProfileId));
+const descriptionKey = computed<Parameters<typeof t>[0]>(() => sessions.isQuickProfile(profile.value?.id)
+  ? 'ssh.quickPrivateKeyPassphraseDescription'
+  : 'ssh.privateKeyPassphraseDescription');
 
 onMounted(async () => {
   await nextTick();
@@ -39,7 +38,7 @@ async function submit(): Promise<void> {
         <button type="button" class="icon-button" :aria-label="t('profile.cancel')" @click="close"><X :size="14" /></button>
       </header>
       <div class="dialog-body">
-        <div class="dialog-note"><ShieldCheck :size="15" /><span>{{ t('ssh.privateKeyPassphraseDescription') }}</span></div>
+        <div class="dialog-note"><ShieldCheck :size="15" /><span>{{ t(descriptionKey) }}</span></div>
         <dl v-if="profile" class="host-key-details">
           <div><dt>{{ t('ssh.endpoint') }}</dt><dd class="mono">{{ profile.username }}@{{ profile.host }}:{{ profile.port }}</dd></div>
           <div><dt>{{ t('profile.name') }}</dt><dd>{{ profile.name }}</dd></div>

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-11-23
+
+### Added
+
+- External CLI and Xshell-compatible SSH/SFTP launch (`crates/filex-core/src/cli_launch.rs`, `src-tauri/src/external_launch.rs`, ADR-0032): supports `-url`, direct `ssh://` / `sftp://` URLs, `-newtab`, `-i`, and `.xsh` session files (UTF-8 / UTF-16 / ANSI) on both cold startup and single-instance reactivation so bastion gateways (such as Venustech TianYue Operations Security Gateway V6.0) configured with `filex-desktop.exe` in the Xshell slot open new session tabs directly in FILEX.
+- Transient in-memory file upload and download transfers for quick-connect and external-launch sessions (`src-tauri/src/transient_transfers.rs` `HybridTransferRepository`): enables toolbar upload/download, right-click menu, drag-and-drop, clipboard paste upload, and task-drawer progress on temporary sessions without persisting transient bastion endpoints to SQLite.
+- Single-connection host-key probe keepalive (`ProbedSshHandle` in `crates/filex-ssh`) for external launches so one-shot local loopback bastion proxies (`127.0.0.1:<ephemeral_port>`) reuse the verified connection across `HostKeyDialog` into authentication without opening a second TCP connection.
+- Enterprise bastion SSH compatibility in `crates/filex-ssh`: keeps modern algorithms preferred while adding compatibility fallbacks for legacy KEX (`ecdh-sha2-nistp256/384/521`, `diffie-hellman-group14-sha1`, `diffie-hellman-group-exchange-sha1`, `diffie-hellman-group1-sha1`), ciphers (`aes128-gcm`, `aes*-cbc`), MACs (`hmac-sha1-etm`, `hmac-sha1`), SSH `none` auth for empty-password loopback SSO proxies, and bounded `keyboard-interactive` password fallback.
+
+### Fixed
+
+- Ignored dummy `UserKey` aliases (e.g. `fake_rsa`) under password mode (`Method=0`) and boilerplate `Description=Xshell session file` strings in `.xsh` session files so FILEX uses the real asset filename as the session tab title.
+- Resolved quick-profile display names in `TransferDialog`, `TaskDrawer`, and `PrivateKeyPassphraseDialog`, and prefilled `QuickConnectDialog` when a CLI launch omits the username.
+
 ## [0.1.15] - 2026-11-22
 
 ### Fixed

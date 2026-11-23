@@ -38,8 +38,9 @@ use filex_contracts::{
 };
 use filex_core::{HostTrustService, SessionMachine, parse_monitor_probe};
 use filex_ssh::{
-    ConnectedSshSession, PreparedPrivateKey, PresentedHostKey, ProxyConnectionSpec, RusshEngine,
-    SftpDirectoryReader, SshError, TerminalInput, TerminalOutput, connect_via_proxy,
+    ConnectedSshSession, PreparedPrivateKey, PresentedHostKey, ProbedSshHandle,
+    ProxyConnectionSpec, RusshEngine, SftpDirectoryReader, SshError, TerminalInput, TerminalOutput,
+    connect_via_proxy,
 };
 use russh_sftp::protocol::{FileAttributes, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -47,6 +48,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio::{io::copy_bidirectional, net::TcpListener};
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 const FILE_CHECKSUM_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const FILE_CHECKSUM_BUFFER_BYTES: usize = 64 * 1024;
@@ -68,9 +70,11 @@ pub struct SessionRuntime {
     engine: RwLock<RusshEngine>,
     machines: Mutex<HashMap<String, SessionMachine>>,
     presented_keys: Mutex<HashMap<String, PresentedHostKey>>,
+    probed_handles: AsyncMutex<HashMap<String, ProbedSshHandle>>,
     routes: AsyncMutex<HashMap<String, SessionRouteProgress>>,
     connections: AsyncMutex<HashMap<String, RuntimeConnection>>,
     quick_profiles: Mutex<HashMap<String, ConnectionProfile>>,
+    quick_secrets: Mutex<HashMap<String, Zeroizing<String>>>,
     transfer_controls: Mutex<HashMap<String, Arc<TransferControl>>>,
     tunnels: AsyncMutex<HashMap<String, TunnelRuntime>>,
     process_snapshots: Mutex<HashMap<String, CachedProcessSnapshot>>,
@@ -478,9 +482,11 @@ impl Default for SessionRuntime {
             engine: RwLock::new(RusshEngine::default()),
             machines: Mutex::new(HashMap::new()),
             presented_keys: Mutex::new(HashMap::new()),
+            probed_handles: AsyncMutex::new(HashMap::new()),
             routes: AsyncMutex::new(HashMap::new()),
             connections: AsyncMutex::new(HashMap::new()),
             quick_profiles: Mutex::new(HashMap::new()),
+            quick_secrets: Mutex::new(HashMap::new()),
             transfer_controls: Mutex::new(HashMap::new()),
             tunnels: AsyncMutex::new(HashMap::new()),
             process_snapshots: Mutex::new(HashMap::new()),
@@ -1025,6 +1031,104 @@ impl SessionRuntime {
         }
     }
 
+    pub async fn probe_external_route(
+        &self,
+        profile: &ConnectionProfile,
+        trust_service: &HostTrustService,
+    ) -> Result<HostKeyChallenge, AppError> {
+        let route_profiles = std::slice::from_ref(profile);
+        validate_route_profiles(profile, route_profiles)?;
+        let mut machine = SessionMachine::new(profile);
+        machine.start_attempt()?;
+        machine.transition(SessionState::Connecting)?;
+        let session_id = machine.summary().id;
+        self.machines
+            .lock()
+            .map_err(|_| session_lock_error())?
+            .insert(session_id.clone(), machine);
+        self.routes.lock().await.insert(
+            session_id.clone(),
+            SessionRouteProgress {
+                profile_ids: vec![profile.id.clone()],
+                profile_snapshots: vec![RouteProfileSnapshot::from(profile)],
+                current_hop_index: 0,
+                upstream_sessions: Vec::new(),
+            },
+        );
+        if let Ok(mut presented) = self.presented_keys.lock() {
+            presented.remove(&session_id);
+        }
+        self.transition(&session_id, SessionState::VerifyingHost)?;
+        let engine = self
+            .engine
+            .read()
+            .map_err(|_| session_lock_error())?
+            .clone();
+        let probed = match engine
+            .probe_host_key_keepalive(&profile.host, profile.port)
+            .await
+        {
+            Ok(probed) => probed,
+            Err(error) => {
+                let app_error = ssh_error(&error);
+                self.abort_route(&session_id).await;
+                self.fail(&session_id, app_error.clone())?;
+                self.machines
+                    .lock()
+                    .map_err(|_| session_lock_error())?
+                    .remove(&session_id);
+                return Err(app_error);
+            }
+        };
+        let presented = probed.presented_host_key().clone();
+        let trust = match trust_service.evaluate(
+            &profile.host,
+            profile.port,
+            &presented.algorithm,
+            &presented.fingerprint_sha256,
+        ) {
+            Ok(trust) => trust,
+            Err(error) => {
+                probed.disconnect().await;
+                self.abort_route(&session_id).await;
+                self.fail(&session_id, error.clone())?;
+                self.machines
+                    .lock()
+                    .map_err(|_| session_lock_error())?
+                    .remove(&session_id);
+                return Err(error);
+            }
+        };
+        let session = {
+            self.presented_keys
+                .lock()
+                .map_err(|_| session_lock_error())?
+                .insert(session_id.clone(), presented.clone());
+            self.probed_handles
+                .lock()
+                .await
+                .insert(session_id.clone(), probed);
+            let next = if trust == HostTrustEvaluation::Trusted {
+                SessionState::ReadyToAuthenticate
+            } else {
+                SessionState::TrustRequired
+            };
+            self.transition(&session_id, next)?
+        };
+        Ok(HostKeyChallenge {
+            session,
+            profile_id: profile.id.clone(),
+            profile_name: profile.name.clone(),
+            host: profile.host.clone(),
+            port: profile.port,
+            hop_index: 0,
+            hop_count: 1,
+            algorithm: presented.algorithm,
+            fingerprint_sha256: presented.fingerprint_sha256,
+            trust,
+        })
+    }
+
     pub async fn reprobe_route(
         &self,
         session_id: &str,
@@ -1239,8 +1343,35 @@ impl SessionRuntime {
             .cloned())
     }
 
+    pub fn bind_quick_secret(
+        &self,
+        session_id: &str,
+        secret: Zeroizing<String>,
+    ) -> Result<(), AppError> {
+        self.quick_secrets
+            .lock()
+            .map_err(|_| session_lock_error())?
+            .insert(session_id.to_owned(), secret);
+        Ok(())
+    }
+
+    pub fn take_quick_secret(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<Zeroizing<String>>, AppError> {
+        Ok(self
+            .quick_secrets
+            .lock()
+            .map_err(|_| session_lock_error())?
+            .remove(session_id))
+    }
+
     fn remove_quick_profile(&self, session_id: &str) -> Result<(), AppError> {
         self.quick_profiles
+            .lock()
+            .map_err(|_| session_lock_error())?
+            .remove(session_id);
+        self.quick_secrets
             .lock()
             .map_err(|_| session_lock_error())?
             .remove(session_id);
@@ -1366,8 +1497,45 @@ impl SessionRuntime {
                     Err(error) => Err(error),
                 }
             } else {
-                match authentication {
-                    RouteAuthentication::Password(password) => {
+                let reusable = self.probed_handles.lock().await.remove(session_id);
+                let live_probed = match reusable {
+                    Some(probed)
+                        if !probed.is_closed() && probed.presented_host_key() == &presented =>
+                    {
+                        Some(probed)
+                    }
+                    Some(stale) => {
+                        stale.disconnect().await;
+                        None
+                    }
+                    None => None,
+                };
+                match (live_probed, authentication) {
+                    (Some(probed), RouteAuthentication::Password(password)) => {
+                        probed
+                            .authenticate_password(&profile.username, password)
+                            .await
+                    }
+                    (Some(probed), RouteAuthentication::PrivateKey(_)) => {
+                        probed
+                            .authenticate_private_key(
+                                &profile.username,
+                                prepared_key.ok_or_else(private_key_path_required_error)?,
+                            )
+                            .await
+                    }
+                    (Some(probed), RouteAuthentication::Agent) => {
+                        probed.disconnect().await;
+                        engine
+                            .connect_agent(
+                                &profile.host,
+                                profile.port,
+                                &profile.username,
+                                presented,
+                            )
+                            .await
+                    }
+                    (None, RouteAuthentication::Password(password)) => {
                         engine
                             .connect_password(
                                 &profile.host,
@@ -1378,7 +1546,7 @@ impl SessionRuntime {
                             )
                             .await
                     }
-                    RouteAuthentication::PrivateKey(_) => {
+                    (None, RouteAuthentication::PrivateKey(_)) => {
                         engine
                             .connect_private_key(
                                 &profile.host,
@@ -1389,7 +1557,7 @@ impl SessionRuntime {
                             )
                             .await
                     }
-                    RouteAuthentication::Agent => {
+                    (None, RouteAuthentication::Agent) => {
                         engine
                             .connect_agent(
                                 &profile.host,
@@ -1636,6 +1804,10 @@ impl SessionRuntime {
     }
 
     async fn abort_route(&self, session_id: &str) {
+        let probed = self.probed_handles.lock().await.remove(session_id);
+        if let Some(probed) = probed {
+            probed.disconnect().await;
+        }
         let route = self.routes.lock().await.remove(session_id);
         if let Ok(mut presented) = self.presented_keys.lock() {
             presented.remove(session_id);
@@ -1755,7 +1927,21 @@ impl SessionRuntime {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        let pending_probed = self
+            .probed_handles
+            .lock()
+            .await
+            .drain()
+            .map(|(_, probed)| probed)
+            .collect::<Vec<_>>();
+        for probed in pending_probed {
+            probed.disconnect().await;
+        }
         self.quick_profiles
+            .lock()
+            .map_err(|_| session_lock_error())?
+            .clear();
+        self.quick_secrets
             .lock()
             .map_err(|_| session_lock_error())?
             .clear();
@@ -4520,7 +4706,21 @@ impl SessionRuntime {
             .lock()
             .map_err(|_| session_lock_error())?
             .clear();
+        let pending_probed = self
+            .probed_handles
+            .lock()
+            .await
+            .drain()
+            .map(|(_, probed)| probed)
+            .collect::<Vec<_>>();
+        for probed in pending_probed {
+            probed.disconnect().await;
+        }
         self.quick_profiles
+            .lock()
+            .map_err(|_| session_lock_error())?
+            .clear();
+        self.quick_secrets
             .lock()
             .map_err(|_| session_lock_error())?
             .clear();
@@ -4607,6 +4807,9 @@ where
 }
 
 pub(crate) fn ssh_error(error: &SshError) -> AppError {
+    if let Some(reason) = error.diagnostic_reason() {
+        eprintln!("FILEX SSH transport error: {reason}");
+    }
     let (code, message_key, retryable) = match error {
         SshError::Timeout => ("SSH_CONNECT_TIMEOUT", "errors.sshConnectTimeout", true),
         SshError::HostKeyMissing => ("SSH_HOST_KEY_MISSING", "errors.sshHostKeyMissing", false),

@@ -37,7 +37,7 @@ const selectedLocal = computed(() => localFiles.listing?.entries.find((entry) =>
 
 function profileDisplay(id: string | null | undefined): string {
   if (!id) return '—';
-  const profile = connections.profiles.find((item) => item.id === id);
+  const profile = sessions.profileForId(id);
   if (profile) return `${profile.name} (${profile.username}@${profile.host}:${profile.port})`;
   const session = sessions.summaries.find((item) => item.profileId === id && item.state === 'connected');
   if (session) return `${session.username}@${session.host}:${session.port}`;
@@ -106,7 +106,7 @@ const relaySameEndpoint = computed(() => (
   && form.remotePath.trim() === form.destinationRemotePath.trim()
 ));
 const submitDisabled = computed(() => (
-  quickTarget.value
+  (isRelay.value && quickTarget.value)
   || (isRelay.value
     ? (
       !profileId.value
@@ -133,7 +133,7 @@ function close(): void {
 
 async function submit(): Promise<void> {
   if (submitDisabled.value || !profileId.value) return;
-  if (quickTarget.value) {
+  if (isRelay.value && quickTarget.value) {
     ui.notify(t('quick.savedHint'));
     ui.closeTransfer();
     return;
@@ -177,7 +177,7 @@ async function submit(): Promise<void> {
       <div class="dialog-body">
         <p class="dialog-note">{{ t('transfer.directoryHelp') }}</p>
         <p v-if="isRelay" class="dialog-note relay-note">{{ t('transfer.relayNote') }}</p>
-        <p v-if="quickTarget" class="quick-connect-hint">{{ t('quick.savedHint') }}</p>
+        <p v-if="isRelay && quickTarget" class="quick-connect-hint">{{ t('quick.savedHint') }}</p>
         <div class="form-grid">
           <template v-if="isRelay">
             <label class="field full">

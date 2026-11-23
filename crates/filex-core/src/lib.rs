@@ -1,7 +1,9 @@
+pub mod cli_launch;
 pub mod command_history;
 pub mod key_proxy;
 pub mod path_bookmarks;
 
+pub use cli_launch::*;
 pub use command_history::*;
 pub use key_proxy::*;
 pub use path_bookmarks::*;

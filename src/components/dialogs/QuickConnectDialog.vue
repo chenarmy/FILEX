@@ -10,6 +10,7 @@ import type { AppError } from '@/types/contracts';
 const sessions = useSessionsStore();
 const ui = useUiStore();
 const hostInput = ref<HTMLInputElement | null>(null);
+const usernameInput = ref<HTMLInputElement | null>(null);
 const validationError = ref<AppError | null>(null);
 const form = reactive({
   host: '',
@@ -23,8 +24,17 @@ const errorMessage = computed(() => error.value
 
 onMounted(async () => {
   sessions.clearError();
+  if (ui.quickConnectPrefill) {
+    form.host = ui.quickConnectPrefill.host;
+    form.port = ui.quickConnectPrefill.port;
+    form.username = ui.quickConnectPrefill.username ?? '';
+  }
   await nextTick();
-  hostInput.value?.focus();
+  if (form.host.trim() && !form.username.trim()) {
+    usernameInput.value?.focus();
+  } else {
+    hostInput.value?.focus();
+  }
 });
 
 function clearError(): void {
@@ -106,6 +116,7 @@ async function submit(): Promise<void> {
           <label class="field">
             <span>{{ t('quick.username') }}</span>
             <input
+              ref="usernameInput"
               v-model="form.username"
               :aria-invalid="error?.field === 'username'"
               autocomplete="username"

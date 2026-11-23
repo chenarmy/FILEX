@@ -53,6 +53,7 @@ onMounted(async () => {
   await transfers.load();
   await tunnels.load();
   await remoteJobs.load();
+  await sessions.initializeExternalLaunchEvents();
 });
 </script>
 
