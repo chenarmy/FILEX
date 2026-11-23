@@ -7475,6 +7475,14 @@
 
 /* --- assistant diagnose execution cards ----------------------------------- */
 
+.assistant-diagnose-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .assistant-diagnose-toggle {
   display: inline-flex;
   align-items: center;
@@ -7486,6 +7494,26 @@
 
 .assistant-diagnose-toggle input {
   margin: 0;
+}
+
+.assistant-diagnose-clear {
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+  padding: 2px 7px;
+  cursor: pointer;
+}
+
+.assistant-diagnose-clear:hover:not(:disabled) {
+  color: hsl(var(--foreground));
+  background: hsl(var(--accent));
+}
+
+.assistant-diagnose-clear:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .assistant-terminal-chip {
@@ -7543,6 +7571,11 @@
   color: hsl(var(--warning));
 }
 
+.assistant-exec-risk.risk-destructive {
+  background: hsl(var(--destructive) / 0.16);
+  color: hsl(var(--destructive));
+}
+
 .assistant-exec-risk.risk-blocked {
   background: hsl(var(--destructive) / 0.14);
   color: hsl(var(--destructive));
@@ -7569,7 +7602,17 @@
 .assistant-exec-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
+}
+
+.assistant-exec-target-pill {
+  padding: 2px 6px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-control);
+  background: hsl(var(--background));
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
 }
 
 .assistant-exec-output {

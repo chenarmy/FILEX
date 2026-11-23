@@ -1657,7 +1657,12 @@ async fn execute_assistant_command(
             "ASSISTANT_COMMAND_BLOCKED",
         )));
     }
-    if risk == assistant_exec::AssistantCommandRisk::RequiresConfirmation && !approved_by_user {
+    if matches!(
+        risk,
+        assistant_exec::AssistantCommandRisk::RequiresConfirmation
+            | assistant_exec::AssistantCommandRisk::Destructive
+    ) && !approved_by_user
+    {
         return Ok(OperationResult::failure(assistant_error(
             "ASSISTANT_COMMAND_CONFIRMATION_REQUIRED",
         )));

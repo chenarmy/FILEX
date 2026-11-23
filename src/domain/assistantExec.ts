@@ -1,6 +1,45 @@
-import type { AssistantCommandExecutionResult } from '@/api/domain/assistantApi';
+import type { AssistantCommandExecutionResult, AssistantCommandRisk } from '@/api/domain/assistantApi';
 
 export const ASSISTANT_DIAGNOSE_MAX_STEPS = 6;
+export const ASSISTANT_SESSION_APPROVAL_LIMIT = 32;
+
+export interface AssistantApprovalTarget {
+  sessionId: string;
+  generation: number;
+  host: string;
+  port: number;
+}
+
+export function assistantApprovalBindingKey(target: AssistantApprovalTarget): string {
+  return `${target.sessionId}:${target.generation}:${target.host}:${target.port}`;
+}
+
+export function rememberAssistantSessionCommand(
+  approvedCommands: readonly string[],
+  command: string,
+  limit = ASSISTANT_SESSION_APPROVAL_LIMIT,
+): string[] {
+  const trimmed = command.trim();
+  if (!trimmed) return [...approvedCommands];
+  const deduped = approvedCommands.filter((item) => item !== trimmed);
+  deduped.push(trimmed);
+  if (deduped.length > limit) {
+    return deduped.slice(deduped.length - limit);
+  }
+  return deduped;
+}
+
+export function isAssistantCommandRememberedInSession(
+  bindingKey: string,
+  target: AssistantApprovalTarget | null,
+  approvedCommands: readonly string[],
+  risk: AssistantCommandRisk,
+  command: string,
+): boolean {
+  if (risk !== 'requires_confirmation' || !target || !bindingKey) return false;
+  if (assistantApprovalBindingKey(target) !== bindingKey) return false;
+  return approvedCommands.includes(command.trim());
+}
 
 export interface AssistantExecProposal {
   command: string;

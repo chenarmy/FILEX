@@ -95,6 +95,10 @@ const connectedSshSession = computed(() => (
     : null
 ));
 const assistantWorking = computed(() => assistant.busy || assistant.execBusy);
+const latestPendingExecMessage = computed(() => [...assistant.messages]
+  .reverse()
+  .find((item) => item.execAction?.status === 'pending_approval' && !item.execAction.stale)
+  ?? null);
 
 const activeConversation = computed(() => assistant.conversations.find((conversation) => conversation.id === assistant.activeConversationId));
 const activeConversationTitle = computed(() => activeConversation.value?.title || t('assistant.newConversation'));
@@ -435,9 +439,44 @@ function useQuickPrompt(kind: 'failure' | 'monitor' | 'plan' | 'diagnose'): void
 }
 
 function handleComposerKeydown(event: KeyboardEvent): void {
-  if (event.isComposing || event.key !== 'Enter' || event.shiftKey) return;
+  if (event.isComposing || event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
   event.preventDefault();
   if (!assistantWorking.value) void send();
+}
+
+async function approvePendingExec(message: AssistantMessage, rememberForSession = false): Promise<void> {
+  const action = message.execAction;
+  if (!action || action.status !== 'pending_approval' || assistantWorking.value || action.stale) return;
+  if (action.risk === 'destructive') {
+    const targetLabel = action.target ? `${action.target.host}:${action.target.port}` : '—';
+    const accepted = await ui.confirm({
+      title: t('assistant.execDestructiveConfirmTitle'),
+      message: t('assistant.execDestructiveConfirmMessage', {
+        target: targetLabel,
+        command: action.command,
+      }),
+      confirmLabel: t('assistant.execApprove'),
+      danger: true,
+    });
+    if (!accepted) return;
+    await assistant.approveExecAction(message.id, false);
+    return;
+  }
+  await assistant.approveExecAction(message.id, rememberForSession);
+}
+
+function handlePanelKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    closeMenus();
+    return;
+  }
+  if (event.isComposing || !(event.ctrlKey || event.metaKey) || event.key !== 'Enter') return;
+  const pending = latestPendingExecMessage.value;
+  if (!pending || assistantWorking.value) return;
+  const composerFocused = document.activeElement === composerRef.value;
+  if (composerFocused && prompt.value.trim()) return;
+  event.preventDefault();
+  void approvePendingExec(pending, false);
 }
 
 async function send(): Promise<void> {
@@ -633,7 +672,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <aside class="assistant-panel" :aria-label="t('assistant.title')" @keydown.esc="closeMenus">
+  <aside class="assistant-panel" :aria-label="t('assistant.title')" @keydown="handlePanelKeydown">
     <header class="assistant-header">
       <div ref="conversationMenuRef" class="assistant-conversation-control">
         <button
@@ -859,9 +898,11 @@ onBeforeUnmount(() => {
                 {{
                   message.execAction.risk === 'read_only'
                     ? t('assistant.execRiskReadOnly')
-                    : message.execAction.risk === 'blocked'
-                      ? t('assistant.execRiskBlocked')
-                      : t('assistant.execRiskConfirm')
+                    : message.execAction.risk === 'destructive'
+                      ? t('assistant.execRiskDestructive')
+                      : message.execAction.risk === 'blocked'
+                        ? t('assistant.execRiskBlocked')
+                        : t('assistant.execRiskConfirm')
                 }}
               </span>
             </div>
@@ -880,19 +921,34 @@ onBeforeUnmount(() => {
               <span v-if="message.execAction.status === 'running'" class="assistant-exec-status">{{ t('assistant.execStatusRunning') }}</span>
               <span v-else-if="message.execAction.status === 'completed' && message.execAction.result" class="assistant-exec-status">
                 {{ t('assistant.execStatusCompleted', { code: message.execAction.result.exitCode ?? '—', ms: message.execAction.result.durationMs }) }}
+                <template v-if="message.execAction.autoApprovedInSession"> · {{ t('assistant.execStatusAutoSession') }}</template>
               </span>
               <span v-else-if="message.execAction.status === 'denied'" class="assistant-exec-status">{{ t('assistant.execStatusDenied') }}</span>
               <span v-else-if="message.execAction.status === 'pending_approval'" class="assistant-exec-status">{{ t('assistant.execStatusPending') }}</span>
               <span v-else-if="message.execAction.errorKey" class="form-error">{{ t(message.execAction.errorKey as Parameters<typeof t>[0]) }}</span>
             </div>
             <div v-if="message.execAction.status === 'pending_approval'" class="assistant-exec-actions">
+              <span v-if="message.execAction.target" class="assistant-exec-target-pill mono">
+                {{ t('assistant.execTargetBadge', { target: `${message.execAction.target.host}:${message.execAction.target.port}` }) }}
+              </span>
               <button
                 type="button"
-                class="button primary"
+                class="button"
+                :class="message.execAction.risk === 'destructive' ? 'danger' : 'primary'"
                 :disabled="assistantWorking || message.execAction.stale"
-                @click="assistant.approveExecAction(message.id)"
+                :title="t('assistant.execApproveShortcutHint')"
+                @click="approvePendingExec(message, false)"
               >
                 <Play :size="11" />{{ t('assistant.execApprove') }}
+              </button>
+              <button
+                v-if="message.execAction.risk === 'requires_confirmation'"
+                type="button"
+                class="button"
+                :disabled="assistantWorking || message.execAction.stale"
+                @click="approvePendingExec(message, true)"
+              >
+                {{ t('assistant.execApproveSession') }}
               </button>
               <button
                 type="button"
@@ -1018,10 +1074,21 @@ onBeforeUnmount(() => {
           <Paperclip :size="12" />
         </button>
       </div>
-      <label v-if="mode === 'diagnose'" class="assistant-diagnose-toggle">
-        <input v-model="assistant.autoRunReadOnly" type="checkbox" :disabled="assistantWorking">
-        <span>{{ t('assistant.diagnoseAutoRunReadOnly') }}</span>
-      </label>
+      <div v-if="mode === 'diagnose'" class="assistant-diagnose-bar">
+        <label class="assistant-diagnose-toggle">
+          <input v-model="assistant.autoRunReadOnly" type="checkbox" :disabled="assistantWorking">
+          <span>{{ t('assistant.diagnoseAutoRunReadOnly') }}</span>
+        </label>
+        <button
+          v-if="assistant.sessionApprovedCommands.length > 0"
+          type="button"
+          class="assistant-diagnose-clear"
+          :disabled="assistantWorking"
+          @click="assistant.clearSessionApprovals()"
+        >
+          {{ t('assistant.diagnoseClearSessionApprovals', { count: assistant.sessionApprovedCommands.length }) }}
+        </button>
+      </div>
       <div v-if="attachTerminalSelection && ui.assistantTerminalSelection" class="assistant-file-chips">
         <div class="assistant-file-chip assistant-terminal-chip">
           <Terminal :size="11" />

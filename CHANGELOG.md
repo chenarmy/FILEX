@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.1.17] - 2026-11-23
+
+### Added
+
+- Tiered AI Diagnose command risk model (`read_only`, `requires_confirmation`, `destructive`, `blocked`) across `assistant_exec.rs`, `assistantApi.ts`, `assistant.ts`, and `AssistantPanel.vue`:
+  - Added exact-command session-generation approval memory (`Approve & remember in session`) for `requires_confirmation` commands, bound in transient memory to `(sessionId, generation, host, port)` (capped at 32 commands) and automatically cleared on disconnect, reconnect, target change, conversation switch, or explicit clear, plus a quick clear control when remembered approvals exist.
+  - Added `Ctrl+Enter` / `Cmd+Enter` keyboard approval for pending diagnostic command cards when the composer is unfocused or empty, alongside inline target `host:port` badges.
+  - Added `destructive` risk classification requiring target-rich confirmation via the shared confirmation dialog naming `host:port` and the exact command before execution (`destructive` commands can never auto-run via session memory).
+- Expanded strictly allowlisted read-only diagnostic tools in `assistant_exec.rs`: `podman`, `kubectl` (`get`, `describe`, `top`, `version`, `cluster-info`, `api-resources`, `api-versions`, `explain`, `events`, and non-follow `logs` without credential/secret flags), `nginx` (`-t`/`-T`/`-v`/`-V`), `apachectl`/`apache2ctl`/`httpd` (`-t`/`-S`/`-V`/`-v`/`-M`/`-l`/`configtest`/`status`/`fullstatus`), `ufw` (`status`/`version`), `coredumpctl` (`list`/`info`), `localectl`, `loginctl`, `resolvectl`/`systemd-resolve`, `ethtool` query flags, `fail2ban-client`, `redis-cli` (`ping`/`info`), `pg_isready`, `sestatus`, `getenforce`, `aa-status`/`apparmor_status`, `lslocks`, `lsns`, `lsipc`, `lsmem`, `pidstat` (excluding `-e`), and `numastat`.
+
+### Fixed
+
+- Closed read-only diagnostic classifier bypasses in `src-tauri/src/assistant_exec.rs`: enforced strict script/flag/positional validation for `sed` (address+`p` print scripts only, rejecting `e`/`w`/`r`/`s`/`-f`/`-i`), `awk` (rejecting pipes, redirections, `system`, `getline`, `close`, `fflush`, `nextfile`, `environ`, `procinfo`, `@include`, `@load`, and file/include flags), `systemctl` (first positional subcommand allowlist with mutating-subcommand rejection), `service` (`--status-all` or `<name> status` only), `hostname`, `date`, `dmesg`, `sar`, `sort`, `uniq`, `ulimit`, `ss`, `dig`, `nslookup`, `journalctl`, `find`, `ip`, `sysctl`, `ping`, and `docker`/`podman` follow-flag clusters, plus additional sensitive credential path fragments.
+
 ## [0.1.16] - 2026-11-23
 
 ### Added

@@ -288,8 +288,10 @@ Acceptance checks:
 1. User opens the assistant and explicitly attaches a session, event range, metric set, file or bounded terminal selection.
 2. FILEX previews the context categories, applies structured redaction and identifies whether an external provider will receive data.
 3. The assistant explains or drafts an action. Generated shell text remains a proposal and is never written into the terminal input buffer without a visible user action.
-4. A requested tool call shows target, parameters, risk, expected mutation and confirmation requirement.
-5. FILEX revalidates session generation, trust and policy before execution, then records a sanitized decision/result event.
+4. In Diagnose mode, the Rust backend classifies every proposed `filex-exec-v1` command into one of four risk levels: `read_only`, `requires_confirmation`, `destructive`, or `blocked`.
+5. Only strictly allowlisted `read_only` diagnostic pipelines may auto-run (opt-in toggle, bounded to 32 KiB / 15s and redacted before leaving the host). A `requires_confirmation` command displays target, parameters, risk, and confirmation actions (`Approve & run`, or `Approve & remember in session` to skip re-prompting for the exact identical command string within the current connected SSH session generation). Session-remembered approvals stay in transient memory bound to `(sessionId, generation, host, port)` and are automatically revoked on disconnect, reconnect, target change, conversation switch, or clear.
+6. A `destructive` command is never eligible for session-scoped auto-run and always requires target-rich confirmation through the shared confirmation dialog naming the target `host:port` and exact command. `blocked` commands are never executed.
+7. FILEX revalidates session generation, trust and policy at the Rust boundary before execution, then records a sanitized decision/result event.
 
 ### 8.7 Signed update discovery and installation
 
@@ -340,7 +342,7 @@ Alternative states: `paused`, `cancel_requested`, `cancelled`, `partial`, `inter
 - AI providers are opt-in. Provider credentials live in the OS credential store and never enter chat history, ordinary settings, prompts or diagnostics.
 - Remote files, terminal output, command output and server banners are untrusted model input. They cannot grant tool permissions or override FILEX policy.
 - Sending context to an external model requires a provider-level consent setting and a per-request context preview for sensitive categories.
-- Assistant actions default to read-only explanation or drafts. Mutating actions require an explicit user gesture; destructive actions require target-rich confirmation and backend policy checks.
+- Assistant actions default to read-only explanation or drafts. Mutating actions require an explicit user gesture (optionally remembered only for the exact identical command within the active SSH session generation, never as a blanket "approve all" toggle); destructive actions always require target-rich confirmation and backend policy checks.
 - Assistant requests and tool results use bounded context, cancellation, timeouts and redacted audit events. Raw prompts are not retained unless the user enables local history.
 
 ## 11. Non-functional targets

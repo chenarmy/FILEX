@@ -1,5 +1,26 @@
 # FILEX verification evidence
 
+## 2026-11-23 — AI Diagnose 4-tier command risk classifier and session-scoped approval (v0.1.17)
+
+- Scope: synchronized local `main` with `origin/main` (`b161fe6`, v0.1.16), updated `docs/PRODUCT_DESIGN.md`, `docs/AI_ASSISTANT_DESIGN.md`, and `docs/ROADMAP.md`, implemented the 4-tier `AssistantCommandRisk` model (`read_only`, `requires_confirmation`, `destructive`, `blocked`), closed read-only classifier bypasses (`sed`, `awk`, `systemctl`, `service`, `hostname`, `date`, `dmesg`, `sar`, `pidstat`, `sort`, `uniq`, `ulimit`, `ss`, `dig`, `nslookup`, `journalctl`, `find`, `ip`, `sysctl`, `ping`, `docker`/`podman`), expanded allowlisted read-only diagnostic commands, added session-generation-scoped exact-command approval memory and `Ctrl+Enter`/`Cmd+Enter` keyboard approval for `requires_confirmation` commands, enforced shared target-rich confirmation for `destructive` commands, synchronized manifests to `0.1.17`, updated `CHANGELOG.md`, and built the local Windows NSIS installer.
+- Artifact: `target/release/bundle/nsis/FILEX_0.1.17_x64-setup.exe` (`18,780,025` bytes / `17.91 MiB`, SHA-256 `71F8026C6AD7810D4A63530294099D98BDCE657D0D33759F0B6E77619AECA3D1`, unsigned local NSIS build).
+- Scope limits preserved honestly: cross-platform signed installers and `latest.json` verification run inside `.github/workflows/release.yml` on tag `v0.1.17` push; Playwright E2E, live remote SSH execution, and interactive installer runs were not executed locally in this pass.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Version sync | `pnpm.cmd version:check` | Passed (`0.1.17`) |
+| Release notes | `node scripts/release-notes.mjs v0.1.17` | Passed |
+| TypeScript | `pnpm.cmd typecheck` | Passed |
+| ESLint | `pnpm.cmd lint` | Passed (0 warnings) |
+| Frontend unit tests | `pnpm.cmd test` | Passed, 33 files and 136 tests (`tests/assistantExec.test.ts`: 5 tests) |
+| Production bundle | `pnpm.cmd build` | Passed (existing Vite >500 kB chunk-size warning retained) |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust locked check | `cargo check --workspace --locked` | Passed |
+| Rust workspace tests | `CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace` | Passed, 99 tests (`filex_contracts`: 0, `filex_core`: 25, `filex_credentials`: 3, `filex_desktop_lib`: 48, `filex_desktop`: 0, `filex_local_terminal`: 4, `filex_ssh`: 7, `filex_storage`: 12) |
+| Rust Clippy | `CARGO_PROFILE_DEV_DEBUG=0 cargo clippy --workspace --all-targets -- -D warnings` | Passed (0 warnings) |
+| Windows NSIS bundle | `pnpm.cmd tauri build --bundles nsis` | Passed (`FILEX_0.1.17_x64-setup.exe`, 17.91 MiB) |
+| Diff hygiene | `git diff --check` | Passed |
+
 ## 2026-11-17 — v0.1.9 release preparation
 
 - Scope: prepared release `0.1.9` on top of pulled `origin/main` (`e2f3206` brand/taskbar icon alignment and `b9d1aae` `KeyAndProxyLibraryDialog` layout/button-spacing fix):

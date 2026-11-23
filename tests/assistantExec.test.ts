@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ASSISTANT_SESSION_APPROVAL_LIMIT,
+  assistantApprovalBindingKey,
   formatAssistantExecOutputForModel,
+  isAssistantCommandRememberedInSession,
   parseAssistantExecRequest,
+  rememberAssistantSessionCommand,
   stripAssistantExecFence,
 } from '@/domain/assistantExec';
 
@@ -42,5 +46,94 @@ describe('assistant diagnostic execution protocol', () => {
     expect(formatted).toContain('Exit code: 0');
     expect(formatted).toContain('truncated');
     expect(formatted).toContain('Mem: 3.6Gi total, 2.5Gi used');
+  });
+
+  it('scopes session-remembered command approvals strictly to session generation, host, port, and risk tier', () => {
+    const target = { sessionId: 'sess-1', generation: 3, host: '10.0.0.10', port: 22 };
+    const bindingKey = assistantApprovalBindingKey(target);
+    let approved = rememberAssistantSessionCommand([], '  systemctl reload nginx  ');
+    approved = rememberAssistantSessionCommand(approved, 'systemctl reload nginx');
+    expect(approved).toEqual(['systemctl reload nginx']);
+
+    // Exact match within the same target generation and requires_confirmation risk tier.
+    expect(isAssistantCommandRememberedInSession(
+      bindingKey,
+      target,
+      approved,
+      'requires_confirmation',
+      'systemctl reload nginx',
+    )).toBe(true);
+
+    // Different command does not match.
+    expect(isAssistantCommandRememberedInSession(
+      bindingKey,
+      target,
+      approved,
+      'requires_confirmation',
+      'systemctl restart nginx',
+    )).toBe(false);
+
+    // Destructive and blocked tiers are never auto-approved from session memory.
+    expect(isAssistantCommandRememberedInSession(
+      bindingKey,
+      target,
+      approved,
+      'destructive',
+      'systemctl reload nginx',
+    )).toBe(false);
+    expect(isAssistantCommandRememberedInSession(
+      bindingKey,
+      target,
+      approved,
+      'blocked',
+      'systemctl reload nginx',
+    )).toBe(false);
+
+    // Changing generation, sessionId, host, or port invalidates remembered approvals.
+    expect(isAssistantCommandRememberedInSession(
+      bindingKey,
+      { ...target, generation: 4 },
+      approved,
+      'requires_confirmation',
+      'systemctl reload nginx',
+    )).toBe(false);
+    expect(isAssistantCommandRememberedInSession(
+      bindingKey,
+      { ...target, sessionId: 'sess-2' },
+      approved,
+      'requires_confirmation',
+      'systemctl reload nginx',
+    )).toBe(false);
+    expect(isAssistantCommandRememberedInSession(
+      bindingKey,
+      { ...target, host: '10.0.0.11' },
+      approved,
+      'requires_confirmation',
+      'systemctl reload nginx',
+    )).toBe(false);
+    expect(isAssistantCommandRememberedInSession(
+      bindingKey,
+      { ...target, port: 2222 },
+      approved,
+      'requires_confirmation',
+      'systemctl reload nginx',
+    )).toBe(false);
+    expect(isAssistantCommandRememberedInSession(
+      bindingKey,
+      null,
+      approved,
+      'requires_confirmation',
+      'systemctl reload nginx',
+    )).toBe(false);
+  });
+
+  it('bounds remembered session approvals to the configured limit', () => {
+    let approved: string[] = [];
+    for (let index = 0; index < ASSISTANT_SESSION_APPROVAL_LIMIT + 5; index += 1) {
+      approved = rememberAssistantSessionCommand(approved, `cmd-${index}`);
+    }
+    expect(approved).toHaveLength(ASSISTANT_SESSION_APPROVAL_LIMIT);
+    expect(approved[0]).toBe('cmd-5');
+    expect(approved[approved.length - 1]).toBe(`cmd-${ASSISTANT_SESSION_APPROVAL_LIMIT + 4}`);
   });
 });

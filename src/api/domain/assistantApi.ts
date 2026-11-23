@@ -29,7 +29,7 @@ export interface AssistantContextFileReference {
 }
 
 export type AssistantMode = 'explain' | 'draft' | 'diagnose';
-export type AssistantCommandRisk = 'read_only' | 'requires_confirmation' | 'blocked';
+export type AssistantCommandRisk = 'read_only' | 'requires_confirmation' | 'destructive' | 'blocked';
 
 export interface AssistantCommandExecutionResult {
   command: string;

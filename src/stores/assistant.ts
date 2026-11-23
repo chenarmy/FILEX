@@ -30,8 +30,11 @@ import {
 import { isTauriRuntime } from '@/api/common';
 import {
   ASSISTANT_DIAGNOSE_MAX_STEPS,
+  assistantApprovalBindingKey,
   formatAssistantExecOutputForModel,
+  isAssistantCommandRememberedInSession,
   parseAssistantExecRequest,
+  rememberAssistantSessionCommand,
 } from '@/domain/assistantExec';
 import { parseAssistantDraftContent, type AssistantProposalNotice } from '@/domain/assistantProposalParser';
 import { useEventsStore } from '@/stores/events';
@@ -50,6 +53,7 @@ export interface AssistantExecAction {
   target: AssistantProposalTargetSnapshot | null;
   stale: boolean;
   stepIndex: number;
+  autoApprovedInSession?: boolean;
   result?: AssistantCommandExecutionResult;
   errorKey?: string;
 }
@@ -80,6 +84,7 @@ export const useAssistantStore = defineStore('assistant', () => {
   const busy = ref(false);
   const execBusy = ref(false);
   const autoRunReadOnly = ref(true);
+  const sessionApprovedCommands = ref<string[]>([]);
   const historySaving = ref(false);
   const error = ref<string | null>(null);
   const cancelError = ref<string | null>(null);
@@ -90,9 +95,15 @@ export const useAssistantStore = defineStore('assistant', () => {
   let initialization: Promise<void> | null = null;
   let diagnosticCancelled = false;
   let lastDiagnoseContext: string | null = null;
+  let sessionApprovalBindingKey = '';
   const browserHistories = new Map<string, AssistantMessage[]>();
   const pendingProposalTargets = new Map<string, PendingProposalTarget>();
   const sessions = useSessionsStore();
+
+  function clearSessionApprovals(): void {
+    sessionApprovedCommands.value = [];
+    sessionApprovalBindingKey = '';
+  }
 
   function proposalTargetMatches(target: AssistantProposalTargetSnapshot, session: SessionSummary | null): boolean {
     return Boolean(session
@@ -105,6 +116,10 @@ export const useAssistantStore = defineStore('assistant', () => {
 
   function invalidateStaleProposals(): void {
     const active = sessions.activeSession;
+    const currentTarget = currentConnectedSshTarget();
+    if (sessionApprovalBindingKey && (!currentTarget || assistantApprovalBindingKey(currentTarget) !== sessionApprovalBindingKey)) {
+      clearSessionApprovals();
+    }
     for (const pending of pendingProposalTargets.values()) {
       if (pending.target && !proposalTargetMatches(pending.target, active)) pending.stale = true;
     }
@@ -462,6 +477,17 @@ export const useAssistantStore = defineStore('assistant', () => {
     };
     if (risk === 'read_only' && autoRunReadOnly.value) {
       await executeActionAndContinue(message, false, context);
+    } else if (
+      isAssistantCommandRememberedInSession(
+        sessionApprovalBindingKey,
+        target,
+        sessionApprovedCommands.value,
+        risk,
+        proposal.command,
+      )
+    ) {
+      message.execAction.autoApprovedInSession = true;
+      await executeActionAndContinue(message, true, context);
     }
   }
 
@@ -520,10 +546,28 @@ export const useAssistantStore = defineStore('assistant', () => {
     }
   }
 
-  async function approveExecAction(messageId: string): Promise<void> {
+  async function approveExecAction(messageId: string, rememberForSession = false): Promise<void> {
     if (busy.value || execBusy.value) return;
     const message = messages.value.find((item) => item.id === messageId);
     if (!message?.execAction || message.execAction.status !== 'pending_approval') return;
+    const action = message.execAction;
+    if (
+      rememberForSession
+      && action.risk === 'requires_confirmation'
+      && action.target
+      && !action.stale
+      && proposalTargetMatches(action.target, sessions.activeSession)
+    ) {
+      const bindingKey = assistantApprovalBindingKey(action.target);
+      if (bindingKey !== sessionApprovalBindingKey) {
+        sessionApprovedCommands.value = [];
+        sessionApprovalBindingKey = bindingKey;
+      }
+      sessionApprovedCommands.value = rememberAssistantSessionCommand(
+        sessionApprovedCommands.value,
+        action.command,
+      );
+    }
     diagnosticCancelled = false;
     await executeActionAndContinue(message, true, lastDiagnoseContext);
   }
@@ -614,6 +658,7 @@ export const useAssistantStore = defineStore('assistant', () => {
         conversations.value = result.data.conversations;
       }
       messages.value = [];
+      clearSessionApprovals();
       error.value = null;
       historyError.value = null;
     } finally {
@@ -636,6 +681,7 @@ export const useAssistantStore = defineStore('assistant', () => {
         activeConversationId.value = id;
         browserHistories.set(id, []);
         messages.value = [];
+        clearSessionApprovals();
         historyError.value = null;
         error.value = null;
         return true;
@@ -650,6 +696,7 @@ export const useAssistantStore = defineStore('assistant', () => {
       conversations.value = result.data.conversations;
       activeConversationId.value = result.data.activeConversationId;
       messages.value = [];
+      clearSessionApprovals();
       browserHistories.set(activeConversationId.value, []);
       historyError.value = null;
       error.value = null;
@@ -669,6 +716,7 @@ export const useAssistantStore = defineStore('assistant', () => {
         browserHistories.set(activeConversationId.value, messages.value.map((message) => ({ ...message })));
         activeConversationId.value = conversationId;
         messages.value = (browserHistories.get(conversationId) ?? []).map((message) => ({ ...message }));
+        clearSessionApprovals();
         historyError.value = null;
         error.value = null;
         return true;
@@ -681,6 +729,7 @@ export const useAssistantStore = defineStore('assistant', () => {
       conversations.value = selected.data.conversations;
       activeConversationId.value = selected.data.activeConversationId;
       messages.value = [];
+      clearSessionApprovals();
       const history = await loadAssistantHistory(conversationId);
       if (!history.ok) {
         historyError.value = history.error.messageKey;
@@ -732,6 +781,7 @@ export const useAssistantStore = defineStore('assistant', () => {
           if (!nextConversation) return false;
           activeConversationId.value = nextConversation.id;
           messages.value = (browserHistories.get(activeConversationId.value) ?? []).map((message) => ({ ...message }));
+          clearSessionApprovals();
         }
         historyError.value = null;
         error.value = null;
@@ -746,6 +796,7 @@ export const useAssistantStore = defineStore('assistant', () => {
       activeConversationId.value = result.data.activeConversationId;
       if (previousActiveId !== activeConversationId.value) {
         messages.value = [];
+        clearSessionApprovals();
         const history = await loadAssistantHistory(activeConversationId.value);
         if (!history.ok) {
           historyError.value = history.error.messageKey;
@@ -769,6 +820,7 @@ export const useAssistantStore = defineStore('assistant', () => {
     busy,
     execBusy,
     autoRunReadOnly,
+    sessionApprovedCommands,
     historySaving,
     error,
     cancelError,
@@ -782,6 +834,7 @@ export const useAssistantStore = defineStore('assistant', () => {
     cancel,
     approveExecAction,
     denyExecAction,
+    clearSessionApprovals,
     clearConversation,
     createConversation,
     selectConversation,
