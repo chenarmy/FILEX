@@ -166,7 +166,23 @@ function startNewSession(): void {
 async function duplicateActiveSession(): Promise<void> {
   const current = sessions.activeSession;
   if (!canDuplicateActive.value || !current) return;
-  await sessions.duplicateSession(current.id);
+  if (isLocalSession(current)) {
+    const meta = sessions.localMetadataForSession(current.id);
+    await sessions.openLocalSession({
+      shellKind: meta?.shellKind ?? null,
+      workingDirectory: meta?.workingDirectory ?? null,
+      columns: 120,
+      rows: 32,
+    });
+    return;
+  }
+  if (sessions.isQuickProfile(current.profileId)) {
+    await sessions.duplicateSession(current.id);
+    return;
+  }
+  const profile = sessions.profileForId(current.profileId);
+  if (!profile) return;
+  await sessions.begin(profile);
 }
 
 async function createSplit(orientation: 'vertical' | 'horizontal'): Promise<void> {
@@ -189,7 +205,19 @@ async function createSplit(orientation: 'vertical' | 'horizontal'): Promise<void
   focusedPaneIndex.value = 1;
 
   try {
-    await sessions.duplicateSession(sourceSessionId);
+    if (sourceIsLocal) {
+      const meta = sessions.localMetadataForSession(source.id);
+      await sessions.openLocalSession({
+        shellKind: meta?.shellKind ?? null,
+        workingDirectory: meta?.workingDirectory ?? null,
+        columns: 120,
+        rows: 32,
+      });
+    } else if (sessions.isQuickProfile(source.profileId)) {
+      await sessions.duplicateSession(sourceSessionId);
+    } else if (profile) {
+      await sessions.begin(profile);
+    }
   } catch (error) {
     layout.value = previousLayout;
     paneSessionIds.value = previousPanes;

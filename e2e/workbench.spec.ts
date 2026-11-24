@@ -569,6 +569,7 @@ test('exposes the keyboard-accessible file menu and recursive permission control
     ];
     Object.assign(settings.value as Record<string, unknown>, {
       fileBrowserOpen: true,
+      fileBrowserPosition: 'bottom',
       focusMode: false,
       dualPaneSftp: false,
       taskDrawerOpen: false,
@@ -579,7 +580,7 @@ test('exposes the keyboard-accessible file menu and recursive permission control
     });
   });
 
-  const resize = page.getByRole('separator', { name: 'Resize file browser' });
+  const resize = page.getByRole('separator', { name: '调整文件操作区大小' });
   await resize.focus();
   for (let index = 0; index < 30; index += 1) await resize.press('ArrowUp');
   const browserHeight = await page.locator('.file-browser-panel-slot').evaluate((element) => {
