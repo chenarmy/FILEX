@@ -60,6 +60,30 @@ export function openLocalFileExternally(
   );
 }
 
+export async function getDefaultDownloadDirectory(): Promise<OperationResult<string>> {
+  if (!isTauriRuntime()) {
+    return failure({
+      code: 'LOCAL_FILES_DESKTOP_ONLY',
+      messageKey: 'errors.localFilesDesktopOnly',
+      retryable: false,
+      remoteState: 'not_applicable',
+    });
+  }
+  try {
+    return await invoke<OperationResult<string>>('get_default_download_directory');
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'LOCAL_DIRECTORY_FAILED'));
+  }
+}
+
+export function openLocalDirectory(path: string): Promise<OperationResult<void>> {
+  return runLocalOperation(
+    'open_local_directory',
+    { path },
+    'SFTP_EXTERNAL_OPEN_LAUNCH_FAILED',
+  );
+}
+
 export function renameLocalEntry(path: string, targetName: string): Promise<OperationResult<void>> {
   return runLocalOperation('rename_local_entry', { path, targetName }, 'LOCAL_FILE_OPERATION_FAILED');
 }

@@ -846,11 +846,35 @@ export interface SafeSettings {
   fileBrowserWidth: number;
   textEditorPreference: TextEditorPreference;
   externalEditorPath: string | null;
+  uploadConflictPolicy: ConflictPolicy;
+  defaultDownloadDirectory: string | null;
+  autoOpenDownloadFolder: boolean;
+  mcpEnabled: boolean;
+  mcpPort: number;
   terminalLogging: boolean;
   compactComposerOpen: boolean;
   backupSchedule: 'off' | 'daily' | 'weekly';
   updateChannel: 'stable' | 'beta';
   shortcuts: KeyboardShortcuts;
+}
+
+export interface McpServerStatus {
+  enabled: boolean;
+  running: boolean;
+  bindAddress: string;
+  endpointUrl: string;
+  authToken: string | null;
+  cliCommand: string;
+  error: string | null;
+}
+
+export interface DownloadRemoteArchiveInput {
+  sessionId: string;
+  remoteDirectory: string;
+  entryNames: string[];
+  localDirectory: string;
+  archiveName: string;
+  conflictPolicy: ConflictPolicy;
 }
 
 export interface RuntimeInfo {

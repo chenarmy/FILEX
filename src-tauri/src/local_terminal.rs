@@ -6,6 +6,7 @@ use filex_local_terminal::{LocalTerminalOutputEvent, LocalTerminalRuntime};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::TerminalEventPayload;
+use crate::mcp_diagnostics::TerminalOutputRing;
 use crate::terminal_logging::TerminalLogRuntime;
 
 #[tauri::command]
@@ -81,6 +82,7 @@ fn spawn_local_terminal_output(
             if let Some(data) = payload.data.as_deref() {
                 app.state::<TerminalLogRuntime>()
                     .append(&app, &session_id, data);
+                app.state::<TerminalOutputRing>().append(&session_id, data);
             }
             let _ = app.emit("terminal-output", payload);
             if closed {
@@ -90,6 +92,7 @@ fn spawn_local_terminal_output(
                     .stop(Some(&app), &session_id)
                     .await;
                 if is_stream_closed {
+                    app.state::<TerminalOutputRing>().remove(&session_id);
                     break;
                 }
             }

@@ -1,6 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { failure, isTauriRuntime, normalizeUnknownError, success } from '@/api/common';
-import type { CreateTransferInput, OperationResult, TransferTask } from '@/types/contracts';
+import type {
+  CreateTransferInput,
+  DownloadRemoteArchiveInput,
+  OperationResult,
+  TransferTask,
+} from '@/types/contracts';
 
 export async function listTransfers(): Promise<OperationResult<TransferTask[]>> {
   if (!isTauriRuntime()) return success([]);
@@ -25,6 +30,17 @@ export async function enqueueTransfer(
     });
   } catch (error: unknown) {
     return failure(normalizeUnknownError(error, 'TRANSFER_ENQUEUE_FAILED'));
+  }
+}
+
+export async function downloadRemoteArchive(
+  input: DownloadRemoteArchiveInput,
+): Promise<OperationResult<TransferTask>> {
+  if (!isTauriRuntime()) return desktopOnly();
+  try {
+    return await invoke<OperationResult<TransferTask>>('download_remote_archive', { input });
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'REMOTE_ARCHIVE_FAILED'));
   }
 }
 

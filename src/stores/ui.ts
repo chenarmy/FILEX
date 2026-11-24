@@ -7,6 +7,7 @@ export type SettingsSection =
   | 'assistant'
   | 'terminal'
   | 'connections'
+  | 'mcp'
   | 'security'
   | 'storage'
   | 'updates'

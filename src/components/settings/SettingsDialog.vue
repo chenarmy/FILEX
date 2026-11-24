@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import {
   Bot,
   Copy,
+  Cpu,
   Database,
   ExternalLink,
   FolderOpen,
@@ -22,7 +23,8 @@ import {
   PROJECT_URLS,
   type ProjectUrlTarget,
 } from '@/api/domain/runtimeApi';
-import { selectExternalEditorExecutable } from '@/api/domain/filePickerApi';
+import { getMcpServerStatus, regenerateMcpToken } from '@/api/domain/mcpApi';
+import { selectExternalEditorExecutable, selectLocalDirectory } from '@/api/domain/filePickerApi';
 import {
   createBackup,
   createDiagnostics,
@@ -55,6 +57,7 @@ import type {
   KnownHostsImportCandidate,
   KnownHostsImportPreview,
   KnownHostsImportWarningKind,
+  McpServerStatus,
   RuntimePaths,
   SafeSettings,
 } from '@/types/contracts';
@@ -80,6 +83,8 @@ const trustImportNotice = ref<string | null>(null);
 const maintenanceBusy = ref(false);
 const backupRestorePath = ref('');
 const runtimePaths = ref<RuntimePaths | null>(null);
+const mcpStatus = ref<McpServerStatus | null>(null);
+const mcpBusy = ref(false);
 const assistantSettingsRef = ref<{ save: () => Promise<boolean>; reset: () => void } | null>(null);
 
 const projectLinks: Array<{
@@ -118,6 +123,66 @@ async function chooseExternalEditor(): Promise<void> {
   if (selected.data) {
     draft.externalEditorPath = selected.data;
     draft.textEditorPreference = 'external';
+  }
+}
+
+async function chooseDefaultDownloadFolder(): Promise<void> {
+  const selected = await selectLocalDirectory(t('settings.chooseDownloadFolderTitle'));
+  if (!selected.ok) {
+    ui.notify(t(selected.error.messageKey as Parameters<typeof t>[0]));
+    return;
+  }
+  if (selected.data) {
+    draft.defaultDownloadDirectory = selected.data;
+  }
+}
+
+async function refreshMcpStatus(): Promise<void> {
+  const result = await getMcpServerStatus();
+  if (result.ok) mcpStatus.value = result.data;
+}
+
+async function rotateMcpToken(): Promise<void> {
+  if (mcpBusy.value) return;
+  mcpBusy.value = true;
+  try {
+    const result = await regenerateMcpToken();
+    if (result.ok) {
+      mcpStatus.value = result.data;
+      ui.notify(t('settings.mcpTokenRotated'));
+    } else {
+      ui.notify(t(result.error.messageKey as Parameters<typeof t>[0]));
+    }
+  } finally {
+    mcpBusy.value = false;
+  }
+}
+
+async function copyMcpConfig(mode: 'http' | 'stdio'): Promise<void> {
+  const status = mcpStatus.value;
+  if (!status) return;
+  const payload = mode === 'http'
+    ? {
+      mcpServers: {
+        filex: {
+          url: status.endpointUrl,
+          headers: status.authToken ? { Authorization: `Bearer ${status.authToken}` } : {},
+        },
+      },
+    }
+    : {
+      mcpServers: {
+        filex: {
+          command: status.cliCommand.replace(/^"|" --mcp$/g, ''),
+          args: ['--mcp'],
+        },
+      },
+    };
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+    ui.notify(t('settings.mcpConfigCopied'));
+  } catch {
+    ui.notify(t('terminal.copyFailed'));
   }
 }
 
@@ -183,6 +248,7 @@ const sections: { id: SettingsSection; label: Parameters<typeof t>[0]; icon: typ
   { id: 'assistant', label: 'settings.assistant', icon: Bot },
   { id: 'terminal', label: 'settings.terminal', icon: TerminalSquare },
   { id: 'connections', label: 'settings.connections', icon: Server },
+  { id: 'mcp', label: 'settings.mcp', icon: Cpu },
   { id: 'security', label: 'settings.security', icon: ShieldCheck },
   { id: 'storage', label: 'settings.storage', icon: Database },
   { id: 'updates', label: 'settings.updates', icon: RefreshCw },
@@ -229,6 +295,7 @@ async function save(): Promise<void> {
         loggingStopError = t(terminalLogs.error.messageKey as Parameters<typeof t>[0]);
       }
     }
+    await refreshMcpStatus();
     ui.closeSettings();
     ui.notify(loggingStopError ?? t('settings.saved'));
   } finally {
@@ -285,6 +352,15 @@ function reset(): void {
         fileBrowserWidth: defaults.fileBrowserWidth,
         textEditorPreference: defaults.textEditorPreference,
         externalEditorPath: defaults.externalEditorPath,
+        uploadConflictPolicy: defaults.uploadConflictPolicy,
+        defaultDownloadDirectory: defaults.defaultDownloadDirectory,
+        autoOpenDownloadFolder: defaults.autoOpenDownloadFolder,
+      });
+      break;
+    case 'mcp':
+      Object.assign(draft, {
+        mcpEnabled: defaults.mcpEnabled,
+        mcpPort: defaults.mcpPort,
       });
       break;
     case 'security':
@@ -544,13 +620,15 @@ async function commitKnownHostsImport(): Promise<void> {
 onMounted(async () => {
   credentialStatus.value = 'probing';
   const trustLoad = loadTrustLedger();
-  const [credentialResult, , pathsResult] = await Promise.all([
+  const [credentialResult, , pathsResult, mcpResult] = await Promise.all([
     getCredentialStoreStatus(),
     updates.initialize(true),
     getRuntimePaths(),
+    getMcpServerStatus(),
   ]);
   credentialStatus.value = credentialResult.ok ? credentialResult.data : 'unavailable';
   runtimePaths.value = pathsResult.ok ? pathsResult.data : null;
+  mcpStatus.value = mcpResult.ok ? mcpResult.data : null;
   await trustLoad;
 });
 </script>
@@ -634,6 +712,69 @@ onMounted(async () => {
             <div class="setting-row"><div><strong>{{ t('settings.monitorInterval') }}</strong><small>{{ t('settings.monitorIntervalHelp') }}</small></div><select v-model.number="draft.monitorIntervalSeconds"><option :value="15">{{ t('settings.secondsValue', { n: 15 }) }}</option><option :value="30">{{ t('settings.secondsValue', { n: 30 }) }}</option><option :value="60">{{ t('settings.secondsValue', { n: 60 }) }}</option></select></div>
             <div class="setting-row"><div><strong>{{ t('settings.textEditor') }}</strong><small>{{ t('settings.textEditorHelp') }}</small></div><select v-model="draft.textEditorPreference" :aria-label="t('settings.textEditor')"><option value="internal">{{ t('fileMenu.internalEditor') }}</option><option value="external">{{ t('fileMenu.externalEditor') }}</option></select></div>
             <div class="setting-row"><div><strong>{{ t('settings.externalEditorTool') }}</strong><small class="mono">{{ draft.externalEditorPath || t('settings.externalEditorNotSet') }}</small></div><button type="button" class="button" @click="chooseExternalEditor"><FolderOpen :size="13" />{{ t('settings.chooseExternalEditor') }}</button></div>
+            <div class="setting-row">
+              <div><strong>{{ t('settings.uploadConflictPolicy') }}</strong><small>{{ t('settings.uploadConflictPolicyHelp') }}</small></div>
+              <select v-model="draft.uploadConflictPolicy" :aria-label="t('settings.uploadConflictPolicy')">
+                <option value="overwrite">{{ t('transfer.overwrite') }}</option>
+                <option value="ask">{{ t('transfer.ask') }}</option>
+                <option value="skip">{{ t('transfer.skip') }}</option>
+                <option value="rename">{{ t('transfer.rename') }}</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <div><strong>{{ t('settings.defaultDownloadDirectory') }}</strong><small class="mono">{{ draft.defaultDownloadDirectory || t('settings.defaultDownloadDirectoryAuto') }}</small></div>
+              <div class="setting-control-group">
+                <button type="button" class="button" @click="chooseDefaultDownloadFolder"><FolderOpen :size="13" />{{ t('settings.chooseDownloadFolder') }}</button>
+                <button v-if="draft.defaultDownloadDirectory" type="button" class="button" @click="draft.defaultDownloadDirectory = null">{{ t('settings.resetDownloadFolder') }}</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div><strong>{{ t('settings.autoOpenDownloadFolder') }}</strong><small>{{ t('settings.autoOpenDownloadFolderHelp') }}</small></div>
+              <label class="switch"><input v-model="draft.autoOpenDownloadFolder" type="checkbox"><span /></label>
+            </div>
+          </section>
+
+          <section v-else-if="activeSection === 'mcp'">
+            <h2>{{ t('settings.mcp') }}</h2>
+            <p>{{ t('settings.mcpHelp') }}</p>
+            <div class="setting-row">
+              <div><strong>{{ t('settings.mcpEnabled') }}</strong><small>{{ t('settings.mcpEnabledHelp') }}</small></div>
+              <label class="switch"><input v-model="draft.mcpEnabled" type="checkbox"><span /></label>
+            </div>
+            <div class="setting-row">
+              <div><strong>{{ t('settings.mcpPort') }}</strong><small>{{ t('settings.mcpPortHelp') }}</small></div>
+              <input v-model.number="draft.mcpPort" type="number" min="1024" max="65535" class="mono">
+            </div>
+            <div v-if="mcpStatus" class="setting-row">
+              <div>
+                <strong>{{ t('settings.mcpStatus') }}</strong>
+                <small class="mono">{{ mcpStatus.endpointUrl }}</small>
+                <small v-if="mcpStatus.error" role="alert">{{ mcpStatus.error }}</small>
+              </div>
+              <span class="status-pill" :class="mcpStatus.running ? 'available' : 'pending'">
+                {{ t(mcpStatus.running ? 'settings.mcpStatusRunning' : 'settings.mcpStatusStopped') }}
+              </span>
+            </div>
+            <div v-if="mcpStatus" class="setting-row">
+              <div>
+                <strong>{{ t('settings.mcpCliCommand') }}</strong>
+                <small class="mono">{{ mcpStatus.cliCommand }}</small>
+              </div>
+              <div class="setting-control-group">
+                <button type="button" class="button" @click="copyMcpConfig('stdio')"><Copy :size="13" />{{ t('settings.mcpCopyStdioConfig') }}</button>
+                <button type="button" class="button" :disabled="!mcpStatus.running" @click="copyMcpConfig('http')"><Copy :size="13" />{{ t('settings.mcpCopyHttpConfig') }}</button>
+              </div>
+            </div>
+            <div v-if="mcpStatus?.running" class="setting-row">
+              <div>
+                <strong>{{ t('settings.mcpAuthToken') }}</strong>
+                <small>{{ t('settings.mcpAuthTokenHelp') }}</small>
+              </div>
+              <button type="button" class="button" :disabled="mcpBusy" @click="rotateMcpToken">
+                <RefreshCw :size="13" :class="{ spin: mcpBusy }" />{{ t('settings.mcpRotateToken') }}
+              </button>
+            </div>
+            <p class="settings-license-note">{{ t('settings.mcpSecurityNotice') }}</p>
           </section>
 
           <section v-else-if="activeSection === 'security'">

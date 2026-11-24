@@ -119,7 +119,6 @@ async function startRule(rule: TunnelRule): Promise<void> {
   });
   if (started) {
     settings.value.taskTab = 'tunnels';
-    settings.value.taskDrawerOpen = true;
   }
 }
 </script>

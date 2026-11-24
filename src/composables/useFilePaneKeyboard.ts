@@ -46,6 +46,8 @@ export function useFilePaneKeyboard<T extends FilePaneEntryLike>(options: {
   isBlocked: () => boolean;
   onCopyLocal: () => unknown;
   onPasteUpload: (pane: 'local' | 'remote', event?: ClipboardEvent) => unknown;
+  onRename?: (pane: 'local' | 'remote') => unknown;
+  onSelectAll?: (pane: 'local' | 'remote') => unknown;
 }) {
   const listElements = reactive<Record<'local' | 'remote', HTMLElement | null>>({
     local: null,
@@ -137,6 +139,31 @@ export function useFilePaneKeyboard<T extends FilePaneEntryLike>(options: {
 
   function handlePaneKeydown(pane: 'local' | 'remote', event: KeyboardEvent): void {
     if (event.defaultPrevented || options.isBlocked() || isEditableOrBlockedTarget(event.target)) return;
+
+    if (event.key === 'F2' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+      if (event.repeat) {
+        event.preventDefault();
+        return;
+      }
+      if (options.getSelectedPath(pane)) {
+        event.preventDefault();
+        event.stopPropagation();
+        clearTypeahead();
+        void options.onRename?.(pane);
+      }
+      return;
+    }
+
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'a') {
+      const inFileList = event.target instanceof HTMLElement && Boolean(event.target.closest('.file-list'));
+      if (inFileList && options.onSelectAll) {
+        event.preventDefault();
+        event.stopPropagation();
+        clearTypeahead();
+        if (!event.repeat) void options.onSelectAll(pane);
+        return;
+      }
+    }
 
     if (isFileCopyShortcut(event)) {
       if (hasTextSelection()) return;

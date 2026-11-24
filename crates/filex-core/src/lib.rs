@@ -13,9 +13,9 @@ use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use filex_contracts::{
-    AppError, AuthenticationMethod, ConnectionProfile, ConnectionProfilesExport, ConnectionState,
-    CreateConnectionProfileInput, CreateTransferInput, CreateTunnelRuleInput, DiskMount,
-    HostTrustEvaluation, HostTrustRecord, ImportKnownHostsInput, ImportKnownHostsResult,
+    AppError, AuthenticationMethod, ConflictPolicy, ConnectionProfile, ConnectionProfilesExport,
+    ConnectionState, CreateConnectionProfileInput, CreateTransferInput, CreateTunnelRuleInput,
+    DiskMount, HostTrustEvaluation, HostTrustRecord, ImportKnownHostsInput, ImportKnownHostsResult,
     KeyboardShortcuts, MonitorState, PortableConnectionProfile, PortableConnectionRouteHop,
     RecordHostTrustInput, RemoteState, SafeSettings, SessionKind, SessionState, SessionSummary,
     SshConfigImportCandidate, SystemMonitorSnapshot, TransferDirection, TransferResumeState,
@@ -102,11 +102,11 @@ pub fn default_safe_settings() -> SafeSettings {
         inspector_tab: "files".to_owned(),
         dual_pane_sftp: false,
         task_tab: "transfers".to_owned(),
-        task_drawer_open: true,
+        task_drawer_open: false,
         connections_pane_width: 244,
         inspector_pane_width: 286,
         assistant_pane_width: 360,
-        task_drawer_height: 156,
+        task_drawer_height: 240,
         host_panel_open: false,
         file_browser_open: true,
         follow_terminal_cwd: true,
@@ -118,6 +118,11 @@ pub fn default_safe_settings() -> SafeSettings {
         file_browser_width: 420,
         text_editor_preference: "internal".to_owned(),
         external_editor_path: None,
+        upload_conflict_policy: ConflictPolicy::Overwrite,
+        default_download_directory: None,
+        auto_open_download_folder: true,
+        mcp_enabled: false,
+        mcp_port: 19_375,
         terminal_logging: false,
         compact_composer_open: false,
         backup_schedule: "daily".to_owned(),
@@ -182,6 +187,13 @@ fn validate_safe_settings(settings: &SafeSettings) -> Result<(), AppError> {
         && settings.external_editor_path.as_deref().is_none_or(|path| {
             !path.trim().is_empty() && !path.contains('\0') && path.len() <= 4_096
         })
+        && settings
+            .default_download_directory
+            .as_deref()
+            .is_none_or(|path| {
+                !path.trim().is_empty() && !path.contains('\0') && path.len() <= 4_096
+            })
+        && (1024..=65_535).contains(&settings.mcp_port)
         && ["off", "daily", "weekly"].contains(&settings.backup_schedule.as_str())
         && ["stable", "beta"].contains(&settings.update_channel.as_str())
         && !settings.ui_font_family.trim().is_empty()

@@ -139,32 +139,21 @@ describe('temporary quick-connect session parity', () => {
     expect(sessions.profileForId('quick-prof-1')).toBeNull();
   });
 
-  it('retains temporary profile metadata across disconnect so manual reconnect works in the same tab', async () => {
+  it('automatically removes the temporary session and profile when disconnected', async () => {
     mockApi.probeQuickSessionHostKey.mockResolvedValue({
       ok: true,
       data: makeChallenge(),
       requestId: 'r1',
     });
-    mockApi.connectQuickPasswordSession
-      .mockResolvedValueOnce({
-        ok: true,
-        data: { session: makeSummary({ generation: 1 }), challenge: null, connected: true },
-        requestId: 'r2',
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        data: { session: makeSummary({ generation: 2 }), challenge: null, connected: true },
-        requestId: 'r5',
-      });
+    mockApi.connectQuickPasswordSession.mockResolvedValueOnce({
+      ok: true,
+      data: { session: makeSummary({ generation: 1 }), challenge: null, connected: true },
+      requestId: 'r2',
+    });
     mockApi.disconnectSession.mockResolvedValue({
       ok: true,
       data: makeSummary({ state: 'disconnected' }),
       requestId: 'r3',
-    });
-    mockApi.reprobeSessionHostKey.mockResolvedValue({
-      ok: true,
-      data: makeChallenge({ session: makeSummary({ generation: 2, state: 'ready_to_authenticate' }) }),
-      requestId: 'r4',
     });
 
     const sessions = useSessionsStore();
@@ -172,16 +161,10 @@ describe('temporary quick-connect session parity', () => {
     await sessions.savePassword('first-pass');
 
     await sessions.disconnectActive();
-    expect(sessions.activeSession?.state).toBe('disconnected');
-    expect(sessions.isQuickProfile('quick-prof-1')).toBe(true);
-
-    await sessions.reconnectActive();
-    expect(mockApi.reprobeSessionHostKey).toHaveBeenCalledWith('sess-quick-1');
-    expect(sessions.passwordProfileId).toBe('quick-prof-1');
-
-    await sessions.savePassword('second-pass');
-    expect(sessions.activeSession?.state).toBe('connected');
-    expect(sessions.activeSession?.generation).toBe(2);
+    expect(sessions.summaries).toHaveLength(0);
+    expect(sessions.activeSession).toBeNull();
+    expect(sessions.isQuickProfile('quick-prof-1')).toBe(false);
+    expect(sessions.profileForId('quick-prof-1')).toBeNull();
   });
 
   it('supports starting tunnels and saving transient tunnel rules for quick profiles', async () => {

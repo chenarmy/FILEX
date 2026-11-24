@@ -185,6 +185,16 @@ pub struct SafeSettings {
     pub text_editor_preference: String,
     #[serde(default)]
     pub external_editor_path: Option<String>,
+    #[serde(default = "default_upload_conflict_policy")]
+    pub upload_conflict_policy: ConflictPolicy,
+    #[serde(default)]
+    pub default_download_directory: Option<String>,
+    #[serde(default = "default_auto_open_download_folder")]
+    pub auto_open_download_folder: bool,
+    #[serde(default)]
+    pub mcp_enabled: bool,
+    #[serde(default = "default_mcp_port")]
+    pub mcp_port: u16,
     pub terminal_logging: bool,
     #[serde(default)]
     pub compact_composer_open: bool,
@@ -192,6 +202,18 @@ pub struct SafeSettings {
     pub update_channel: String,
     #[serde(default)]
     pub shortcuts: KeyboardShortcuts,
+}
+
+fn default_upload_conflict_policy() -> ConflictPolicy {
+    ConflictPolicy::Overwrite
+}
+
+fn default_auto_open_download_folder() -> bool {
+    true
+}
+
+fn default_mcp_port() -> u16 {
+    19_375
 }
 
 fn default_monitor_interval_seconds() -> u16 {
@@ -312,6 +334,29 @@ pub struct UpdateStatus {
 pub struct RuntimePaths {
     pub data_directory: String,
     pub backup_directory: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerStatus {
+    pub enabled: bool,
+    pub running: bool,
+    pub bind_address: String,
+    pub endpoint_url: String,
+    pub auth_token: Option<String>,
+    pub cli_command: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadRemoteArchiveInput {
+    pub session_id: String,
+    pub remote_directory: String,
+    pub entry_names: Vec<String>,
+    pub local_directory: String,
+    pub archive_name: String,
+    pub conflict_policy: ConflictPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -3,6 +3,7 @@ import {
   ALT_DOUBLE_TAP_WINDOW_MS,
   DEFAULT_TERMINAL_FONT_FAMILY,
   clampTerminalMenuPosition,
+  classifyTerminalClipboardShortcut,
   registerAltTap,
   resolveTerminalFontFamily,
 } from '@/domain/terminalInteractions';
@@ -43,5 +44,16 @@ describe('terminal interactions', () => {
       { left: 100, top: 100, width: 400, height: 300 },
       { width: 160, height: 180 },
     )).toEqual({ x: 234, y: 114 });
+  });
+
+  it('classifies terminal clipboard shortcuts once without interfering with SIGINT', () => {
+    const base = { type: 'keydown', ctrlKey: false, metaKey: false, shiftKey: false, altKey: false };
+    expect(classifyTerminalClipboardShortcut({ ...base, ctrlKey: true, key: 'c' }, true)).toBe('copy_and_clear');
+    expect(classifyTerminalClipboardShortcut({ ...base, ctrlKey: true, key: 'c' }, false)).toBeNull();
+    expect(classifyTerminalClipboardShortcut({ ...base, ctrlKey: true, shiftKey: true, key: 'C' }, true)).toBe('copy');
+    expect(classifyTerminalClipboardShortcut({ ...base, metaKey: true, key: 'c' }, true)).toBe('copy_and_clear');
+    expect(classifyTerminalClipboardShortcut({ ...base, ctrlKey: true, shiftKey: true, key: 'V' }, false)).toBe('paste');
+    expect(classifyTerminalClipboardShortcut({ ...base, type: 'keyup', ctrlKey: true, key: 'c' }, true)).toBeNull();
+    expect(classifyTerminalClipboardShortcut({ ...base, ctrlKey: true, altKey: true, key: 'c' }, true)).toBeNull();
   });
 });

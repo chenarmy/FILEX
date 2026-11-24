@@ -85,7 +85,7 @@ export function useFileUploadQueue() {
           direction: 'upload',
           localPath: entry.path,
           remotePath: joinRemoteUploadPath(remoteRoot, entry.name),
-          conflictPolicy: 'ask',
+          conflictPolicy: settings.value.uploadConflictPolicy,
           totalBytes: entry.isDirectory ? null : entry.size,
         };
         if (!await transfers.enqueue(input, sessionId)) {
@@ -99,7 +99,6 @@ export function useFileUploadQueue() {
 
       if (queued > 0) {
         settings.value.taskTab = 'transfers';
-        settings.value.taskDrawerOpen = true;
         notifyQueued(options.source, queued);
       }
       if (unsupported > 0) {

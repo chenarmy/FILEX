@@ -3,6 +3,17 @@ export interface DirectoryTreeEntry {
   path: string;
 }
 
+export function normalizeLocalPath(path: string): string {
+  const value = path.trim();
+  if (value.startsWith('\\\\?\\UNC\\')) {
+    return `\\\\${value.slice('\\\\?\\UNC\\'.length)}`;
+  }
+  if (value.startsWith('\\\\?\\') && /^[A-Za-z]:/.test(value.slice(4))) {
+    return value.slice(4);
+  }
+  return value;
+}
+
 export function directoryEntries<T extends {
   name: string;
   path: string;
@@ -15,7 +26,9 @@ export function directoryEntries<T extends {
 }
 
 export function directoryRoot(path: string): string {
-  const value = path.trim();
+  const value = normalizeLocalPath(path);
+  const unc = /^(\\\\[^\\]+\\[^\\]+)/.exec(value);
+  if (unc) return `${unc[1]}\\`;
   const drive = /^([A-Za-z]:)[\\/]/.exec(value);
   if (drive) return `${drive[1]}\\`;
   if (value.startsWith('/')) return '/';
@@ -23,8 +36,16 @@ export function directoryRoot(path: string): string {
 }
 
 export function directoryAncestors(path: string): string[] {
-  const value = path.trim();
+  const value = normalizeLocalPath(path);
   if (!value) return [];
+  const unc = /^(\\\\[^\\]+\\[^\\]+)(?:\\(.*))?$/.exec(value);
+  if (unc) {
+    const root = `${unc[1]}\\`;
+    const parts = unc[2]?.split(/[\\/]+/).filter(Boolean) ?? [];
+    const result = [root];
+    for (const part of parts) result.push(joinDirectoryPath(result.at(-1) ?? root, part));
+    return result;
+  }
   const drive = /^([A-Za-z]:)[\\/](.*)$/.exec(value);
   if (drive) {
     const root = `${drive[1]}\\`;
@@ -56,14 +77,18 @@ export function missingAncestorDirectories(
 }
 
 export function directoryName(path: string): string {
-  const normalized = path.replace(/[\\/]+$/, '');
+  const normalized = normalizeLocalPath(path).replace(/[\\/]+$/, '');
   if (!normalized) return '/';
   if (/^[A-Za-z]:$/.test(normalized)) return `${normalized}\\`;
+  if (/^\\\\[^\\]+\\[^\\]+$/.test(normalized)) return `${normalized}\\`;
   return normalized.split(/[\\/]/).at(-1) ?? path;
 }
 
 export function joinDirectoryPath(parent: string, name: string): string {
-  if (/^[A-Za-z]:\\$/.test(parent)) return `${parent}${name}`;
-  const separator = parent.includes('\\') && !parent.includes('/') ? '\\' : '/';
-  return `${parent.replace(/[\\/]+$/, '')}${separator}${name}`;
+  const normalizedParent = normalizeLocalPath(parent);
+  if (/^[A-Za-z]:\\$/.test(normalizedParent) || /^\\\\[^\\]+\\[^\\]+\\$/.test(normalizedParent)) {
+    return `${normalizedParent}${name}`;
+  }
+  const separator = normalizedParent.includes('\\') && !normalizedParent.includes('/') ? '\\' : '/';
+  return `${normalizedParent.replace(/[\\/]+$/, '')}${separator}${name}`;
 }

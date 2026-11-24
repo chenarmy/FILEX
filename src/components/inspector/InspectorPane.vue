@@ -620,9 +620,10 @@ async function dropRemoteFileOnLocal(event: DragEvent, pane: 'local' | 'remote')
       conflictPolicy: 'ask',
       totalBytes: entry.isDirectory ? null : entry.size,
     };
-    if (await transfers.enqueue(input, session.id)) {
+    const task = await transfers.enqueueTask(input, session.id);
+    if (task) {
+      transfers.trackDownloadBatch(listing.path, [task.id]);
       settings.value.taskTab = 'transfers';
-      settings.value.taskDrawerOpen = true;
       ui.notify(t('inspector.dropDownloadQueued', { name: entry.name }));
     }
   } catch {

@@ -26,6 +26,7 @@ import {
   elevatedSaveText,
 } from '@/api/domain/privilegeApi';
 import { directoryEntries, type DirectoryTreeEntry } from '@/domain/directoryNavigation';
+import { resolveMultiSelection } from '@/domain/fileSelection';
 import { createSessionStateCache } from '@/domain/sessionStateCache';
 import { useExternalEditorsStore } from '@/stores/externalEditors';
 import { usePrivilegeStore } from '@/stores/privilege';
@@ -42,6 +43,8 @@ interface SftpSessionSnapshot {
   path: string;
   entries: RemoteFileEntry[];
   selectedPath: string | null;
+  selectedPaths: string[];
+  selectionAnchorPath: string | null;
   error: AppError | null;
   directoryChildren: Record<string, DirectoryTreeEntry[]>;
   directoryErrorPaths: string[];
@@ -61,6 +64,8 @@ export const useSftpStore = defineStore('sftp', () => {
   const sessionId = ref<string | null>(null);
   const loading = ref(false);
   const selectedPath = ref<string | null>(null);
+  const selectedPaths = ref<string[]>([]);
+  const selectionAnchorPath = ref<string | null>(null);
   const error = ref<AppError | null>(null);
   const preview = ref<RemoteTextPreview | null>(null);
   const previewPath = ref<string | null>(null);
@@ -110,6 +115,8 @@ export const useSftpStore = defineStore('sftp', () => {
       path: path.value,
       entries: [...entries.value],
       selectedPath: selectedPath.value,
+      selectedPaths: [...selectedPaths.value],
+      selectionAnchorPath: selectionAnchorPath.value,
       error: error.value,
       directoryChildren: { ...directoryChildren.value },
       directoryErrorPaths: [...directoryErrorPaths.value],
@@ -127,6 +134,10 @@ export const useSftpStore = defineStore('sftp', () => {
     path.value = snapshot.path;
     entries.value = [...snapshot.entries];
     selectedPath.value = snapshot.selectedPath;
+    selectedPaths.value = snapshot.selectedPaths.length > 0
+      ? [...snapshot.selectedPaths]
+      : (snapshot.selectedPath ? [snapshot.selectedPath] : []);
+    selectionAnchorPath.value = snapshot.selectionAnchorPath ?? snapshot.selectedPath;
     error.value = snapshot.error;
     loading.value = false;
     directoryChildren.value = { ...snapshot.directoryChildren };
@@ -162,6 +173,8 @@ export const useSftpStore = defineStore('sftp', () => {
     copying.value = false;
     changingMode.value = false;
     selectedPath.value = null;
+    selectedPaths.value = [];
+    selectionAnchorPath.value = null;
     directoryChildren.value = {};
     directoryLoadingPaths.value = [];
     directoryErrorPaths.value = [];
@@ -244,6 +257,8 @@ export const useSftpStore = defineStore('sftp', () => {
         entries.value = result.data.entries;
         cacheDirectory(result.data.path, result.data.entries);
         selectedPath.value = null;
+        selectedPaths.value = [];
+        selectionAnchorPath.value = null;
         sessionCaches.set(nextSessionId, snapshotActive());
       } else {
         const previous = sessionCaches.get(nextSessionId);
@@ -251,6 +266,8 @@ export const useSftpStore = defineStore('sftp', () => {
           path: result.data.path,
           entries: result.data.entries,
           selectedPath: null,
+          selectedPaths: [],
+          selectionAnchorPath: null,
           error: null,
           directoryChildren: {
             ...(previous?.directoryChildren ?? {}),
@@ -700,19 +717,187 @@ export const useSftpStore = defineStore('sftp', () => {
 
   function select(entry: RemoteFileEntry): void {
     selectedPath.value = entry.path;
+    selectedPaths.value = [entry.path];
+    selectionAnchorPath.value = entry.path;
     if (sessionId.value && activeOwnerSessionId === sessionId.value) {
       sessionCaches.set(sessionId.value, snapshotActive());
     }
   }
 
+  function selectWithModifiers(
+    entry: RemoteFileEntry,
+    modifiers: { ctrlOrMeta?: boolean; shift?: boolean } = {},
+  ): void {
+    const ordered = entries.value.map((item) => item.path);
+    const next = resolveMultiSelection(
+      ordered,
+      selectedPaths.value,
+      selectionAnchorPath.value,
+      entry.path,
+      modifiers,
+    );
+    selectedPaths.value = next.selectedPaths;
+    selectedPath.value = next.primaryPath;
+    selectionAnchorPath.value = next.anchorPath;
+    if (sessionId.value && activeOwnerSessionId === sessionId.value) {
+      sessionCaches.set(sessionId.value, snapshotActive());
+    }
+  }
+
+  function toggleSelection(entry: RemoteFileEntry): void {
+    selectWithModifiers(entry, { ctrlOrMeta: true });
+  }
+
+  function selectAll(): void {
+    const ordered = entries.value.map((item) => item.path);
+    selectedPaths.value = ordered;
+    selectedPath.value = ordered.at(-1) ?? null;
+    selectionAnchorPath.value = ordered[0] ?? null;
+    if (sessionId.value && activeOwnerSessionId === sessionId.value) {
+      sessionCaches.set(sessionId.value, snapshotActive());
+    }
+  }
+
+  function clearSelection(): void {
+    selectedPaths.value = [];
+    selectedPath.value = null;
+    selectionAnchorPath.value = null;
+    if (sessionId.value && activeOwnerSessionId === sessionId.value) {
+      sessionCaches.set(sessionId.value, snapshotActive());
+    }
+  }
+
+  function isSelected(entryPath: string): boolean {
+    return selectedPaths.value.includes(entryPath) || selectedPath.value === entryPath;
+  }
+
+  async function removeMany(targets: readonly RemoteFileEntry[], recursive = false): Promise<number> {
+    if (!sessionId.value || deleting.value || targets.length === 0) return 0;
+    const targetSessionId = sessionId.value;
+    const currentPath = path.value;
+    const listingGeneration = requestGeneration;
+    const isCurrentListing = () => listingGeneration === requestGeneration
+      && targetSessionId === sessionId.value
+      && currentPath === path.value;
+    deleting.value = true;
+    error.value = null;
+    let deletedCount = 0;
+    try {
+      const elevated = privilege.isElevated(targetSessionId);
+      for (const entry of targets) {
+        const result = elevated
+          ? await elevatedDeleteEntry(targetSessionId, entry.path, recursive)
+          : recursive
+            ? await deleteRemoteEntryRecursive(targetSessionId, entry.path)
+            : await deleteRemoteEntry(targetSessionId, entry.path);
+        if (!result.ok) {
+          syncPrivilegeFailure(targetSessionId, result.error);
+          if (isCurrentListing()) error.value = result.error;
+          break;
+        }
+        deletedCount += typeof result.data === 'number' ? result.data : 1;
+      }
+      if (deletedCount > 0 && isCurrentListing()) {
+        await load(targetSessionId, currentPath);
+      }
+      return deletedCount;
+    } finally {
+      deleting.value = false;
+    }
+  }
+
+  async function moveMany(targets: readonly RemoteFileEntry[], targetDirectory: string): Promise<number> {
+    if (!sessionId.value || moving.value || targets.length === 0) return 0;
+    const generation = ++moveGeneration;
+    const targetSessionId = sessionId.value;
+    const currentPath = path.value;
+    const listingGeneration = requestGeneration;
+    const isCurrentListing = () => listingGeneration === requestGeneration
+      && targetSessionId === sessionId.value
+      && currentPath === path.value;
+    moving.value = true;
+    error.value = null;
+    let movedCount = 0;
+    try {
+      for (const entry of targets) {
+        const result = await moveRemoteEntry(targetSessionId, entry.path, targetDirectory);
+        if (!result.ok) {
+          if (isCurrentListing()) error.value = result.error;
+          break;
+        }
+        movedCount += 1;
+      }
+      if (movedCount > 0 && isCurrentListing()) {
+        await load(targetSessionId, currentPath);
+      }
+      return movedCount;
+    } finally {
+      if (generation === moveGeneration) moving.value = false;
+    }
+  }
+
+  async function changePermissionsMany(
+    targets: readonly RemoteFileEntry[],
+    input: Omit<UpdateRemotePermissionsInput, 'path'>,
+  ): Promise<RemotePermissionUpdateResult | null> {
+    if (!sessionId.value || changingMode.value || targets.length === 0) return null;
+    const targetSessionId = sessionId.value;
+    const currentPath = path.value;
+    const listingGeneration = requestGeneration;
+    const isCurrentListing = () => listingGeneration === requestGeneration
+      && targetSessionId === sessionId.value
+      && currentPath === path.value;
+    changingMode.value = true;
+    error.value = null;
+    let updatedCount = 0;
+    let skippedSymlinkCount = 0;
+    try {
+      const elevated = privilege.isElevated(targetSessionId);
+      for (const entry of targets) {
+        if (entry.isSymlink) {
+          skippedSymlinkCount += 1;
+          continue;
+        }
+        if (elevated && !input.recursive) {
+          const result = await elevatedChmodEntry(targetSessionId, entry.path, input.mode);
+          if (!result.ok) {
+            syncPrivilegeFailure(targetSessionId, result.error);
+            if (isCurrentListing()) error.value = result.error;
+            break;
+          }
+          updatedCount += 1;
+          continue;
+        }
+        const result = await updateRemotePermissions(targetSessionId, {
+          ...input,
+          path: entry.path,
+        });
+        if (!result.ok) {
+          if (isCurrentListing()) error.value = result.error;
+          break;
+        }
+        updatedCount += result.data.updatedCount;
+        skippedSymlinkCount += result.data.skippedSymlinkCount;
+      }
+      if (updatedCount > 0 && isCurrentListing()) {
+        await load(targetSessionId, currentPath);
+      }
+      return updatedCount > 0 || skippedSymlinkCount > 0
+        ? { updatedCount, skippedSymlinkCount }
+        : null;
+    } finally {
+      changingMode.value = false;
+    }
+  }
+
   return {
-    entries, path, sessionId, selectedPath, loading, error,
+    entries, path, sessionId, selectedPath, selectedPaths, loading, error,
     directoryChildren, directoryLoadingPaths, directoryErrorPaths, expandedTreePaths,
     preview, previewPath, previewEncoding, previewLoading, previewError, externalOpening, deleting, creatingDirectory, creatingFile, renaming, moving, copying,
     changingMode, savingPreview, recoveryCopyPath,
     hasSessionState, activateSession, dropSession, setExpandedTreePaths,
-    load, loadTreeDirectory, open, parent, clear, select, previewFile, closePreview,
-    remove, removeRecursive, createDirectory, createFile, rename, move, copy, cancelCopy, changeMode, changePermissions, savePreview,
+    load, loadTreeDirectory, open, parent, clear, select, selectWithModifiers, toggleSelection, selectAll, clearSelection, isSelected, previewFile, closePreview,
+    remove, removeRecursive, removeMany, createDirectory, createFile, rename, move, moveMany, copy, cancelCopy, changeMode, changePermissions, changePermissionsMany, savePreview,
     openPreviewExternally,
   };
 });

@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue';
-import { ArrowDownToLine, ArrowLeftRight, ArrowUpFromLine, ShieldAlert, X } from 'lucide-vue-next';
+import { ArrowDownToLine, ArrowLeftRight, ArrowUpFromLine, FolderOpen, ShieldAlert, X } from 'lucide-vue-next';
+import { selectLocalDirectory } from '@/api/domain/filePickerApi';
+import { extractLocalParentDirectory } from '@/domain/fileSelection';
+import { joinDirectoryPath } from '@/domain/directoryNavigation';
 import { t } from '@/i18n';
 import { useConnectionsStore } from '@/stores/connections';
 import { useSettingsStore } from '@/stores/settings';
@@ -18,10 +21,13 @@ const sessions = useSessionsStore();
 const settings = useSettingsStore();
 const sftp = useSftpStore();
 const localFiles = useLocalFilesStore();
-const confirmedOverwrite = ref(false);
+const direction = computed(() => ui.transferDialog?.direction ?? 'upload');
+const initialConflictPolicy: ConflictPolicy = ui.transferDialog?.direction === 'upload'
+  ? settings.value.uploadConflictPolicy
+  : 'ask';
+const confirmedOverwrite = ref(initialConflictPolicy === 'overwrite');
 const confirmedRelayEndpoints = ref(false);
 const destinationPathTouched = ref(Boolean(ui.transferDialog?.destinationRemotePath));
-const direction = computed(() => ui.transferDialog?.direction ?? 'upload');
 const isRelay = computed(() => direction.value === 'remote_to_remote');
 const profileId = computed(() => ui.transferDialog?.profileId
   ?? sessions.activeSession?.profileId
@@ -88,7 +94,7 @@ const form = reactive<{
     ?? (ui.transferDialog?.direction === 'remote_to_remote'
       ? defaultRelayDestinationPath(initialDestProfileId, ui.transferDialog?.remotePath ?? '')
       : ''),
-  conflictPolicy: 'ask',
+  conflictPolicy: initialConflictPolicy,
 });
 
 const needsRelayEndpointConfirm = computed(() => (
@@ -125,13 +131,26 @@ function handleDestinationProfileChange(): void {
   }
 }
 
+async function chooseDownloadFolder(): Promise<void> {
+  const selected = await selectLocalDirectory(t('transfer.chooseDownloadFolderTitle'));
+  if (!selected.ok) {
+    ui.notify(t(selected.error.messageKey as Parameters<typeof t>[0]));
+    return;
+  }
+  if (!selected.data) return;
+  const baseName = form.remotePath.trim().replace(/\/+$/, '').split('/').filter(Boolean).pop()
+    ?? form.localPath.trim().replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean).pop()
+    ?? 'download';
+  form.localPath = joinDirectoryPath(selected.data, baseName);
+}
+
 function close(): void {
   ui.closeTransfer();
 }
 
 async function submit(): Promise<void> {
   if (submitDisabled.value || !profileId.value) return;
-  const queued = await transfers.enqueue({
+  const task = await transfers.enqueueTask({
     profileId: profileId.value,
     direction: direction.value,
     localPath: isRelay.value ? '' : form.localPath.trim(),
@@ -147,9 +166,12 @@ async function submit(): Promise<void> {
       ? (selectedLocal.value?.isDirectory ? null : selectedLocal.value?.size ?? null)
       : (selectedRemote.value?.isDirectory ? null : selectedRemote.value?.size ?? null),
   });
-  if (queued) {
+  if (task) {
+    if (direction.value === 'download') {
+      const parentDir = extractLocalParentDirectory(form.localPath.trim());
+      if (parentDir) transfers.trackDownloadBatch(parentDir, [task.id]);
+    }
     settings.value.taskTab = 'transfers';
-    settings.value.taskDrawerOpen = true;
     ui.closeTransfer();
   }
 }
@@ -195,7 +217,21 @@ async function submit(): Promise<void> {
             </label>
           </template>
           <template v-else>
-            <label class="field full"><span>{{ t('transfer.localPath') }}</span><input v-model="form.localPath" autocomplete="off" spellcheck="false"></label>
+            <label class="field full">
+              <span>{{ t('transfer.localPath') }}</span>
+              <div class="setting-control-group">
+                <input v-model="form.localPath" autocomplete="off" spellcheck="false">
+                <button
+                  v-if="direction === 'download'"
+                  type="button"
+                  class="button"
+                  :title="t('transfer.chooseDownloadFolder')"
+                  @click="chooseDownloadFolder"
+                >
+                  <FolderOpen :size="13" />
+                </button>
+              </div>
+            </label>
             <label class="field full"><span>{{ t('transfer.remotePath') }}</span><input v-model="form.remotePath" autocomplete="off" spellcheck="false"></label>
           </template>
           <label class="field full"><span>{{ t('transfer.conflictPolicy') }}</span>

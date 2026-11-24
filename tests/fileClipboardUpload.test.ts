@@ -228,12 +228,34 @@ describe('clipboard upload store, queue, and URI parser', () => {
         direction: 'upload',
         localPath: 'C:\\deploy\\dist',
         remotePath: '/srv/releases/dist',
-        conflictPolicy: 'ask',
+        conflictPolicy: 'overwrite',
         totalBytes: null,
       },
       'sess-1',
     );
     expect(settings.value.taskTab).toBe('transfers');
-    expect(settings.value.taskDrawerOpen).toBe(true);
+    expect(settings.value.taskDrawerOpen).toBe(false);
+
+    // Honors configured upload conflict policy when changed in settings
+    settings.value.uploadConflictPolicy = 'skip';
+    localFilesMocks.inspectLocalEntry.mockResolvedValueOnce({
+      ok: true,
+      data: makeLocalEntry({ name: 'notes.txt', path: 'C:\\deploy\\notes.txt', isDirectory: false, size: 64 }),
+    });
+    transferMocks.enqueueTransfer.mockResolvedValueOnce({
+      ok: true,
+      data: makeTask('t-3', 'C:\\deploy\\notes.txt', '/srv/releases/notes.txt'),
+    });
+    const queuedConfigured = await queue.queueLocalPathsForUpload(['C:\\deploy\\notes.txt'], {
+      source: 'picker',
+      remoteReady: true,
+      quickSession: false,
+    });
+    expect(queuedConfigured).toBe(1);
+    expect(transferMocks.enqueueTransfer).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({ conflictPolicy: 'skip' }),
+      'sess-1',
+    );
   });
 });

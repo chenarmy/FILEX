@@ -43,6 +43,11 @@ export const defaultSafeSettings: SafeSettings = {
   fileBrowserWidth: 420,
   textEditorPreference: 'internal',
   externalEditorPath: null,
+  uploadConflictPolicy: 'overwrite',
+  defaultDownloadDirectory: null,
+  autoOpenDownloadFolder: true,
+  mcpEnabled: false,
+  mcpPort: 19_375,
   terminalLogging: false,
   compactComposerOpen: false,
   backupSchedule: 'daily',
@@ -124,6 +129,13 @@ export function normalizeSafeSettings(input: Partial<SafeSettings>): SafeSetting
     fileBrowserWidth: clampNumber(input.fileBrowserWidth, 260, 1_200, defaultSafeSettings.fileBrowserWidth),
     textEditorPreference: input.textEditorPreference === 'external' ? 'external' : 'internal',
     externalEditorPath: normalizeExternalEditorPath(input.externalEditorPath),
+    uploadConflictPolicy: ['ask', 'overwrite', 'skip', 'rename'].includes(input.uploadConflictPolicy ?? '')
+      ? input.uploadConflictPolicy as SafeSettings['uploadConflictPolicy']
+      : defaultSafeSettings.uploadConflictPolicy,
+    defaultDownloadDirectory: normalizeOptionalLocalPath(input.defaultDownloadDirectory),
+    autoOpenDownloadFolder: input.autoOpenDownloadFolder !== false,
+    mcpEnabled: input.mcpEnabled === true,
+    mcpPort: clampNumber(input.mcpPort, 1024, 65_535, defaultSafeSettings.mcpPort),
     terminalLogging: input.terminalLogging === true,
     compactComposerOpen: input.compactComposerOpen === true,
     backupSchedule: ['off', 'daily', 'weekly'].includes(input.backupSchedule ?? '')
@@ -153,6 +165,10 @@ function clampNumber(value: number | undefined, min: number, max: number, fallba
 }
 
 function normalizeExternalEditorPath(value: string | null | undefined): string | null {
+  return normalizeOptionalLocalPath(value);
+}
+
+function normalizeOptionalLocalPath(value: string | null | undefined): string | null {
   if (typeof value !== 'string') return null;
   const path = value.trim();
   return path && path.length <= 4_096 && !path.includes('\0') ? path : null;

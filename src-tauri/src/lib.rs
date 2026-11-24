@@ -7,6 +7,7 @@ mod external_launch;
 mod key_proxy_library;
 mod known_hosts;
 mod local_terminal;
+mod mcp_diagnostics;
 mod path_bookmarks;
 mod profile_export;
 mod remote_jobs;
@@ -39,17 +40,17 @@ use filex_contracts::{
     AppError, AuthenticationMethod, CommandSnippet, ConnectionProfile, ConnectionState,
     CreateConnectionProfileInput, CreateLocalTunnelInput, CreateTransferInput,
     CreateTunnelRuleInput, CredentialStoreStatus, DirectorySyncPreview, DockerContainerAction,
-    DockerLogsSnapshot, DockerSnapshot, EnvironmentKind, FileChecksumComparison, HostKeyChallenge,
-    HostTrustEvaluation, HostTrustRecord, ImportKnownHostsInput, ImportKnownHostsResult,
-    KnownHostsImportPreview, LocalDirectoryListing, LocalFileEntry, LocalTextPreview,
-    LocalTextSaveResult, MaintenanceArtifact, NetworkSnapshot, OperationResult, OpsCategory,
-    OpsSnapshot, ProcessSignal, ProcessSnapshot, ProcessSortBy, QuickConnectInput,
-    RecordHostTrustInput, RemoteDirectoryListing, RemoteJobOutputChunk, RemoteJobSummary,
-    RemotePermissionUpdateResult, RemoteState, RemoteTextPreview, RemoteTextSaveResult,
-    RouteTraceResult, RuntimePaths, SafeSettings, SaveCommandSnippetInput,
+    DockerLogsSnapshot, DockerSnapshot, DownloadRemoteArchiveInput, EnvironmentKind,
+    FileChecksumComparison, HostKeyChallenge, HostTrustEvaluation, HostTrustRecord,
+    ImportKnownHostsInput, ImportKnownHostsResult, KnownHostsImportPreview, LocalDirectoryListing,
+    LocalFileEntry, LocalTextPreview, LocalTextSaveResult, MaintenanceArtifact, NetworkSnapshot,
+    OperationResult, OpsCategory, OpsSnapshot, ProcessSignal, ProcessSnapshot, ProcessSortBy,
+    QuickConnectInput, RecordHostTrustInput, RemoteDirectoryListing, RemoteJobOutputChunk,
+    RemoteJobSummary, RemotePermissionUpdateResult, RemoteState, RemoteTextPreview,
+    RemoteTextSaveResult, RouteTraceResult, RuntimePaths, SafeSettings, SaveCommandSnippetInput,
     SessionConnectionProgress, SessionSummary, SshConfigImportPreview, StartRemoteJobInput,
-    SystemMonitorSnapshot, TransferState, TransferTask, TunnelRule, TunnelSummary,
-    UpdateConnectionProfileInput, UpdateRemotePermissionsInput, UpdateStatus,
+    SystemMonitorSnapshot, TransferDirection, TransferState, TransferTask, TunnelRule,
+    TunnelSummary, UpdateConnectionProfileInput, UpdateRemotePermissionsInput, UpdateStatus,
     UpdateTunnelRuleInput,
 };
 use filex_core::{
@@ -62,6 +63,8 @@ use filex_local_terminal::LocalTerminalRuntime;
 use filex_ssh::{TerminalOutput, TerminalOutputEvent};
 use filex_storage::SqliteProfileRepository;
 use futures_util::StreamExt;
+pub use mcp_diagnostics::run_mcp_stdio_bridge;
+use mcp_diagnostics::{McpDiagnosticsRuntime, TerminalOutputRing};
 use remote_jobs::RemoteJobRuntime;
 use serde::Serialize;
 use session_runtime::{CopyOperationControl, SessionRuntime};
@@ -2822,13 +2825,20 @@ fn load_safe_settings(settings: State<'_, SettingsService>) -> OperationResult<S
 }
 
 #[tauri::command]
-fn save_safe_settings(
+async fn save_safe_settings(
+    app: tauri::AppHandle,
     settings: State<'_, SettingsService>,
+    mcp: State<'_, McpDiagnosticsRuntime>,
     input: SafeSettings,
-) -> OperationResult<SafeSettings> {
+) -> Result<OperationResult<SafeSettings>, ()> {
     match settings.save(input) {
-        Ok(settings) => OperationResult::success(settings),
-        Err(error) => OperationResult::failure(error),
+        Ok(saved) => {
+            let _ = mcp
+                .sync_config(app, saved.mcp_enabled, saved.mcp_port)
+                .await;
+            Ok(OperationResult::success(saved))
+        }
+        Err(error) => Ok(OperationResult::failure(error)),
     }
 }
 
@@ -3121,11 +3131,8 @@ fn credential_store_status(
 fn runtime_paths(app: tauri::AppHandle) -> OperationResult<RuntimePaths> {
     match app.path().app_data_dir() {
         Ok(data_directory) => OperationResult::success(RuntimePaths {
-            backup_directory: data_directory
-                .join("backups")
-                .to_string_lossy()
-                .into_owned(),
-            data_directory: data_directory.to_string_lossy().into_owned(),
+            backup_directory: normalize_local_display_path(&data_directory.join("backups")),
+            data_directory: normalize_local_display_path(&data_directory),
         }),
         Err(_) => OperationResult::failure(maintenance_error("RUNTIME_DATA_DIRECTORY_UNAVAILABLE")),
     }
@@ -3748,6 +3755,7 @@ fn spawn_terminal_output(app: tauri::AppHandle, session_id: String, mut output: 
             if let Some(data) = payload.data.as_deref() {
                 app.state::<TerminalLogRuntime>()
                     .append(&app, &session_id, data);
+                app.state::<TerminalOutputRing>().append(&session_id, data);
             }
             let _ = app.emit("terminal-output", payload);
             if terminal_closed {
@@ -3761,6 +3769,7 @@ fn spawn_terminal_output(app: tauri::AppHandle, session_id: String, mut output: 
                     .state::<TerminalLogRuntime>()
                     .stop(Some(&app), &session_id)
                     .await;
+                app.state::<TerminalOutputRing>().remove(&session_id);
                 break;
             }
         }
@@ -3873,7 +3882,7 @@ fn list_local_directory(
                 };
                 files.push(LocalFileEntry {
                     name: entry.file_name().to_string_lossy().into_owned(),
-                    path: entry.path().to_string_lossy().into_owned(),
+                    path: normalize_local_display_path(&entry.path()),
                     is_directory: file_type.is_dir(),
                     is_symlink: file_type.is_symlink(),
                     size: file_type.is_file().then_some(metadata.len()),
@@ -3897,15 +3906,44 @@ fn list_local_directory(
     });
     let truncated = entries.len() > LOCAL_DIRECTORY_ENTRY_LIMIT;
     entries.truncate(LOCAL_DIRECTORY_ENTRY_LIMIT);
-    let parent_path = path
-        .parent()
-        .map(|parent| parent.to_string_lossy().into_owned());
+    let parent_path = path.parent().map(normalize_local_display_path);
     OperationResult::success(LocalDirectoryListing {
-        path: path.to_string_lossy().into_owned(),
+        path: normalize_local_display_path(&path),
         parent_path,
         entries,
         truncated,
     })
+}
+
+pub(crate) fn normalize_local_display_path(path: &std::path::Path) -> String {
+    clipboard_files::strip_windows_verbatim_prefix(&path.to_string_lossy())
+}
+
+#[tauri::command]
+fn get_default_download_directory(app: tauri::AppHandle) -> OperationResult<String> {
+    let candidate = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().home_dir())
+        .map_err(|_| local_directory_error());
+    let directory = match candidate {
+        Ok(dir) => fs::canonicalize(&dir).unwrap_or(dir),
+        Err(error) => return OperationResult::failure(error),
+    };
+    OperationResult::success(normalize_local_display_path(&directory))
+}
+
+#[tauri::command]
+fn open_local_directory(path: String) -> OperationResult<()> {
+    let canonical = match canonical_local_directory(&path) {
+        Ok(dir) => dir,
+        Err(error) => return OperationResult::failure(error),
+    };
+    let display = std::path::PathBuf::from(normalize_local_display_path(&canonical));
+    match external_editor::launch_editor(None, &display) {
+        Ok(()) => OperationResult::success(()),
+        Err(_) => OperationResult::failure(external_open_launch_error()),
+    }
 }
 
 #[tauri::command]
@@ -3937,7 +3975,7 @@ fn inspect_local_entry(path: String) -> OperationResult<LocalFileEntry> {
     };
     OperationResult::success(LocalFileEntry {
         name: name.to_owned(),
-        path: entry_path.to_string_lossy().into_owned(),
+        path: normalize_local_display_path(&entry_path),
         is_directory: file_type.is_dir(),
         is_symlink: file_type.is_symlink(),
         size: file_type.is_file().then_some(metadata.len()),
@@ -4034,7 +4072,7 @@ fn preview_local_text(path: String, encoding: Option<String>) -> OperationResult
         }
     };
     OperationResult::success(LocalTextPreview {
-        path: entry_path.to_string_lossy().into_owned(),
+        path: normalize_local_display_path(&entry_path),
         bytes: u32::try_from(content.len()).unwrap_or(LOCAL_TEXT_MAX_BYTES),
         revision: session_runtime::text_revision(content.as_bytes()),
         content,
@@ -4062,7 +4100,8 @@ async fn open_local_file_externally(
         Ok(editor) => editor,
         Err(error) => return OperationResult::failure(error),
     };
-    match external_editor::launch_editor(editor.as_deref(), &entry_path) {
+    let launch_target = std::path::PathBuf::from(normalize_local_display_path(&entry_path));
+    match external_editor::launch_editor(editor.as_deref(), &launch_target) {
         Ok(()) => OperationResult::success(()),
         Err(_) => OperationResult::failure(external_open_launch_error()),
     }
@@ -4162,7 +4201,7 @@ fn save_local_text(
     }
     let _ = fs::remove_file(&backup_path);
     OperationResult::success(LocalTextSaveResult {
-        path: source.to_string_lossy().into_owned(),
+        path: normalize_local_display_path(&source),
         bytes: u32::try_from(content.len()).unwrap_or(LOCAL_TEXT_MAX_BYTES),
         revision: session_runtime::text_revision(content.as_bytes()),
     })
@@ -5659,6 +5698,110 @@ fn enqueue_transfer(
 }
 
 #[tauri::command]
+fn download_remote_archive(
+    app: tauri::AppHandle,
+    sessions: State<'_, SessionRuntime>,
+    transfers: State<'_, TransferService>,
+    input: DownloadRemoteArchiveInput,
+) -> OperationResult<TransferTask> {
+    let summary = match sessions.summary(&input.session_id) {
+        Ok(summary) if summary.state == filex_contracts::SessionState::Connected => summary,
+        _ => return OperationResult::failure(transfer_session_unavailable_error()),
+    };
+    if let Err(error) = validate_local_basename(&input.archive_name) {
+        return OperationResult::failure(error);
+    }
+    if let Err(error) =
+        session_runtime::build_remote_tar_command(&input.remote_directory, &input.entry_names)
+    {
+        return OperationResult::failure(error);
+    }
+    let local_dir = match canonical_local_directory(&input.local_directory) {
+        Ok(dir) => dir,
+        Err(error) => return OperationResult::failure(error),
+    };
+    let local_target = normalize_local_display_path(&local_dir.join(input.archive_name.trim()));
+    let remote_label = format!(
+        "{} ({} items)",
+        input.remote_directory.trim(),
+        input.entry_names.len()
+    );
+    let task = match transfers.enqueue(CreateTransferInput {
+        profile_id: summary.profile_id,
+        direction: TransferDirection::Download,
+        local_path: local_target,
+        remote_path: remote_label,
+        destination_profile_id: None,
+        destination_remote_path: None,
+        conflict_policy: input.conflict_policy,
+        total_bytes: None,
+    }) {
+        Ok(task) => task,
+        Err(error) => return OperationResult::failure(error),
+    };
+
+    if let Err(error) =
+        sessions.prepare_transfer_with_destination(&task.id, &input.session_id, None)
+    {
+        return OperationResult::failure(error);
+    }
+    let running = match transfers.start_with_destination(&task.id, &input.session_id, None) {
+        Ok(running) => running,
+        Err(error) => {
+            let _ = sessions.finish_transfer(&task.id);
+            return OperationResult::failure(error);
+        }
+    };
+
+    let worker_task = running.clone();
+    let session_id = input.session_id;
+    let remote_directory = input.remote_directory;
+    let entry_names = input.entry_names;
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let progress_app = worker_app.clone();
+        let progress_task_id = worker_task.id.clone();
+        let handle_event = move |event: transfer_resume::TransferRuntimeEvent| {
+            let transfers = progress_app.state::<TransferService>();
+            if let transfer_resume::TransferRuntimeEvent::Progress {
+                bytes_transferred,
+                total_bytes,
+            } = event
+            {
+                if let Some(total_bytes) = total_bytes {
+                    let _ = transfers.set_total_bytes(&progress_task_id, total_bytes);
+                }
+                if let Ok(task) = transfers.progress(&progress_task_id, bytes_transferred) {
+                    let _ = progress_app.emit("transfer-updated", task);
+                }
+            }
+        };
+        let result = worker_app
+            .state::<SessionRuntime>()
+            .execute_remote_archive_download(
+                &session_id,
+                &remote_directory,
+                &entry_names,
+                &worker_task,
+                handle_event,
+            )
+            .await;
+        let transfers = worker_app.state::<TransferService>();
+        let sessions = worker_app.state::<SessionRuntime>();
+        let updated = match result {
+            Ok(bytes) => transfers.complete(&worker_task.id, bytes),
+            Err(error) => transfers.fail(&worker_task.id, error),
+        };
+        let _ = sessions.finish_transfer(&worker_task.id);
+        if let Ok(task) = updated {
+            let _ = worker_app.emit("transfer-updated", task);
+        }
+    });
+
+    OperationResult::success(running)
+}
+
+#[tauri::command]
 async fn resume_transfer(
     app: tauri::AppHandle,
     sessions: State<'_, SessionRuntime>,
@@ -6060,6 +6203,9 @@ fn schedule_graceful_exit<R: tauri::Runtime>(
         if let Some(logs) = app.try_state::<TerminalLogRuntime>() {
             logs.shutdown().await;
         }
+        if let Some(mcp) = app.try_state::<McpDiagnosticsRuntime>() {
+            mcp.shutdown().await;
+        }
         shutdown_state.store(APP_SHUTDOWN_COMPLETE, Ordering::Release);
         app.exit(exit_code);
     });
@@ -6122,7 +6268,24 @@ pub fn run() {
             app.manage(CommandHistoryService::new(repository.clone()));
             app.manage(PathBookmarkService::new(repository.clone()));
             app.manage(HostTrustService::new(repository.clone()));
-            app.manage(SettingsService::new(repository.clone()));
+            let settings_service = SettingsService::new(repository.clone());
+            let initial_settings = settings_service
+                .load()
+                .unwrap_or_else(|_| filex_core::default_safe_settings());
+            app.manage(settings_service);
+            app.manage(TerminalOutputRing::default());
+            let mcp_runtime = McpDiagnosticsRuntime::new(data_directory.clone());
+            app.manage(mcp_runtime);
+            if initial_settings.mcp_enabled {
+                let mcp_app = app.handle().clone();
+                let mcp_port = initial_settings.mcp_port;
+                tauri::async_runtime::spawn(async move {
+                    let _ = mcp_app
+                        .state::<McpDiagnosticsRuntime>()
+                        .sync_config(mcp_app.clone(), true, mcp_port)
+                        .await;
+                });
+            }
             let transfers = TransferService::new(Arc::new(
                 transient_transfers::HybridTransferRepository::new(repository.clone()),
             ));
@@ -6256,6 +6419,8 @@ pub fn run() {
             resize_terminal,
             list_remote_directory,
             list_local_directory,
+            get_default_download_directory,
+            open_local_directory,
             inspect_local_entry,
             clipboard_files::commands::read_clipboard_file_paths,
             clipboard_files::commands::write_clipboard_file_paths,
@@ -6322,12 +6487,15 @@ pub fn run() {
             elevated_access::commands::elevated_save_text,
             list_transfers,
             enqueue_transfer,
+            download_remote_archive,
             resume_transfer,
             pause_transfer,
             cancel_transfer,
             retry_transfer,
             reset_transfer_staging,
             clear_completed_transfers,
+            mcp_diagnostics::get_mcp_server_status,
+            mcp_diagnostics::regenerate_mcp_token,
             start_remote_job,
             list_remote_jobs,
             read_remote_job_output,

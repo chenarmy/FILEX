@@ -25,6 +25,7 @@ import {
 } from 'lucide-vue-next';
 import { hasCapability } from '@/domain/sessionCapabilities';
 import { canResumeTransferTask, resumeStateLabelKey } from '@/domain/transferResume';
+import { formatTransferBytes, formatTransferSpeed } from '@/domain/transferSpeed';
 import { t } from '@/i18n';
 import { type ConsoleEvent, useEventsStore } from '@/stores/events';
 import { isRemoteJobActiveState, useRemoteJobsStore } from '@/stores/remoteJobs';
@@ -193,6 +194,20 @@ function transferSecondaryLabel(task: TransferTask): string {
   return task.direction === 'upload' ? task.remotePath : task.localPath;
 }
 
+function transferSpeedText(task: TransferTask): string {
+  const rate = transfers.speedForTask(task);
+  if (rate === null) return '';
+  return formatTransferSpeed(rate);
+}
+
+function transferBytesText(task: TransferTask): string {
+  const done = formatTransferBytes(task.bytesTransferred);
+  if (task.totalBytes !== null && task.totalBytes > 0) {
+    return `${done} / ${formatTransferBytes(task.totalBytes)}`;
+  }
+  return done;
+}
+
 function jobSeverity(state: RemoteJobState): UnifiedActivityRow['severity'] {
   if (state === 'completed') return 'success';
   if (state === 'running' || state === 'stopping' || state === 'queued') return 'running';
@@ -227,6 +242,7 @@ const unifiedRows = computed<UnifiedActivityRow[]>(() => {
   const items: UnifiedActivityRow[] = [];
 
   for (const task of transfers.tasks) {
+    const speed = transferSpeedText(task);
     items.push({
       uid: `transfer:${task.id}`,
       kind: 'transfer',
@@ -237,7 +253,9 @@ const unifiedRows = computed<UnifiedActivityRow[]>(() => {
       hostLabel: task.direction === 'remote_to_remote'
         ? `${profileDisplayName(task.profileId)} → ${profileDisplayName(task.destinationProfileId)}`
         : profileDisplayName(task.profileId),
-      stateLabel: transferStateText(task.state),
+      stateLabel: task.state === 'running' && speed
+        ? `${transferStateText(task.state)} · ${speed}`
+        : transferStateText(task.state),
       severity: transferSeverity(task.state),
       durationText: formatDurationMs(task.createdAtMs, ['completed', 'failed', 'cancelled'].includes(task.state) ? task.updatedAtMs : null),
       transfer: task,
@@ -401,7 +419,12 @@ function resizeByKeyboard(event: KeyboardEvent): void {
 </script>
 
 <template>
-  <section class="task-drawer">
+  <section
+    class="task-drawer task-floating-window"
+    role="region"
+    :aria-label="t('tasks.activityLabel')"
+    @keydown.esc.stop="settings.value.taskDrawerOpen = false"
+  >
     <button
       class="task-resizer"
       type="button"
@@ -583,6 +606,8 @@ function resizeByKeyboard(event: KeyboardEvent): void {
           <span class="transfer-progress">
             <small class="transfer-status-line">
               <span>{{ transferStateText(task.state) }}</span>
+              <span class="mono transfer-bytes-label">{{ transferBytesText(task) }}</span>
+              <span v-if="transferSpeedText(task)" class="mono transfer-speed-badge">{{ transferSpeedText(task) }}</span>
               <span v-if="task.direction === 'remote_to_remote'" class="transfer-relay-badge">{{ t('transfer.relayBadge') }}</span>
               <span v-if="resumeStateText(task.resumeState)" class="transfer-resume-badge" :data-resume-state="task.resumeState">{{ resumeStateText(task.resumeState) }}</span>
               <template v-if="task.error"> · {{ t(task.error.messageKey as Parameters<typeof t>[0]) }}</template>
@@ -787,6 +812,7 @@ function resizeByKeyboard(event: KeyboardEvent): void {
           <div class="activity-detail-meta">
             <span><strong>{{ transferPrimaryLabel(inspectedTransfer) }}</strong> ({{ transferStateText(inspectedTransfer.state) }})</span>
             <small>{{ transferSecondaryLabel(inspectedTransfer) }}</small>
+            <small class="mono">{{ transferBytesText(inspectedTransfer) }}<template v-if="transferSpeedText(inspectedTransfer)"> · {{ transferSpeedText(inspectedTransfer) }}</template></small>
             <small v-if="inspectedTransfer.stagingPath">{{ inspectedTransfer.stagingPath }}</small>
             <small v-if="inspectedTransfer.error" class="activity-detail-error">{{ t(inspectedTransfer.error.messageKey as Parameters<typeof t>[0]) }} ({{ inspectedTransfer.error.code }})</small>
           </div>

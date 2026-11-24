@@ -1,4 +1,5 @@
 .workbench-shell {
+  position: relative;
   display: grid;
   grid-template-rows: 40px minmax(0, 1fr) 24px;
   width: 100%;
@@ -7,7 +8,7 @@
 }
 
 .workbench-shell.task-open {
-  grid-template-rows: 40px minmax(0, 1fr) var(--task-drawer-height, 180px) 24px;
+  grid-template-rows: 40px minmax(0, 1fr) 24px;
 }
 
 .context-bar,
@@ -3155,11 +3156,67 @@
 }
 
 .task-drawer {
-  position: relative;
+  position: fixed;
+  inset-inline-end: 12px;
+  inset-block-end: 32px;
+  z-index: 35;
   display: grid;
   grid-template-rows: 32px minmax(0, 1fr);
-  background: hsl(var(--card));
-  border-top: 1px solid hsl(var(--border-subtle));
+  width: min(640px, calc(100vw - 24px));
+  height: min(var(--task-drawer-height, 260px), calc(100vh - 96px));
+  min-height: 160px;
+  background: hsl(var(--popover));
+  border: 1px solid hsl(var(--border-strong));
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-overlay);
+  overflow: hidden;
+}
+
+.transfer-speed-badge {
+  color: hsl(var(--primary));
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.transfer-bytes-label {
+  color: hsl(var(--muted-foreground));
+  font-variant-numeric: tabular-nums;
+}
+
+.file-row-checkbox {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: hsl(var(--primary));
+  cursor: pointer;
+}
+
+.file-inline-rename-input {
+  flex: 1 1 auto;
+  min-width: 60px;
+  height: 20px;
+  padding: 0 4px;
+  border: 1px solid hsl(var(--primary));
+  border-radius: 2px;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-size: inherit;
+  outline: none;
+}
+
+.file-selection-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding-inline: 8px 2px;
+  border: 1px solid hsl(var(--primary) / 0.4);
+  border-radius: var(--radius-control);
+  background: hsl(var(--primary) / 0.12);
+  color: hsl(var(--primary));
+  font-size: 0.7143rem;
+  font-weight: 600;
 }
 
 .task-resizer {

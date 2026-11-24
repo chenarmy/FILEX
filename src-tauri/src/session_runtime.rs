@@ -1314,7 +1314,7 @@ impl SessionRuntime {
 
     pub async fn cancel_attempt(&self, session_id: &str) -> Result<(), AppError> {
         self.abort_route(session_id).await;
-        self.remove_quick_profile(session_id)?;
+        let _ = self.remove_quick_profile(session_id)?;
         self.machines
             .lock()
             .map_err(|_| session_lock_error())?
@@ -1366,20 +1366,35 @@ impl SessionRuntime {
             .remove(session_id))
     }
 
-    fn remove_quick_secret(&self, session_id: &str) -> Result<(), AppError> {
-        self.quick_secrets
+    fn remove_quick_secret(&self, session_id: &str) -> Result<bool, AppError> {
+        Ok(self
+            .quick_secrets
             .lock()
             .map_err(|_| session_lock_error())?
-            .remove(session_id);
-        Ok(())
+            .remove(session_id)
+            .is_some())
     }
 
-    fn remove_quick_profile(&self, session_id: &str) -> Result<(), AppError> {
-        self.quick_profiles
+    fn remove_quick_profile(&self, session_id: &str) -> Result<bool, AppError> {
+        let removed_profile = self
+            .quick_profiles
             .lock()
             .map_err(|_| session_lock_error())?
-            .remove(session_id);
-        self.remove_quick_secret(session_id)
+            .remove(session_id)
+            .is_some();
+        let removed_secret = self.remove_quick_secret(session_id)?;
+        Ok(removed_profile || removed_secret)
+    }
+
+    async fn purge_quick_session_records(&self, session_id: &str) {
+        self.routes.lock().await.remove(session_id);
+        self.probed_handles.lock().await.remove(session_id);
+        if let Ok(mut keys) = self.presented_keys.lock() {
+            keys.remove(session_id);
+        }
+        if let Ok(mut machines) = self.machines.lock() {
+            machines.remove(session_id);
+        }
     }
 
     pub async fn duplicate_connected_session(
@@ -1873,7 +1888,7 @@ impl SessionRuntime {
     pub async fn disconnect(&self, session_id: &str) -> Result<SessionSummary, AppError> {
         self.elevated_access.invalidate_session(session_id);
         self.transition(session_id, SessionState::Disconnecting)?;
-        self.remove_quick_secret(session_id)?;
+        let was_quick = self.remove_quick_profile(session_id)?;
         self.invalidate_process_snapshot(session_id)?;
         self.cancel_session_transfers(session_id)?;
         self.stop_session_tunnels(session_id).await?;
@@ -1934,11 +1949,18 @@ impl SessionRuntime {
             }
             if let Some(app_error) = first_error {
                 self.fail(session_id, app_error.clone())?;
+                if was_quick {
+                    self.purge_quick_session_records(session_id).await;
+                }
                 return Err(app_error);
             }
             self.mark_disconnected_remote_tunnels(session_id).await?;
         }
-        self.transition(session_id, SessionState::Disconnected)
+        let summary = self.transition(session_id, SessionState::Disconnected)?;
+        if was_quick {
+            self.purge_quick_session_records(session_id).await;
+        }
+        Ok(summary)
     }
 
     pub async fn shutdown(&self) -> Result<(), AppError> {
@@ -2121,13 +2143,18 @@ impl SessionRuntime {
                 let _ = tokio::time::timeout(Duration::from_secs(2), upstream.disconnect()).await;
             }
         }
-        self.remove_quick_secret(session_id)?;
+        let was_quick = self.remove_quick_profile(session_id)?;
         let summary = self.summary(session_id)?;
-        if summary.state == SessionState::Connected {
+        let final_summary = if summary.state == SessionState::Connected {
             self.transition(session_id, SessionState::Disconnecting)?;
-            return self.transition(session_id, SessionState::Disconnected);
+            self.transition(session_id, SessionState::Disconnected)?
+        } else {
+            summary
+        };
+        if was_quick {
+            self.purge_quick_session_records(session_id).await;
         }
-        Ok(summary)
+        Ok(final_summary)
     }
 
     pub async fn list_remote_directory(
@@ -3500,6 +3527,181 @@ impl SessionRuntime {
         result
     }
 
+    pub async fn execute_remote_archive_download<F>(
+        &self,
+        session_id: &str,
+        remote_directory: &str,
+        entry_names: &[String],
+        task: &TransferTask,
+        on_event: F,
+    ) -> Result<u64, AppError>
+    where
+        F: Fn(TransferRuntimeEvent) + Send + Sync,
+    {
+        if task.direction != TransferDirection::Download {
+            return Err(transfer_control_transition_error());
+        }
+        let command = build_remote_tar_command(remote_directory, entry_names)?;
+        let control = self
+            .transfer_controls
+            .lock()
+            .map_err(|_| session_lock_error())?
+            .get(&task.id)
+            .cloned()
+            .filter(|control| control.matches_sessions(session_id, None))
+            .ok_or_else(transfer_control_transition_error)?;
+
+        let result = async {
+            let target_path = std::path::PathBuf::from(&task.local_path);
+            let exists = tokio::fs::try_exists(&target_path).await.unwrap_or(false);
+            let destination_path = if exists {
+                match task.conflict_policy {
+                    ConflictPolicy::Ask => {
+                        return Err(transfer_io_error(
+                            "TRANSFER_CONFLICT",
+                            "errors.transferConflict",
+                        ));
+                    }
+                    ConflictPolicy::Skip => return Ok(0),
+                    ConflictPolicy::Rename => unique_local_path(&target_path).await?,
+                    ConflictPolicy::Overwrite => target_path,
+                }
+            } else {
+                target_path
+            };
+            let parent = destination_path.parent().ok_or_else(|| {
+                transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed")
+            })?;
+            tokio::fs::create_dir_all(parent).await.map_err(|_| {
+                transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed")
+            })?;
+            let staging_path = parent.join(format!(
+                ".filex-archive-{}.part",
+                uuid::Uuid::new_v4().simple()
+            ));
+
+            let session = {
+                let connections = self.connections.lock().await;
+                connections
+                    .get(session_id)
+                    .map(|connection| connection.session.clone())
+                    .ok_or_else(session_not_found_error)?
+            };
+
+            let (exec_control, mut exec_output) = session
+                .open_exec_stream(&command)
+                .await
+                .map_err(|error| ssh_error(&error))?;
+
+            let mut local_file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&staging_path)
+                .await
+                .map_err(|_| {
+                    transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed")
+                })?;
+
+            const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+            let mut total_written = 0_u64;
+            let mut reported_bytes = 0_u64;
+            let mut last_reported_at = Instant::now();
+            let mut exit_code: Option<u32> = None;
+
+            let stream_result: Result<(), AppError> = async {
+                loop {
+                    control.wait_until_running().await?;
+                    let event = tokio::select! {
+                        event = exec_output.next() => event,
+                        () = control.cancellation.cancelled() => {
+                            let _ = exec_control.signal_kill().await;
+                            let _ = exec_control.close().await;
+                            return Err(control.cancellation_error());
+                        }
+                    };
+                    match event {
+                        filex_ssh::ExecStreamEvent::Stdout(chunk) => {
+                            if !chunk.is_empty() {
+                                local_file.write_all(&chunk).await.map_err(|_| {
+                                    transfer_io_error(
+                                        "LOCAL_FILE_WRITE_FAILED",
+                                        "errors.localFileWriteFailed",
+                                    )
+                                })?;
+                                total_written = total_written.saturating_add(chunk.len() as u64);
+                                control.set_bytes_transferred(total_written);
+                                if last_reported_at.elapsed() >= PROGRESS_INTERVAL {
+                                    on_event(TransferRuntimeEvent::Progress {
+                                        bytes_transferred: total_written,
+                                        total_bytes: None,
+                                    });
+                                    reported_bytes = total_written;
+                                    last_reported_at = Instant::now();
+                                }
+                            }
+                        }
+                        filex_ssh::ExecStreamEvent::Stderr(_) => {}
+                        filex_ssh::ExecStreamEvent::ExitStatus(code) => {
+                            exit_code = Some(code);
+                        }
+                        filex_ssh::ExecStreamEvent::ExitSignal { .. } => {
+                            exit_code = Some(1);
+                        }
+                        filex_ssh::ExecStreamEvent::Eof => {}
+                        filex_ssh::ExecStreamEvent::Closed => break,
+                    }
+                }
+                local_file.flush().await.map_err(|_| {
+                    transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed")
+                })?;
+                local_file.sync_all().await.map_err(|_| {
+                    transfer_io_error("LOCAL_FILE_WRITE_FAILED", "errors.localFileWriteFailed")
+                })?;
+                if exit_code.unwrap_or(1) != 0 {
+                    return Err(transfer_io_error(
+                        "REMOTE_ARCHIVE_FAILED",
+                        "errors.remoteArchiveFailed",
+                    ));
+                }
+                Ok(())
+            }
+            .await;
+
+            drop(local_file);
+            if let Err(error) = stream_result {
+                let _ = tokio::fs::remove_file(&staging_path).await;
+                return Err(error);
+            }
+
+            if total_written != reported_bytes {
+                control.set_bytes_transferred(total_written);
+                on_event(TransferRuntimeEvent::Progress {
+                    bytes_transferred: total_written,
+                    total_bytes: Some(total_written),
+                });
+            }
+
+            if destination_path.exists() && task.conflict_policy == ConflictPolicy::Overwrite {
+                let _ = tokio::fs::remove_file(&destination_path).await;
+            }
+            if tokio::fs::rename(&staging_path, &destination_path)
+                .await
+                .is_err()
+            {
+                let _ = tokio::fs::remove_file(&staging_path).await;
+                return Err(transfer_io_error(
+                    "LOCAL_FILE_WRITE_FAILED",
+                    "errors.localFileWriteFailed",
+                ));
+            }
+            Ok(total_written)
+        }
+        .await;
+        control.finish()?;
+        result
+    }
+
     pub async fn execute_remote_relay_transfer<F>(
         &self,
         session_id: &str,
@@ -4861,7 +5063,7 @@ impl SessionRuntime {
 
     fn fail(&self, session_id: &str, error: AppError) -> Result<SessionSummary, AppError> {
         self.elevated_access.invalidate_session(session_id);
-        self.remove_quick_secret(session_id)?;
+        let _ = self.remove_quick_secret(session_id)?;
         let summary = self
             .machines
             .lock()
@@ -9601,6 +9803,52 @@ async fn unique_local_path(original: &std::path::Path) -> Result<std::path::Path
         "TRANSFER_RENAME_EXHAUSTED",
         "errors.transferConflict",
     ))
+}
+
+pub(crate) fn build_remote_tar_command(
+    remote_directory: &str,
+    entry_names: &[String],
+) -> Result<String, AppError> {
+    const MAX_ARCHIVE_ENTRIES: usize = 256;
+    let dir = remote_directory.trim();
+    if dir.is_empty() || dir.len() > 4_096 || dir.contains('\0') {
+        return Err(transfer_io_error(
+            "REMOTE_ARCHIVE_INVALID_PATH",
+            "errors.remoteArchiveFailed",
+        ));
+    }
+    if entry_names.is_empty() || entry_names.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(transfer_io_error(
+            "REMOTE_ARCHIVE_INVALID_ENTRIES",
+            "errors.remoteArchiveFailed",
+        ));
+    }
+    let mut parts = Vec::with_capacity(entry_names.len() + 4);
+    parts.push("tar -czf - -C".to_owned());
+    parts.push(posix_single_quote(dir));
+    parts.push("--".to_owned());
+    for name in entry_names {
+        let trimmed = name.trim();
+        if trimmed.is_empty()
+            || trimmed.len() > 255
+            || trimmed == "."
+            || trimmed == ".."
+            || trimmed.contains('/')
+            || trimmed.contains('\\')
+            || trimmed.contains('\0')
+        {
+            return Err(transfer_io_error(
+                "REMOTE_ARCHIVE_INVALID_ENTRIES",
+                "errors.remoteArchiveFailed",
+            ));
+        }
+        parts.push(posix_single_quote(trimmed));
+    }
+    Ok(parts.join(" "))
+}
+
+fn posix_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 pub(crate) fn directory_tree_limit_error() -> AppError {

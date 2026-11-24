@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.1.20] - 2026-11-24
+
+### Added
+
+- **MCP Terminal Diagnostics Server** (`src-tauri/src/mcp_diagnostics.rs`, `src/api/domain/mcpApi.ts`, ADR-0033): opt-in loopback-only JSON-RPC 2.0 MCP endpoint (`127.0.0.1:<port>/mcp` with Bearer token authentication and `filex --mcp` stdio bridge) exposing read-only terminal sessions, terminal output, host metrics, process/network snapshots, SFTP directory listing/file reads, and strictly allowlisted read-only diagnostic commands (`run_readonly_diagnostic`) to external AI/developer tools, configurable under **Settings → MCP Diagnostics**.
+- **Remote File Multi-Selection, Batch Operations & Archive Download** (`src/domain/fileSelection.ts`, `FileBrowserPanel.vue`, `FileContextMenu.vue`, `session_runtime.rs`):
+  - Added click, `Ctrl/Cmd+Click`, `Shift+Click`, and `Ctrl/Cmd+A` multi-selection across remote files, supporting multi-file download, batch permissions (`chmod`), and batch delete with target-count confirmation.
+  - Added **Compress & Download** (`create_remote_archive`): packages multi-selected remote files/folders on the host into a bounded `.tar.gz` archive (with automatic remote cleanup after transfer) and downloads it locally.
+  - Added configurable **Default download directory** (`defaultDownloadDirectory`) and **Auto-open folder after download** (`autoOpenDownloadFolder`, enabled by default, backed by `open_local_directory`), so single, batch, and archive downloads land cleanly in the configured folder and open automatically in the system file manager.
+- **Windows-style `F2` Rename** (`useFilePaneKeyboard.ts`, `FileBrowserPanel.vue`): pressing `F2` in either the local or remote file pane triggers rename for the selected entry.
+- **Live Transfer Speed Display** (`src/domain/transferSpeed.ts`, `transfers.ts`, `TaskDrawer.vue`, `FileBrowserPanel.vue`): computes and displays real-time upload/download throughput with human-readable units (`B/s`, `KB/s`, `MB/s`, `GB/s`) on active transfer tasks and in the file browser footer.
+
+### Changed
+
+- **Default Upload Conflict Policy** (`safeSettingsRepository.ts`, `useFileUploadQueue.ts`, `SettingsDialog.vue`): file uploads now default to `overwrite` and can be configured in **Settings → Workspace** (`overwrite`, `ask`, `rename`, `skip`).
+- **Auto-remove Disconnected Temporary Connections** (`session_runtime.rs`, `sessions.ts`): temporary Quick Connect and external-launch sessions automatically close their tab and clear runtime temporary state upon disconnect or remote closure while keeping duplicated sibling tabs intact until the last tab disconnects.
+- **Compact Floating Activity Window** (`TaskDrawer.vue`, `workbench.css`): operation events and transfer tasks no longer auto-open on background actions and now open as a compact bottom-right floating window instead of shifting the main terminal/workbench layout.
+
+### Fixed
+
+- **Terminal Double-Copy** (`TerminalPane.vue`, `terminalInteractions.ts`): eliminated duplicate clipboard writes by handling `Ctrl/Cmd+C` / `Ctrl+Shift+C` through xterm's custom key event handler without triggering a second DOM `keydown` copy pass.
+- **Windows Verbatim Path Prefix** (`crates/filex-local-terminal/src/lib.rs`, `src-tauri/src/local_terminal.rs`, `src/domain/directoryNavigation.ts`): normalized Windows `\\?\` and `\\?\UNC\` extended-length path prefixes in local file listings and local terminal working directories so paths render cleanly as standard `C:\...` and `\\server\share\...` paths.
+
 ## [0.1.19] - 2026-11-24
 
 ### Added

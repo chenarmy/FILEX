@@ -600,8 +600,7 @@ export const useSessionsStore = defineStore('sessions', () => {
         return;
       }
       suppressAutoReconnect.add(sessionId);
-      await refreshSummary(sessionId);
-      clearQuickProfileIfUnused(profile.id);
+      removeSessionState(sessionId, profile.id);
       passwordProfileId.value = null;
       privateKeyPassphraseProfileId.value = null;
       challenge.value = null;
@@ -815,8 +814,7 @@ export const useSessionsStore = defineStore('sessions', () => {
         const result = await connectQuickPasswordSession(session.id, password);
         if (!result.ok) {
           suppressAutoReconnect.add(session.id);
-          await refreshSummary(session.id);
-          clearQuickProfileIfUnused(profileId);
+          removeSessionState(session.id, profileId);
           passwordProfileId.value = null;
           challenge.value = null;
           currentRouteProfileId.value = null;
@@ -1012,6 +1010,8 @@ export const useSessionsStore = defineStore('sessions', () => {
     if (!activeSessionId.value || busy.value) return;
     const disconnectedId = activeSessionId.value;
     const current = summaries.value.find((item) => item.id === disconnectedId);
+    const quickProfileId = current?.profileId;
+    const wasQuick = isQuickProfile(quickProfileId);
     const localSession = isLocalSession(current);
     suppressAutoReconnect.add(disconnectedId);
     busy.value = true;
@@ -1022,10 +1022,18 @@ export const useSessionsStore = defineStore('sessions', () => {
         : await disconnectSession(activeSessionId.value);
       if (!result.ok) {
         suppressAutoReconnect.delete(disconnectedId);
+        if (wasQuick) {
+          removeSessionState(disconnectedId, quickProfileId);
+        }
         error.value = result.error;
         return;
       }
-      upsert(result.data);
+      if (wasQuick) {
+        removeSessionState(disconnectedId, quickProfileId);
+        useUiStore().notify(t('quick.disconnectedRemoved'));
+      } else {
+        upsert(result.data);
+      }
       useEventsStore().record('session', localSession ? 'LOCAL_TERMINAL_CLOSED' : 'SSH_DISCONNECTED', 'info', { sessionId: result.data.id });
     } finally {
       busy.value = false;
@@ -1251,20 +1259,9 @@ export const useSessionsStore = defineStore('sessions', () => {
     };
   }
 
-  async function closeSession(sessionId: string): Promise<void> {
-    const wasPending = pendingConnectionSessionId.value === sessionId;
-    if (wasPending) await cancelPendingAttempt();
-    const summary = summaries.value.find((item) => item.id === sessionId);
-    const profileId = summary?.profileId;
-    const localSession = isLocalSession(summary);
-    if (summary?.state === 'connected') {
-      activeSessionId.value = sessionId;
-      await disconnectActive();
-    }
+  function removeSessionState(sessionId: string, profileId?: string | null): void {
+    suppressAutoReconnect.delete(sessionId);
     summaries.value = summaries.value.filter((item) => item.id !== sessionId);
-    if (!wasPending && summary && !localSession && isTauriRuntime()) {
-      await cancelSessionAttempt(sessionId);
-    }
     clearQuickProfileIfUnused(profileId);
     const nextEphemeral = { ...ephemeralHistoryEntries.value };
     delete nextEphemeral[sessionId];
@@ -1284,6 +1281,22 @@ export const useSessionsStore = defineStore('sessions', () => {
     if (activeSessionId.value === sessionId) {
       activeSessionId.value = summaries.value.at(-1)?.id ?? null;
     }
+  }
+
+  async function closeSession(sessionId: string): Promise<void> {
+    const wasPending = pendingConnectionSessionId.value === sessionId;
+    if (wasPending) await cancelPendingAttempt();
+    const summary = summaries.value.find((item) => item.id === sessionId);
+    const profileId = summary?.profileId;
+    const localSession = isLocalSession(summary);
+    if (summary?.state === 'connected') {
+      activeSessionId.value = sessionId;
+      await disconnectActive();
+    }
+    if (!wasPending && summary && !localSession && isTauriRuntime()) {
+      await cancelSessionAttempt(sessionId);
+    }
+    removeSessionState(sessionId, profileId);
   }
 
   async function initializeTerminalEvents(): Promise<void> {
@@ -1315,11 +1328,16 @@ export const useSessionsStore = defineStore('sessions', () => {
         const current = summaries.value[index];
         const quickSession = Boolean(current && isQuickProfile(current.profileId));
         const localSession = isLocalSession(current);
-        if (current) summaries.value[index] = { ...current, state: 'disconnected' };
         useEventsStore().record('session', payload.kind === 'exit' ? 'PTY_EXITED' : 'PTY_CLOSED', 'warning', { sessionId: payload.sessionId, exitStatus: payload.exitStatus ?? -1 });
-        if (payload.kind === 'closed' && current) {
-          if (quickSession || localSession) suppressAutoReconnect.add(payload.sessionId);
-          else void autoReconnect(payload.sessionId);
+        if (quickSession && current) {
+          removeSessionState(payload.sessionId, current.profileId);
+          useUiStore().notify(t('quick.disconnectedRemoved'));
+        } else {
+          if (current) summaries.value[index] = { ...current, state: 'disconnected' };
+          if (payload.kind === 'closed' && current) {
+            if (localSession) suppressAutoReconnect.add(payload.sessionId);
+            else void autoReconnect(payload.sessionId);
+          }
         }
       }
       outputRevision.value += 1;

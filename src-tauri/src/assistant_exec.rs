@@ -126,7 +126,7 @@ fn contains_disallowed_shell_syntax(command: &str) -> bool {
     in_single || in_double
 }
 
-fn references_sensitive_target(command: &str) -> bool {
+pub(crate) fn references_sensitive_target(command: &str) -> bool {
     let lower = command.to_ascii_lowercase();
     const SENSITIVE_FRAGMENTS: &[&str] = &[
         "/etc/shadow",

@@ -71,3 +71,24 @@ export function clampTerminalMenuPosition(
     y: Math.max(padding, Math.min(pointer.y - surface.top, surface.height - menu.height - padding)),
   };
 }
+
+export type TerminalClipboardShortcut = 'copy' | 'copy_and_clear' | 'paste' | null;
+
+export function classifyTerminalClipboardShortcut(
+  event: Pick<KeyboardEvent, 'type' | 'key' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey'>,
+  hasSelection: boolean,
+): TerminalClipboardShortcut {
+  if (event.type !== 'keydown' || event.altKey) return null;
+  const key = event.key.toLowerCase();
+  const accel = event.ctrlKey || event.metaKey;
+  if (accel && event.shiftKey && key === 'c') {
+    return 'copy';
+  }
+  if (accel && event.shiftKey && key === 'v') {
+    return 'paste';
+  }
+  if (accel && !event.shiftKey && key === 'c' && hasSelection) {
+    return 'copy_and_clear';
+  }
+  return null;
+}

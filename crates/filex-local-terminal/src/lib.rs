@@ -74,7 +74,7 @@ impl LocalTerminalRuntime {
         let pty = spawn_platform_pty(&shell.executable_path, &working_dir, columns, rows, tx)?;
 
         let session_id = Uuid::new_v4().to_string();
-        let working_dir_display = working_dir.to_string_lossy().to_string();
+        let working_dir_display = strip_windows_verbatim_prefix(&working_dir.to_string_lossy());
         let summary = SessionSummary {
             id: session_id.clone(),
             generation: 1,
@@ -283,6 +283,18 @@ pub fn discover_local_shells() -> Vec<LocalShellOption> {
     }
 
     found
+}
+
+fn strip_windows_verbatim_prefix(path: &str) -> String {
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\")
+        && rest.as_bytes().get(1) == Some(&b':')
+    {
+        return rest.to_owned();
+    }
+    path.to_owned()
 }
 
 fn shell_kind_id(kind: LocalShellKind) -> &'static str {

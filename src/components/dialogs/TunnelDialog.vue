@@ -104,7 +104,6 @@ async function submit(): Promise<void> {
   });
   if (started) {
     settings.value.taskTab = 'tunnels';
-    settings.value.taskDrawerOpen = true;
     ui.closeTunnel();
   }
 }

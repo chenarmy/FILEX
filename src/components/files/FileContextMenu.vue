@@ -13,6 +13,7 @@ import {
   FolderOpen,
   FolderPlus,
   MoveUpRight,
+  Package,
   RefreshCw,
   ShieldCheck,
   Sparkles,
@@ -38,6 +39,7 @@ type FileContextMenuAction =
   | 'copyPath'
   | 'copyForUpload'
   | 'download'
+  | 'downloadArchive'
   | 'remoteRelay'
   | 'uploadFiles'
   | 'uploadFolders'
@@ -58,6 +60,7 @@ const props = defineProps<{
   quickSession: boolean;
   canEdit: boolean;
   canDownload: boolean;
+  canDownloadArchive: boolean;
   canRemoteRelay: boolean;
   canPermissions: boolean;
   canQuickDelete: boolean;
@@ -65,6 +68,7 @@ const props = defineProps<{
   canUpload: boolean;
   canRename: boolean;
   canDelete: boolean;
+  selectedCount?: number;
 }>();
 
 const emit = defineEmits<{
@@ -254,7 +258,10 @@ onBeforeUnmount(() => {
 
       <div class="file-context-separator" />
       <button type="button" role="menuitem" :disabled="!canDownload" @click="run('download')">
-        <Download :size="13" />{{ t('fileMenu.download') }}
+        <Download :size="13" />{{ selectedCount && selectedCount > 1 ? t('fileMenu.downloadSelected', { count: selectedCount }) : t('fileMenu.download') }}
+      </button>
+      <button v-if="pane === 'remote'" type="button" role="menuitem" :disabled="!canDownloadArchive" @click="run('downloadArchive')">
+        <Package :size="13" />{{ selectedCount && selectedCount > 1 ? t('fileMenu.downloadArchiveSelected', { count: selectedCount }) : t('fileMenu.downloadArchive') }}
       </button>
       <button type="button" role="menuitem" :disabled="!canRemoteRelay" @click="run('remoteRelay')">
         <ArrowLeftRight :size="13" />{{ t('fileMenu.remoteRelay') }}

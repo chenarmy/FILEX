@@ -14,7 +14,11 @@ import {
 } from '@/domain/terminalAdapters';
 import { getTerminalLogColorPalette, TerminalLogColorizer } from '@/domain/terminalLogColorizer';
 import { resolveTerminalPalette, resolveTerminalThemeAppearance } from '@/domain/terminalThemes';
-import { clampTerminalMenuPosition, resolveTerminalFontFamily } from '@/domain/terminalInteractions';
+import {
+  clampTerminalMenuPosition,
+  classifyTerminalClipboardShortcut,
+  resolveTerminalFontFamily,
+} from '@/domain/terminalInteractions';
 import { resolveCdCommand } from '@/domain/terminalCwd';
 import { hasCapability, isLocalSession } from '@/domain/sessionCapabilities';
 import TerminalQuickOpsBar from '@/components/terminal/TerminalQuickOpsBar.vue';
@@ -149,6 +153,8 @@ let resizeObserver: ResizeObserver | null = null;
 let resizeTimer: number | null = null;
 let searchRefreshTimer: number | null = null;
 let pasteHandler: ((event: ClipboardEvent) => void) | null = null;
+let copyHandler: ((event: ClipboardEvent) => void) | null = null;
+let lastShortcutCopyAt = 0;
 let pointerDownHandler: ((event: PointerEvent) => void) | null = null;
 let pointerUpHandler: ((event: PointerEvent) => void) | null = null;
 let contextMenuHandler: ((event: MouseEvent) => void) | null = null;
@@ -724,27 +730,39 @@ onMounted(async () => {
       if (accepted) terminal?.paste(text);
     });
   };
+  copyHandler = (event: ClipboardEvent) => {
+    if (Date.now() - lastShortcutCopyAt < 250) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  };
   terminal.attachCustomKeyEventHandler((event) => {
-    if (event.type !== 'keydown') return true;
-    const key = event.key.toLowerCase();
-    const accel = event.ctrlKey || event.metaKey;
-    if (accel && event.shiftKey && key === 'c') {
+    const action = classifyTerminalClipboardShortcut(event, Boolean(terminal?.hasSelection()));
+    if (!action) return true;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.repeat) return false;
+    if (action === 'copy') {
       const selected = terminal?.getSelection() ?? '';
-      if (selected) void copyText(selected);
+      if (selected) {
+        lastShortcutCopyAt = Date.now();
+        void copyText(selected);
+      }
       return false;
     }
-    if (accel && event.shiftKey && key === 'v') {
+    if (action === 'paste') {
       void pasteFromClipboard();
       return false;
     }
-    if (event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey && key === 'c' && terminal?.hasSelection()) {
-      const selected = terminal.getSelection();
-      if (selected) void copyText(selected);
-      terminal.clearSelection();
-      return false;
+    const selected = terminal?.getSelection() ?? '';
+    if (selected) {
+      lastShortcutCopyAt = Date.now();
+      void copyText(selected);
     }
-    return true;
+    terminal?.clearSelection();
+    return false;
   });
+  terminal.element?.addEventListener('copy', copyHandler, true);
   terminal.element?.addEventListener('paste', pasteHandler, true);
   pointerDownHandler = handleTerminalPointerDown;
   pointerUpHandler = handleTerminalPointerUp;
@@ -892,6 +910,7 @@ onBeforeUnmount(() => {
   if (reticleTimer !== null) window.clearTimeout(reticleTimer);
   systemThemeMedia?.removeEventListener('change', handleSystemThemeChange);
   resizeObserver?.disconnect();
+  if (copyHandler) terminal?.element?.removeEventListener('copy', copyHandler, true);
   if (pasteHandler) terminal?.element?.removeEventListener('paste', pasteHandler, true);
   if (pointerDownHandler) terminal?.element?.removeEventListener('pointerdown', pointerDownHandler);
   if (pointerUpHandler) terminal?.element?.removeEventListener('pointerup', pointerUpHandler);

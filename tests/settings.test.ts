@@ -226,4 +226,27 @@ describe('safe settings repository', () => {
     });
     expect(normalizeSafeSettings({ uiFontFamily: '   ' }).uiFontFamily).toBe(defaultUiFontFamily);
   });
+
+  it('defaults upload conflict to overwrite, auto-open downloads, and clamps MCP settings', () => {
+    expect(defaultSafeSettings.uploadConflictPolicy).toBe('overwrite');
+    expect(defaultSafeSettings.defaultDownloadDirectory).toBeNull();
+    expect(defaultSafeSettings.autoOpenDownloadFolder).toBe(true);
+    expect(defaultSafeSettings.mcpEnabled).toBe(false);
+    expect(defaultSafeSettings.mcpPort).toBe(19_375);
+
+    localStorage.setItem('filex.safe-settings.v1', JSON.stringify({
+      uploadConflictPolicy: 'rename',
+      defaultDownloadDirectory: '  C:\\Users\\dev\\Downloads  ',
+      autoOpenDownloadFolder: false,
+      mcpEnabled: true,
+      mcpPort: 80,
+    }));
+    expect(readSafeSettings()).toMatchObject({
+      uploadConflictPolicy: 'rename',
+      defaultDownloadDirectory: 'C:\\Users\\dev\\Downloads',
+      autoOpenDownloadFolder: false,
+      mcpEnabled: true,
+      mcpPort: 1024,
+    });
+  });
 });
