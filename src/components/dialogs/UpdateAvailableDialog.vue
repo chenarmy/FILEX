@@ -284,6 +284,48 @@ function restoreFocus(): void {
   font-family: var(--font-mono);
 }
 
+.update-notes-scroll :deep(.read-only-markdown-hr) {
+  margin: 8px 0;
+  border: 0;
+  border-top: 1px solid hsl(var(--border));
+}
+
+.update-notes-scroll :deep(.read-only-markdown-table-wrap) {
+  margin: 8px 0;
+  overflow-x: auto;
+  border: 1px solid hsl(var(--border));
+  border-radius: 4px;
+}
+
+.update-notes-scroll :deep(.read-only-markdown-table) {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.7857rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.update-notes-scroll :deep(.read-only-markdown-table th),
+.update-notes-scroll :deep(.read-only-markdown-table td) {
+  padding: 4px 8px;
+  text-align: start;
+  border-bottom: 1px solid hsl(var(--border) / 0.7);
+  border-inline-end: 1px solid hsl(var(--border) / 0.45);
+}
+
+.update-notes-scroll :deep(.read-only-markdown-table th) {
+  background: hsl(var(--muted) / 0.6);
+  font-weight: 600;
+}
+
+.update-notes-scroll :deep(.read-only-markdown-table th:last-child),
+.update-notes-scroll :deep(.read-only-markdown-table td:last-child) {
+  border-inline-end: 0;
+}
+
+.update-notes-scroll :deep(.read-only-markdown-table tbody tr:last-child td) {
+  border-bottom: 0;
+}
+
 .update-progress {
   display: grid;
   gap: 8px;

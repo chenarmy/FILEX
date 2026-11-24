@@ -75,5 +75,5 @@ onMounted(async () => {
   <RemoteTextPreviewDialog v-if="sftp.previewLoading || sftp.preview || sftp.previewError" />
   <SettingsDialog v-if="ui.settingsOpen" />
   <UpdateAvailableDialog v-if="updates.dialogOpen" />
-  <ToastNotice v-if="ui.toast" :message="ui.toast" />
+  <ToastNotice v-if="ui.toast" :message="ui.toast" :tone="ui.toastTone" />
 </template>

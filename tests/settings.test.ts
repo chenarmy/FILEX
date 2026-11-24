@@ -1,9 +1,29 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SUPPORTED_TEXT_ENCODINGS } from '@/domain/encodings';
-import { defaultSafeSettings, defaultUiFontFamily, readSafeSettings, writeSafeSettings } from '@/runtime/safeSettingsRepository';
+import { saveSafeSettings } from '@/api/domain/settingsApi';
+import {
+  defaultSafeSettings,
+  defaultUiFontFamily,
+  normalizeSafeSettings,
+  readSafeSettings,
+  writeSafeSettings,
+} from '@/runtime/safeSettingsRepository';
+
+const invokeMock = vi.fn();
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...args: unknown[]) => invokeMock(...args),
+}));
 
 describe('safe settings repository', () => {
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => {
+    localStorage.clear();
+    invokeMock.mockReset();
+  });
+
+  afterEach(() => {
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  });
 
   it('returns safe defaults when storage is empty', () => {
     expect(readSafeSettings()).toEqual(defaultSafeSettings);
@@ -12,6 +32,8 @@ describe('safe settings repository', () => {
     expect(defaultSafeSettings.uiFontFamily).toContain('HarmonyOS Sans SC');
     expect(defaultSafeSettings.assistantPaneWidth).toBe(360);
     expect(defaultSafeSettings.followTerminalCwd).toBe(true);
+    expect(defaultSafeSettings.fileBrowserPosition).toBe('bottom');
+    expect(defaultSafeSettings.fileBrowserWidth).toBe(420);
   });
 
   it('migrates the legacy default font without overriding custom families', () => {
@@ -62,6 +84,8 @@ describe('safe settings repository', () => {
     localStorage.setItem('filex.safe-settings.v1', JSON.stringify({
       hostPanelWidth: 9_999,
       fileBrowserHeight: 1,
+      fileBrowserPosition: 'invalid',
+      fileBrowserWidth: 50,
       assistantPaneWidth: 9,
       focusMode: true,
       followTerminalCwd: 'yes',
@@ -71,12 +95,24 @@ describe('safe settings repository', () => {
     expect(readSafeSettings()).toMatchObject({
       hostPanelWidth: 420,
       fileBrowserHeight: 160,
+      fileBrowserPosition: 'bottom',
+      fileBrowserWidth: 260,
       assistantPaneWidth: 300,
       focusMode: true,
       followTerminalCwd: true,
       detailsPaneOpen: false,
       hostPanelOpen: false,
       fileBrowserOpen: true,
+    });
+
+    writeSafeSettings({
+      ...defaultSafeSettings,
+      fileBrowserPosition: 'right',
+      fileBrowserWidth: 540,
+    });
+    expect(readSafeSettings()).toMatchObject({
+      fileBrowserPosition: 'right',
+      fileBrowserWidth: 540,
     });
   });
 
@@ -147,5 +183,47 @@ describe('safe settings repository', () => {
       terminalEncoding: 'iso-8859-99',
     }));
     expect(readSafeSettings().terminalEncoding).toBe('utf-8');
+  });
+
+  it('normalizes fractional high-DPI pane sizes and whitespace font families before saving to Tauri', async () => {
+    (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    invokeMock.mockImplementation((_command: string, payload: { input: typeof defaultSafeSettings }) => Promise.resolve({
+      ok: true,
+      requestId: 'req-settings-1',
+      data: payload.input,
+    }));
+
+    const result = await saveSafeSettings({
+      ...defaultSafeSettings,
+      terminalTheme: 'github-dark',
+      terminalFontSize: 16,
+      terminalFontFamily: '   ',
+      connectionsPaneWidth: 244.4,
+      inspectorPaneWidth: 286.6,
+      assistantPaneWidth: 412.6666564941406,
+      taskDrawerHeight: 180.25,
+      hostPanelWidth: 260.8,
+      fileBrowserHeight: 240.75,
+      fileBrowserPosition: 'right',
+      fileBrowserWidth: 488.6,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith('save_safe_settings', {
+      input: expect.objectContaining({
+        terminalTheme: 'github-dark',
+        terminalFontSize: 16,
+        terminalFontFamily: defaultSafeSettings.terminalFontFamily,
+        connectionsPaneWidth: 244,
+        inspectorPaneWidth: 287,
+        assistantPaneWidth: 413,
+        taskDrawerHeight: 180,
+        hostPanelWidth: 261,
+        fileBrowserHeight: 241,
+        fileBrowserPosition: 'right',
+        fileBrowserWidth: 489,
+      }),
+    });
+    expect(normalizeSafeSettings({ uiFontFamily: '   ' }).uiFontFamily).toBe(defaultUiFontFamily);
   });
 });

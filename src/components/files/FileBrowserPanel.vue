@@ -15,6 +15,8 @@ import {
   FolderInput,
   FolderPlus,
   HelpCircle,
+  PanelBottom,
+  PanelRight,
   Send,
   ShieldAlert,
   ShieldCheck,
@@ -91,6 +93,11 @@ const privilege = usePrivilegeStore();
 
 const view = ref<'files' | 'commands' | 'editor'>('files');
 const dualPaneEnabled = computed(() => settings.value.dualPaneSftp);
+const fileBrowserRight = computed(() => settings.value.fileBrowserPosition === 'right');
+
+function toggleDockPosition(): void {
+  settings.value.fileBrowserPosition = fileBrowserRight.value ? 'bottom' : 'right';
+}
 const activePane = ref<'local' | 'remote'>('remote');
 const remoteDropElement = ref<HTMLElement | null>(null);
 const nativeDropActive = ref(false);
@@ -1575,7 +1582,7 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
 </script>
 
 <template>
-  <section class="file-browser-panel" :aria-label="t('files.title')">
+  <section class="file-browser-panel" :class="{ 'dock-right': fileBrowserRight }" :aria-label="t('files.title')">
     <header class="file-browser-panel-header">
       <div class="file-browser-subtabs" role="tablist" :aria-label="t('files.title')">
         <button
@@ -1665,6 +1672,21 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
       <template v-else>
         <span class="file-browser-panel-spacer" />
       </template>
+      <span v-if="view === 'files'" class="toolbar-divider" />
+      <div class="file-toolbar-group file-dock-group">
+        <button
+          type="button"
+          class="icon-button"
+          data-testid="file-browser-dock-toggle"
+          :aria-pressed="fileBrowserRight"
+          :aria-label="t(fileBrowserRight ? 'files.dockBottom' : 'files.dockRight')"
+          :title="t(fileBrowserRight ? 'files.dockBottom' : 'files.dockRight')"
+          @click="toggleDockPosition"
+        >
+          <PanelBottom v-if="fileBrowserRight" :size="12" />
+          <PanelRight v-else :size="12" />
+        </button>
+      </div>
     </header>
 
     <div v-if="followHelpOpen" class="file-browser-follow-help inline-notice" role="note">

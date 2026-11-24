@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { failure, isTauriRuntime, normalizeUnknownError, success } from '@/api/common';
-import { readSafeSettings, writeSafeSettings } from '@/runtime/safeSettingsRepository';
+import { normalizeSafeSettings, readSafeSettings, writeSafeSettings } from '@/runtime/safeSettingsRepository';
 import type { OperationResult, SafeSettings } from '@/types/contracts';
 
 export async function loadSafeSettings(): Promise<OperationResult<SafeSettings>> {
@@ -13,12 +13,13 @@ export async function loadSafeSettings(): Promise<OperationResult<SafeSettings>>
 }
 
 export async function saveSafeSettings(input: SafeSettings): Promise<OperationResult<SafeSettings>> {
+  const normalized = normalizeSafeSettings(input);
   if (!isTauriRuntime()) {
-    writeSafeSettings(input);
+    writeSafeSettings(normalized);
     return success(readSafeSettings());
   }
   try {
-    const result = await invoke<OperationResult<SafeSettings>>('save_safe_settings', { input });
+    const result = await invoke<OperationResult<SafeSettings>>('save_safe_settings', { input: normalized });
     if (result.ok) writeSafeSettings(result.data);
     return result;
   } catch (error: unknown) {

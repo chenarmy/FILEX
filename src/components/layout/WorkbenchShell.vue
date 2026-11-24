@@ -140,6 +140,10 @@ const inspectorPane = ref<{ focusInspector: () => void } | null>(null);
 const focusMode = computed(() => settings.value.focusMode);
 const hasActiveSession = computed(() => sessions.activeSession !== null);
 const fileBrowserVisible = computed(() => settings.value.fileBrowserOpen && !focusMode.value);
+const fileBrowserRight = computed(() => settings.value.fileBrowserPosition === 'right');
+const fileBrowserSlotStyle = computed(() => (fileBrowserRight.value
+  ? { width: `${settings.value.fileBrowserWidth}px` }
+  : { height: `${settings.value.fileBrowserHeight}px` }));
 const detailsPaneVisible = computed(() => !focusMode.value && settings.value.detailsPaneOpen);
 
 const commandPaletteCommands = computed<CommandPaletteCommand[]>(() => {
@@ -313,7 +317,7 @@ function beginPaneResize(side: 'connections' | 'inspector' | 'assistant' | 'host
       min = settings.value.dualPaneSftp ? 540 : 220;
       max = settings.value.dualPaneSftp ? 760 : 480;
     }
-    const width = Math.min(max, Math.max(min, initial + delta));
+    const width = Math.min(max, Math.max(min, Math.round(initial + delta)));
     if (side === 'connections') settings.value.connectionsPaneWidth = width;
     else if (side === 'host') settings.value.hostPanelWidth = width;
     else if (side === 'assistant') settings.value.assistantPaneWidth = width;
@@ -329,14 +333,32 @@ function beginPaneResize(side: 'connections' | 'inspector' | 'assistant' | 'host
 
 function beginFileBrowserResize(event: PointerEvent): void {
   event.preventDefault();
+  if (fileBrowserRight.value) {
+    const startX = event.clientX;
+    const initial = settings.value.fileBrowserWidth;
+    const availableWidth = (event.currentTarget as HTMLElement | null)?.parentElement?.clientWidth
+      ?? window.innerWidth - 24;
+    const maxWidth = Math.min(1_200, Math.max(260, Math.round(availableWidth - 240)));
+    const move = (next: PointerEvent) => {
+      const delta = startX - next.clientX;
+      settings.value.fileBrowserWidth = Math.min(maxWidth, Math.max(260, Math.round(initial + delta)));
+    };
+    const stop = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop, { once: true });
+    return;
+  }
   const startY = event.clientY;
   const initial = settings.value.fileBrowserHeight;
   const availableHeight = (event.currentTarget as HTMLElement | null)?.parentElement?.clientHeight
     ?? window.innerHeight - 24;
-  const maxHeight = Math.max(160, availableHeight - 5);
+  const maxHeight = Math.max(160, Math.round(availableHeight - 5));
   const move = (next: PointerEvent) => {
     const delta = startY - next.clientY;
-    settings.value.fileBrowserHeight = Math.min(maxHeight, Math.max(160, initial + delta));
+    settings.value.fileBrowserHeight = Math.min(maxHeight, Math.max(160, Math.round(initial + delta)));
   };
   const stop = () => {
     window.removeEventListener('pointermove', move);
@@ -364,12 +386,25 @@ function resizePaneByKeyboard(side: 'connections' | 'inspector' | 'assistant' | 
 }
 
 function resizeFileBrowserByKeyboard(event: KeyboardEvent): void {
+  if (fileBrowserRight.value) {
+    if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    event.preventDefault();
+    const direction = event.key === 'ArrowLeft' ? 1 : -1;
+    const availableWidth = (event.currentTarget as HTMLElement | null)?.parentElement?.clientWidth
+      ?? window.innerWidth - 24;
+    const maxWidth = Math.min(1_200, Math.max(260, Math.round(availableWidth - 240)));
+    settings.value.fileBrowserWidth = Math.min(
+      maxWidth,
+      Math.max(260, settings.value.fileBrowserWidth + direction * 16),
+    );
+    return;
+  }
   if (!['ArrowUp', 'ArrowDown'].includes(event.key)) return;
   event.preventDefault();
   const direction = event.key === 'ArrowUp' ? 1 : -1;
   const availableHeight = (event.currentTarget as HTMLElement | null)?.parentElement?.clientHeight
     ?? window.innerHeight - 24;
-  const maxHeight = Math.max(160, availableHeight - 5);
+  const maxHeight = Math.max(160, Math.round(availableHeight - 5));
   settings.value.fileBrowserHeight = Math.min(
     maxHeight,
     Math.max(160, settings.value.fileBrowserHeight + direction * 12),
@@ -693,21 +728,28 @@ onBeforeUnmount(() => {
             <span>{{ t('inspector.trustUnknown') }}</span>
           </div>
         </div>
-        <TerminalWorkspace ref="terminalWorkspace" />
-        <template v-if="fileBrowserVisible">
-          <button
-            class="pane-resizer horizontal"
-            type="button"
-            role="separator"
-            aria-orientation="horizontal"
-            aria-label="Resize file browser"
-            @pointerdown="beginFileBrowserResize($event)"
-            @keydown="resizeFileBrowserByKeyboard($event)"
-          />
-          <div class="file-browser-panel-slot" :style="{ height: `${settings.value.fileBrowserHeight}px` }">
-            <FileBrowserPanel />
-          </div>
-        </template>
+        <div class="workspace-split" :class="{ 'dock-right': fileBrowserRight }">
+          <TerminalWorkspace ref="terminalWorkspace" />
+          <template v-if="fileBrowserVisible">
+            <button
+              class="pane-resizer"
+              :class="{ horizontal: !fileBrowserRight }"
+              type="button"
+              role="separator"
+              :aria-orientation="fileBrowserRight ? 'vertical' : 'horizontal'"
+              :aria-label="t('files.resizeBrowser')"
+              @pointerdown="beginFileBrowserResize($event)"
+              @keydown="resizeFileBrowserByKeyboard($event)"
+            />
+            <div
+              class="file-browser-panel-slot"
+              :class="{ 'dock-right': fileBrowserRight }"
+              :style="fileBrowserSlotStyle"
+            >
+              <FileBrowserPanel />
+            </div>
+          </template>
+        </div>
       </div>
       <template v-if="!focusMode">
         <template v-if="ui.assistantOpen">

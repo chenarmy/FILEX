@@ -33,6 +33,7 @@ export type LocaleCode = 'zh-CN' | 'en-US';
 export type CredentialStoreStatus = 'available' | 'locked' | 'unavailable' | 'unsupported';
 export type AuthenticationMethod = 'password' | 'private_key' | 'agent';
 export type TextEditorPreference = 'internal' | 'external';
+export type FileBrowserPosition = 'bottom' | 'right';
 
 export interface AppError {
   code: string;
@@ -841,6 +842,8 @@ export interface SafeSettings {
   detailsPaneOpen: boolean;
   hostPanelWidth: number;
   fileBrowserHeight: number;
+  fileBrowserPosition: FileBrowserPosition;
+  fileBrowserWidth: number;
   textEditorPreference: TextEditorPreference;
   externalEditorPath: string | null;
   terminalLogging: boolean;

@@ -39,6 +39,8 @@ export const defaultSafeSettings: SafeSettings = {
   detailsPaneOpen: false,
   hostPanelWidth: 260,
   fileBrowserHeight: 240,
+  fileBrowserPosition: 'bottom',
+  fileBrowserWidth: 420,
   textEditorPreference: 'internal',
   externalEditorPath: null,
   terminalLogging: false,
@@ -54,7 +56,7 @@ export function readSafeSettings(): SafeSettings {
 
   try {
     const parsed = JSON.parse(raw) as Partial<SafeSettings>;
-    return normalizeSettings(parsed);
+    return normalizeSafeSettings(parsed);
   } catch {
     localStorage.removeItem(storageKey);
     return { ...defaultSafeSettings, shortcuts: { ...defaultSafeSettings.shortcuts } };
@@ -62,10 +64,10 @@ export function readSafeSettings(): SafeSettings {
 }
 
 export function writeSafeSettings(settings: SafeSettings): void {
-  localStorage.setItem(storageKey, JSON.stringify(normalizeSettings(settings)));
+  localStorage.setItem(storageKey, JSON.stringify(normalizeSafeSettings(settings)));
 }
 
-function normalizeSettings(input: Partial<SafeSettings>): SafeSettings {
+export function normalizeSafeSettings(input: Partial<SafeSettings>): SafeSettings {
   const themes = ['system', 'dark', 'light'] as const;
   const locales = ['zh-CN', 'en-US'] as const;
   const inspectorTabs = ['files', 'monitor', 'session'] as const;
@@ -74,13 +76,13 @@ function normalizeSettings(input: Partial<SafeSettings>): SafeSettings {
   return {
     theme: themes.includes(input.theme as typeof themes[number]) ? input.theme as SafeSettings['theme'] : 'system',
     locale: locales.includes(input.locale as typeof locales[number]) ? input.locale as SafeSettings['locale'] : 'zh-CN',
-    uiFontFamily: input.uiFontFamily === legacyUiFontFamily
-      ? defaultUiFontFamily
-      : input.uiFontFamily?.slice(0, 160) || defaultSafeSettings.uiFontFamily,
+    uiFontFamily: normalizeFontFamily(input.uiFontFamily, legacyUiFontFamily, defaultSafeSettings.uiFontFamily),
     uiFontSize: clampNumber(input.uiFontSize, 11, 20, defaultSafeSettings.uiFontSize),
-    terminalFontFamily: input.terminalFontFamily === LEGACY_TERMINAL_FONT_FAMILY
-      ? DEFAULT_TERMINAL_FONT_FAMILY
-      : input.terminalFontFamily?.slice(0, 160) || defaultSafeSettings.terminalFontFamily,
+    terminalFontFamily: normalizeFontFamily(
+      input.terminalFontFamily,
+      LEGACY_TERMINAL_FONT_FAMILY,
+      defaultSafeSettings.terminalFontFamily,
+    ),
     terminalFontSize: clampNumber(input.terminalFontSize, 11, 24, defaultSafeSettings.terminalFontSize),
     terminalTheme: normalizeTerminalTheme(input.terminalTheme),
     terminalEncoding: normalizeTextEncoding(input.terminalEncoding, defaultSafeSettings.terminalEncoding),
@@ -118,6 +120,8 @@ function normalizeSettings(input: Partial<SafeSettings>): SafeSettings {
     detailsPaneOpen: input.detailsPaneOpen === true,
     hostPanelWidth: clampNumber(input.hostPanelWidth, 200, 420, defaultSafeSettings.hostPanelWidth),
     fileBrowserHeight: clampNumber(input.fileBrowserHeight, 160, 65_535, defaultSafeSettings.fileBrowserHeight),
+    fileBrowserPosition: input.fileBrowserPosition === 'right' ? 'right' : 'bottom',
+    fileBrowserWidth: clampNumber(input.fileBrowserWidth, 260, 1_200, defaultSafeSettings.fileBrowserWidth),
     textEditorPreference: input.textEditorPreference === 'external' ? 'external' : 'internal',
     externalEditorPath: normalizeExternalEditorPath(input.externalEditorPath),
     terminalLogging: input.terminalLogging === true,
@@ -130,6 +134,17 @@ function normalizeSettings(input: Partial<SafeSettings>): SafeSettings {
       : defaultSafeSettings.updateChannel,
     shortcuts: normalizeKeyboardShortcuts(input.shortcuts),
   };
+}
+
+function normalizeFontFamily(
+  value: string | undefined,
+  legacy: string,
+  fallback: string,
+): string {
+  if (typeof value !== 'string') return fallback;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === legacy) return fallback;
+  return trimmed.slice(0, 160);
 }
 
 function clampNumber(value: number | undefined, min: number, max: number, fallback: number): number {

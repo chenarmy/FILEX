@@ -143,10 +143,16 @@ pub struct SafeSettings {
     pub dual_pane_sftp: bool,
     pub task_tab: String,
     pub task_drawer_open: bool,
+    #[serde(deserialize_with = "deserialize_rounded_u16")]
     pub connections_pane_width: u16,
+    #[serde(deserialize_with = "deserialize_rounded_u16")]
     pub inspector_pane_width: u16,
-    #[serde(default = "default_assistant_pane_width")]
+    #[serde(
+        default = "default_assistant_pane_width",
+        deserialize_with = "deserialize_rounded_u16"
+    )]
     pub assistant_pane_width: u16,
+    #[serde(deserialize_with = "deserialize_rounded_u16")]
     pub task_drawer_height: u16,
     #[serde(default = "default_host_panel_open")]
     pub host_panel_open: bool,
@@ -158,10 +164,23 @@ pub struct SafeSettings {
     pub focus_mode: bool,
     #[serde(default)]
     pub details_pane_open: bool,
-    #[serde(default = "default_host_panel_width")]
+    #[serde(
+        default = "default_host_panel_width",
+        deserialize_with = "deserialize_rounded_u16"
+    )]
     pub host_panel_width: u16,
-    #[serde(default = "default_file_browser_height")]
+    #[serde(
+        default = "default_file_browser_height",
+        deserialize_with = "deserialize_rounded_u16"
+    )]
     pub file_browser_height: u16,
+    #[serde(default = "default_file_browser_position")]
+    pub file_browser_position: String,
+    #[serde(
+        default = "default_file_browser_width",
+        deserialize_with = "deserialize_rounded_u16"
+    )]
+    pub file_browser_width: u16,
     #[serde(default = "default_text_editor_preference")]
     pub text_editor_preference: String,
     #[serde(default)]
@@ -203,6 +222,14 @@ fn default_file_browser_height() -> u16 {
     260
 }
 
+fn default_file_browser_position() -> String {
+    "bottom".to_owned()
+}
+
+fn default_file_browser_width() -> u16 {
+    420
+}
+
 fn default_text_editor_preference() -> String {
     "internal".to_owned()
 }
@@ -213,6 +240,51 @@ fn default_terminal_theme() -> String {
 
 fn default_terminal_encoding() -> String {
     "utf-8".to_owned()
+}
+
+fn deserialize_rounded_u16<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct RoundedU16Visitor;
+
+    impl serde::de::Visitor<'_> for RoundedU16Visitor {
+        type Value = u16;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a non-negative number within u16 range")
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u16::try_from(value).map_err(|_| E::custom("value out of u16 range"))
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u16::try_from(value).map_err(|_| E::custom("value out of u16 range"))
+        }
+
+        fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            if !value.is_finite() || value < 0.0 {
+                return Err(E::custom("value must be a finite non-negative number"));
+            }
+            let rounded = value.round();
+            if rounded > f64::from(u16::MAX) {
+                return Err(E::custom("value out of u16 range"));
+            }
+            Ok(rounded as u16)
+        }
+    }
+
+    deserializer.deserialize_any(RoundedU16Visitor)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

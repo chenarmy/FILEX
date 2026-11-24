@@ -3277,3 +3277,64 @@ test('preserves terminal, SFTP, composer draft, and monitor state when duplicati
   expect(afterDupSwitchCounts.sftpLoadCount).toBe(countsBeforeSwitchBack.sftpLoadCount);
   expect(afterDupSwitchCounts.resizeCalls).toEqual(countsBeforeSwitchBack.resizeCalls);
 });
+
+test('moves file browser between bottom and right dock and persists the choice', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+
+  const terminal = page.locator('.terminal-workspace');
+  const fileSlot = page.locator('.file-browser-panel-slot');
+  const dockToggle = page.getByTestId('file-browser-dock-toggle');
+
+  await expect(fileSlot).toBeVisible();
+  await expect(dockToggle).toHaveAttribute('aria-pressed', 'false');
+
+  const bottomTermRect = await terminal.boundingBox();
+  const bottomFileRect = await fileSlot.boundingBox();
+  expect(bottomTermRect).not.toBeNull();
+  expect(bottomFileRect).not.toBeNull();
+  expect(bottomFileRect!.y).toBeGreaterThanOrEqual(bottomTermRect!.y + bottomTermRect!.height - 2);
+
+  // Move to right dock via one-click header toggle
+  await dockToggle.click();
+  await expect(dockToggle).toHaveAttribute('aria-pressed', 'true');
+  await expect(fileSlot).toHaveClass(/dock-right/);
+
+  const rightTermRect = await terminal.boundingBox();
+  const rightFileRect = await fileSlot.boundingBox();
+  expect(rightTermRect).not.toBeNull();
+  expect(rightFileRect).not.toBeNull();
+  expect(rightFileRect!.x).toBeGreaterThanOrEqual(rightTermRect!.x + rightTermRect!.width - 2);
+  expect(Math.abs(rightFileRect!.y - rightTermRect!.y)).toBeLessThanOrEqual(4);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1440);
+  await page.screenshot({ path: 'test-results/file-browser-dock-right-1440-dark.png', animations: 'disabled' });
+
+  // Reload and verify the right-dock choice persisted
+  await page.reload();
+  await expect(fileSlot).toHaveClass(/dock-right/);
+  await expect(dockToggle).toHaveAttribute('aria-pressed', 'true');
+
+  // Verify compact light-theme right-dock layout has no horizontal overflow
+  await page.setViewportSize({ width: 960, height: 640 });
+  await page.getByRole('button', { name: '设置' }).click();
+  const settingsDialog = page.locator('.settings-dialog');
+  await expect(settingsDialog).toBeVisible();
+  await expect(settingsDialog.getByRole('button', { name: '右侧', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await settingsDialog.getByRole('button', { name: '浅色', exact: true }).click();
+  await settingsDialog.getByRole('button', { name: '应用并保存' }).click();
+  await expect(settingsDialog).toBeHidden();
+  await expect(page.locator('html')).toHaveClass(/light/);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(960);
+  await page.screenshot({ path: 'test-results/file-browser-dock-right-960-light.png', animations: 'disabled' });
+
+  // Move back to bottom via Settings dialog and confirm persistence
+  await page.getByRole('button', { name: '设置' }).click();
+  await settingsDialog.getByRole('button', { name: '下方', exact: true }).click();
+  await settingsDialog.getByRole('button', { name: '应用并保存' }).click();
+  await expect(settingsDialog).toBeHidden();
+  await expect(fileSlot).not.toHaveClass(/dock-right/);
+  await expect(dockToggle).toHaveAttribute('aria-pressed', 'false');
+
+  await page.reload();
+  await expect(fileSlot).not.toHaveClass(/dock-right/);
+});

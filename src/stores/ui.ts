@@ -46,6 +46,7 @@ export const useUiStore = defineStore('ui', () => {
   const assistantTerminalSelection = ref<{ host: string; text: string; truncated: boolean } | null>(null);
   const assistantFocusToken = ref(0);
   const toast = ref<string | null>(null);
+  const toastTone = ref<'success' | 'error'>('success');
   const confirmation = ref<{
     title: string;
     message: string;
@@ -55,11 +56,13 @@ export const useUiStore = defineStore('ui', () => {
   let toastTimer: number | null = null;
   let confirmationResolver: ((accepted: boolean) => void) | null = null;
 
-  function notify(message: string): void {
+  function notify(message: string, tone: 'success' | 'error' = 'success'): void {
     toast.value = message;
+    toastTone.value = tone;
     if (toastTimer !== null) window.clearTimeout(toastTimer);
     toastTimer = window.setTimeout(() => {
       toast.value = null;
+      toastTone.value = 'success';
       toastTimer = null;
     }, 3200);
   }
@@ -277,6 +280,7 @@ export const useUiStore = defineStore('ui', () => {
     assistantTerminalSelection,
     assistantFocusToken,
     toast,
+    toastTone,
     confirmation,
     notify,
     openSettings,

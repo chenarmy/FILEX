@@ -216,7 +216,10 @@ async function save(): Promise<void> {
     if (assistantSaved === false) return;
     const saved = await settings.save({ ...draft, shortcuts: { ...draft.shortcuts } });
     if (!saved) {
-      ui.notify(t('errors.settingsSaveFailed'));
+      const messageKey = settings.error === 'errors.settingsInvalid'
+        ? 'errors.settingsInvalid'
+        : 'errors.settingsSaveFailed';
+      ui.notify(t(messageKey), 'error');
       return;
     }
     let loggingStopError: string | null = null;
@@ -246,6 +249,7 @@ function reset(): void {
         locale: defaults.locale,
         uiFontFamily: defaults.uiFontFamily,
         uiFontSize: defaults.uiFontSize,
+        fileBrowserPosition: defaults.fileBrowserPosition,
         reduceMotion: defaults.reduceMotion,
       });
       break;
@@ -277,6 +281,8 @@ function reset(): void {
         inspectorPaneWidth: defaults.inspectorPaneWidth,
         assistantPaneWidth: defaults.assistantPaneWidth,
         taskDrawerHeight: defaults.taskDrawerHeight,
+        fileBrowserHeight: defaults.fileBrowserHeight,
+        fileBrowserWidth: defaults.fileBrowserWidth,
         textEditorPreference: defaults.textEditorPreference,
         externalEditorPath: defaults.externalEditorPath,
       });
@@ -594,6 +600,13 @@ onMounted(async () => {
               <label class="range-control"><input v-model.number="draft.uiFontSize" type="range" min="11" max="20"><span>{{ draft.uiFontSize }} px</span></label>
             </div>
             <p class="settings-license-note">{{ t('settings.harmonyFontNotice') }}</p>
+            <div class="setting-row">
+              <div><strong>{{ t('settings.fileBrowserPosition') }}</strong><small>{{ t('settings.fileBrowserPositionHelp') }}</small></div>
+              <div class="segmented">
+                <button type="button" :aria-pressed="draft.fileBrowserPosition === 'bottom'" @click="draft.fileBrowserPosition = 'bottom'">{{ t('settings.fileBrowserBottom') }}</button>
+                <button type="button" :aria-pressed="draft.fileBrowserPosition === 'right'" @click="draft.fileBrowserPosition = 'right'">{{ t('settings.fileBrowserRight') }}</button>
+              </div>
+            </div>
             <div class="setting-row">
               <div><strong>{{ t('settings.reduceMotion') }}</strong></div>
               <label class="switch"><input v-model="draft.reduceMotion" type="checkbox"><span /></label>

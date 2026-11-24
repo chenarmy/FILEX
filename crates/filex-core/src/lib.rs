@@ -114,6 +114,8 @@ pub fn default_safe_settings() -> SafeSettings {
         details_pane_open: false,
         host_panel_width: 280,
         file_browser_height: 260,
+        file_browser_position: "bottom".to_owned(),
+        file_browser_width: 420,
         text_editor_preference: "internal".to_owned(),
         external_editor_path: None,
         terminal_logging: false,
@@ -174,6 +176,8 @@ fn validate_safe_settings(settings: &SafeSettings) -> Result<(), AppError> {
         && (96..=360).contains(&settings.task_drawer_height)
         && (200..=420).contains(&settings.host_panel_width)
         && settings.file_browser_height >= 160
+        && ["bottom", "right"].contains(&settings.file_browser_position.as_str())
+        && (260..=1200).contains(&settings.file_browser_width)
         && ["internal", "external"].contains(&settings.text_editor_preference.as_str())
         && settings.external_editor_path.as_deref().is_none_or(|path| {
             !path.trim().is_empty() && !path.contains('\0') && path.len() <= 4_096
@@ -181,9 +185,9 @@ fn validate_safe_settings(settings: &SafeSettings) -> Result<(), AppError> {
         && ["off", "daily", "weekly"].contains(&settings.backup_schedule.as_str())
         && ["stable", "beta"].contains(&settings.update_channel.as_str())
         && !settings.ui_font_family.trim().is_empty()
-        && settings.ui_font_family.len() <= 160
+        && settings.ui_font_family.chars().count() <= 160
         && !settings.terminal_font_family.trim().is_empty()
-        && settings.terminal_font_family.len() <= 160
+        && settings.terminal_font_family.chars().count() <= 160
         && valid_keyboard_shortcuts(&settings.shortcuts);
     if valid {
         Ok(())
@@ -2123,6 +2127,65 @@ mod tests {
         settings.text_editor_preference = "external".to_owned();
         settings.external_editor_path = Some("/usr/bin/editor".to_owned());
         assert!(service.save(settings).is_ok());
+    }
+
+    #[test]
+    fn safe_settings_round_fractional_hidpi_layout_dimensions() {
+        let mut payload = serde_json::to_value(default_safe_settings()).expect("settings to json");
+        let object = payload.as_object_mut().expect("settings json object");
+        object.insert("connectionsPaneWidth".to_owned(), serde_json::json!(244.4));
+        object.insert("inspectorPaneWidth".to_owned(), serde_json::json!(286.6));
+        object.insert(
+            "assistantPaneWidth".to_owned(),
+            serde_json::json!(412.666656),
+        );
+        object.insert("taskDrawerHeight".to_owned(), serde_json::json!(156.25));
+        object.insert("hostPanelWidth".to_owned(), serde_json::json!(280.8));
+        object.insert("fileBrowserHeight".to_owned(), serde_json::json!(260.75));
+        object.insert("fileBrowserPosition".to_owned(), serde_json::json!("right"));
+        object.insert("fileBrowserWidth".to_owned(), serde_json::json!(488.6));
+
+        let decoded: SafeSettings =
+            serde_json::from_value(payload).expect("fractional dimensions deserialize cleanly");
+        assert_eq!(decoded.connections_pane_width, 244);
+        assert_eq!(decoded.inspector_pane_width, 287);
+        assert_eq!(decoded.assistant_pane_width, 413);
+        assert_eq!(decoded.task_drawer_height, 156);
+        assert_eq!(decoded.host_panel_width, 281);
+        assert_eq!(decoded.file_browser_height, 261);
+        assert_eq!(decoded.file_browser_position, "right");
+        assert_eq!(decoded.file_browser_width, 489);
+
+        let repository = Arc::new(TestSettingsRepository::default());
+        let service = SettingsService::new(repository);
+        assert!(service.save(decoded).is_ok());
+
+        let mut invalid_position = default_safe_settings();
+        invalid_position.file_browser_position = "top".to_owned();
+        assert!(service.save(invalid_position).is_err());
+
+        let mut invalid_width = default_safe_settings();
+        invalid_width.file_browser_width = 100;
+        assert!(service.save(invalid_width).is_err());
+
+        let mut legacy_payload =
+            serde_json::to_value(default_safe_settings()).expect("settings to json");
+        let legacy_object = legacy_payload
+            .as_object_mut()
+            .expect("settings json object");
+        legacy_object.remove("fileBrowserPosition");
+        legacy_object.remove("fileBrowserWidth");
+        let legacy_decoded: SafeSettings =
+            serde_json::from_value(legacy_payload).expect("legacy payload decodes with defaults");
+        assert_eq!(legacy_decoded.file_browser_position, "bottom");
+        assert_eq!(legacy_decoded.file_browser_width, 420);
+
+        let mut negative = serde_json::to_value(default_safe_settings()).expect("settings to json");
+        negative
+            .as_object_mut()
+            .expect("settings json object")
+            .insert("assistantPaneWidth".to_owned(), serde_json::json!(-12.5));
+        assert!(serde_json::from_value::<SafeSettings>(negative).is_err());
     }
 
     #[test]

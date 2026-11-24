@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-11-24
+
+### Added
+
+- Configurable file panel dock position (`fileBrowserPosition`: `bottom` / `right`) and independent right-dock width (`fileBrowserWidth`, `260–1200 px`, persisted to SQLite and local settings):
+  - Added a one-click dock toggle button in the file browser panel header (accessible across the Files, Commands, and Editor sub-tabs) and a synchronized setting under **Settings → Appearance**.
+  - Added vertical/horizontal splitter switching with pointer and keyboard resizing, wrapping right-dock toolbar controls, vertical dual-pane SFTP stacking, and container-query column adaptation so filenames remain readable in narrower right-dock widths.
+- Richer safe Markdown rendering across the AI Assistant and release-notes views (`assistantMarkdown.ts`, `MarkdownInline.vue`, `AssistantMarkdown.vue`, `ReadOnlyMarkdown.vue`, `UpdateAvailableDialog.vue`): supports GFM tables (including alignment, pipes in inline code, escaped pipes, and streaming header-only tables), horizontal rules, tilde fences, headings up to level 6, nested lists with ordered start numbers, and nested inline formatting (bold, italic, strikethrough, inline code, and safe `http`/`https` links) without interpreting raw HTML.
+
+### Fixed
+
+- Fixed settings save failures on high-DPI Windows displays (125% / 150% / 175% scaling): rounded fractional `PointerEvent` coordinates during pane/drawer/file-browser resizing, normalized `SafeSettings` before invoking Tauri `save_safe_settings`, added tolerant `deserialize_rounded_u16` deserialization for layout dimensions in `filex-contracts`, and aligned font-family length validation to Unicode character counts.
+- Added error-tone styling (`AlertCircle`, destructive accent, `role="alert"`) to `ToastNotice` and surfaced `errors.settingsInvalid` vs. `errors.settingsSaveFailed` distinctly in `SettingsDialog`.
+
 ## [0.1.17] - 2026-11-23
 
 ### Added

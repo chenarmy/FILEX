@@ -1,7 +1,7 @@
 import { nextTick, reactive, ref, watch } from 'vue';
 import { defineStore } from 'pinia';
 import { loadSafeSettings, saveSafeSettings } from '@/api/domain/settingsApi';
-import { defaultSafeSettings, readSafeSettings, writeSafeSettings } from '@/runtime/safeSettingsRepository';
+import { defaultSafeSettings, normalizeSafeSettings, readSafeSettings, writeSafeSettings } from '@/runtime/safeSettingsRepository';
 import { setLocale } from '@/i18n';
 import type { SafeSettings } from '@/types/contracts';
 
@@ -42,7 +42,7 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   async function save(next: SafeSettings): Promise<boolean> {
-    const result = await saveSafeSettings({ ...next, shortcuts: { ...next.shortcuts } });
+    const result = await saveSafeSettings(normalizeSafeSettings({ ...next, shortcuts: { ...next.shortcuts } }));
     if (!result.ok) {
       error.value = result.error.messageKey;
       return false;
@@ -52,7 +52,7 @@ export const useSettingsStore = defineStore('settings', () => {
       persistenceTimer = null;
     }
     suppressAutoPersist = true;
-    Object.assign(value, result.data);
+    Object.assign(value, normalizeSafeSettings(result.data));
     writeSafeSettings(value);
     apply();
     error.value = null;
@@ -66,7 +66,7 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   async function persistCurrent(): Promise<void> {
-    const result = await saveSafeSettings({ ...value });
+    const result = await saveSafeSettings(normalizeSafeSettings({ ...value, shortcuts: { ...value.shortcuts } }));
     error.value = result.ok ? null : result.error.messageKey;
     persistenceTimer = null;
   }

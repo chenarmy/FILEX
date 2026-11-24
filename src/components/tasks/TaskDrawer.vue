@@ -382,7 +382,7 @@ function beginResize(event: PointerEvent): void {
   const startY = event.clientY;
   const initial = settings.value.taskDrawerHeight;
   const move = (next: PointerEvent) => {
-    settings.value.taskDrawerHeight = Math.min(360, Math.max(96, initial + startY - next.clientY));
+    settings.value.taskDrawerHeight = Math.min(360, Math.max(96, Math.round(initial + startY - next.clientY)));
   };
   const stop = () => {
     window.removeEventListener('pointermove', move);
