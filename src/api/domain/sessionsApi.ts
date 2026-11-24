@@ -99,6 +99,20 @@ export async function connectQuickPasswordSession(
   }
 }
 
+export async function duplicateConnectedSession(
+  sessionId: string,
+): Promise<OperationResult<SessionSummary>> {
+  if (!isTauriRuntime()) return desktopOnly();
+  try {
+    return await invoke<OperationResult<SessionSummary>>(
+      'duplicate_session',
+      { sessionId },
+    );
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'SSH_CONNECT_FAILED'));
+  }
+}
+
 export async function connectPrivateKeySession(sessionId: string): Promise<OperationResult<SessionConnectionProgress>> {
   if (!isTauriRuntime()) return desktopOnly();
   try {

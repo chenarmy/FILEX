@@ -18,7 +18,6 @@ const baseline = ref('');
 const dirty = computed(() => editing.value && draft.value !== baseline.value);
 const draftBytes = computed(() => new TextEncoder().encode(draft.value).length);
 const draftWithinLimit = computed(() => draftBytes.value <= 1024 * 1024);
-const quickSession = computed(() => sessions.isQuickProfile(sessions.activeSession?.profileId));
 
 watch(() => sftp.preview, (preview) => {
   if (!preview) return;
@@ -97,10 +96,6 @@ async function reloadRemote(): Promise<void> {
 
 async function download(): Promise<void> {
   if (!sftp.previewPath) return;
-  if (quickSession.value) {
-    ui.notify(t('quick.savedHint'));
-    return;
-  }
   const path = sftp.previewPath;
   await close();
   if (sftp.previewPath) return;
@@ -170,7 +165,7 @@ function handlePreviewEncodingChange(event: Event): void {
       <footer class="dialog-footer">
         <button v-if="sftp.previewPath && !sftp.previewLoading" type="button" class="button" :disabled="sftp.externalOpening" @click="openExternally"><ExternalLink :size="13" />{{ sftp.externalOpening ? t('inspector.externalOpenLoading') : t('inspector.externalOpen') }}</button>
         <button v-if="sftp.preview && !editing && !sftp.preview.truncated && !sftp.previewError" type="button" class="button" @click="startEditing">{{ t('inspector.editFile') }}</button>
-        <button v-if="sftp.preview && !sftp.previewError" type="button" class="button" :disabled="quickSession" :title="quickSession ? t('quick.savedHint') : undefined" @click="download"><Download :size="13" />{{ t('inspector.downloadFile') }}</button>
+        <button v-if="sftp.preview && !sftp.previewError" type="button" class="button" @click="download"><Download :size="13" />{{ t('inspector.downloadFile') }}</button>
         <button v-if="editing" type="button" class="button" :disabled="sftp.savingPreview" @click="cancelEditing">{{ t('settings.cancel') }}</button>
         <button v-if="editing" type="button" class="button primary" :disabled="!dirty || !draftWithinLimit || sftp.savingPreview || ['SFTP_PREVIEW_CONFLICT', 'SFTP_SAVE_ROLLBACK_FAILED', 'SFTP_SAVE_TARGET_APPEARED'].includes(sftp.previewError?.code ?? '')" @click="save">{{ sftp.savingPreview ? t('inspector.savingFile') : t('inspector.saveFile') }}</button>
         <button v-if="sftp.previewError?.code === 'SFTP_PREVIEW_CONFLICT'" type="button" class="button" :disabled="sftp.savingPreview" @click="reloadRemote">{{ t('inspector.reloadRemote') }}</button>

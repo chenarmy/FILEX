@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.1.19] - 2026-11-24
+
+### Added
+
+- Full workbench parity for temporary (Quick Connect and external CLI / bastion-launched) SSH sessions (ADR-0019):
+  - **Port forwarding & in-memory tunnel rules** (`src-tauri/src/transient_tunnels.rs` `HybridTunnelRuleRepository`): unlocked the top-bar tunnel button, `TunnelDialog`, and `TunnelsPane` for temporary sessions, routing quick-session tunnel rules to a bounded in-memory repository without polluting SQLite while preserving saved-profile persistence.
+  - **Duplicate & split terminal sessions** (`SessionRuntime::duplicate_connected_session` / `duplicate_session` command): opens an independent PTY shell channel directly on the verified live SSH transport without re-prompting for credentials (also compatible with single-use local bastion proxies), with reference-counted `Arc<ConnectedSshSession>` transport teardown on disconnect/remote closure.
+  - **Remote preview download & remote-to-remote relay**: unlocked file downloads from `RemoteTextPreviewDialog` and enabled temporary sessions as both source and destination endpoints in `FileBrowserPanel` and `TransferDialog` (backed by `HybridTransferRepository`).
+  - **Same-tab reconnect**: clears one-time secrets (`quick_secrets`) immediately on consumption, failure, disconnect, or remote closure while retaining non-secret temporary profile metadata until the last tab referencing that profile closes, enabling manual reconnect and multi-tab sharing.
+
 ## [0.1.18] - 2026-11-24
 
 ### Added

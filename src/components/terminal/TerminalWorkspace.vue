@@ -45,7 +45,6 @@ const canStartSession = computed(() => !sessions.busy
   && !sessions.passwordProfileId
   && !sessions.privateKeyPassphraseProfileId);
 const canDuplicateActive = computed(() => Boolean(sessions.activeSession)
-  && !sessions.isQuickProfile(sessions.activeSession?.profileId)
   && (isLocalSession(sessions.activeSession) || Boolean(sessions.profileForId(sessions.activeSession?.profileId ?? '')))
   && canStartSession.value);
 const activeLogStatus = computed(() => terminalLogs.statusFor(sessions.activeSessionId));
@@ -83,20 +82,26 @@ function showLogError(): void {
   ui.notify(t(terminalLogs.error.messageKey as Parameters<typeof t>[0]));
 }
 
+const activeReconnectProfile = computed(() => (
+  sessions.profileForSession(sessions.activeSession) ?? connections.activeProfile
+));
 const canReconnect = computed(() => !isLocalSession(sessions.activeSession)
-  && Boolean(connections.activeProfile)
+  && Boolean(activeReconnectProfile.value)
   && !sessions.busy
   && !sessions.challenge);
 const canDisconnect = computed(() => sessions.activeSession?.state === 'connected' && !sessions.busy);
 
 async function reconnect(): Promise<void> {
   if (!canReconnect.value) return;
+  const profile = activeReconnectProfile.value;
   if (
     sessions.activeSession
-    && connections.activeProfile?.id === sessions.activeSession.profileId
+    && profile?.id === sessions.activeSession.profileId
     && ['disconnected', 'failed'].includes(sessions.activeSession.state)
   ) await sessions.reconnectActive();
-  else if (connections.activeProfile) await sessions.begin(connections.activeProfile);
+  else if (profile && sessions.isQuickProfile(profile.id)) {
+    await sessions.beginQuick({ host: profile.host, port: profile.port, username: profile.username });
+  } else if (profile) await sessions.begin(profile);
 }
 
 async function toggleTerminalLog(): Promise<void> {
@@ -161,19 +166,7 @@ function startNewSession(): void {
 async function duplicateActiveSession(): Promise<void> {
   const current = sessions.activeSession;
   if (!canDuplicateActive.value || !current) return;
-  if (isLocalSession(current)) {
-    const meta = sessions.localMetadataForSession(current.id);
-    await sessions.openLocalSession({
-      shellKind: meta?.shellKind ?? null,
-      workingDirectory: meta?.workingDirectory ?? null,
-      columns: 120,
-      rows: 32,
-    });
-    return;
-  }
-  const profile = sessions.profileForId(current.profileId);
-  if (!profile) return;
-  await sessions.begin(profile);
+  await sessions.duplicateSession(current.id);
 }
 
 async function createSplit(orientation: 'vertical' | 'horizontal'): Promise<void> {
@@ -196,17 +189,7 @@ async function createSplit(orientation: 'vertical' | 'horizontal'): Promise<void
   focusedPaneIndex.value = 1;
 
   try {
-    if (sourceIsLocal) {
-      const meta = sessions.localMetadataForSession(source.id);
-      await sessions.openLocalSession({
-        shellKind: meta?.shellKind ?? null,
-        workingDirectory: meta?.workingDirectory ?? null,
-        columns: 120,
-        rows: 32,
-      });
-    } else if (profile) {
-      await sessions.begin(profile);
-    }
+    await sessions.duplicateSession(sourceSessionId);
   } catch (error) {
     layout.value = previousLayout;
     paneSessionIds.value = previousPanes;

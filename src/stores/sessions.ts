@@ -15,6 +15,7 @@ import {
   connectQuickPasswordSession,
   cancelSessionAttempt,
   disconnectSession,
+  duplicateConnectedSession,
   listSessions,
   probeQuickSessionHostKey,
   probeSessionHostKey,
@@ -47,6 +48,7 @@ import {
 import { t } from '@/i18n';
 import { recordHostTrust } from '@/api/domain/trustApi';
 import { isLocalSession } from '@/domain/sessionCapabilities';
+import { useBookmarksStore } from '@/stores/bookmarks';
 import { useConnectionsStore } from '@/stores/connections';
 import { useEventsStore } from '@/stores/events';
 import { useTunnelsStore } from '@/stores/tunnels';
@@ -249,6 +251,21 @@ export const useSessionsStore = defineStore('sessions', () => {
       delete nextMeta[profileId];
       quickLaunchMeta.value = nextMeta;
     }
+    useBookmarksStore().clearEphemeral(profileId);
+  }
+
+  function clearQuickProfileIfUnused(profileId: string | null | undefined): void {
+    if (!profileId) return;
+    if (summaries.value.some((item) => item.profileId === profileId)) return;
+    clearQuickProfile(profileId);
+  }
+
+  function resolvePendingQuickSession(profileId: string): SessionSummary | undefined {
+    return (pendingConnectionSessionId.value
+      ? summaries.value.find((item) => item.id === pendingConnectionSessionId.value)
+      : undefined)
+      ?? summaries.value.find((item) => item.id === activeSessionId.value && item.profileId === profileId)
+      ?? summaries.value.find((item) => item.profileId === profileId);
   }
 
   function markQuickProfileUsed(profileId: string): void {
@@ -361,7 +378,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     if (!refreshed) {
       summaries.value = summaries.value.filter((item) => item.id !== sessionId);
       if (pendingConnectionSessionId.value === sessionId) {
-        clearQuickProfile(challenge.value?.profileId);
+        clearQuickProfileIfUnused(challenge.value?.profileId);
         pendingConnectionSessionId.value = null;
         currentRouteProfileId.value = null;
         challenge.value = null;
@@ -377,7 +394,6 @@ export const useSessionsStore = defineStore('sessions', () => {
       pendingConnectionSessionId.value === sessionId
       && ['failed', 'disconnected'].includes(refreshed.state)
     ) {
-      clearQuickProfile(challenge.value?.profileId ?? refreshed.profileId);
       pendingConnectionSessionId.value = null;
       currentRouteProfileId.value = null;
       challenge.value = null;
@@ -585,7 +601,7 @@ export const useSessionsStore = defineStore('sessions', () => {
       }
       suppressAutoReconnect.add(sessionId);
       await refreshSummary(sessionId);
-      clearQuickProfile(profile.id);
+      clearQuickProfileIfUnused(profile.id);
       passwordProfileId.value = null;
       privateKeyPassphraseProfileId.value = null;
       challenge.value = null;
@@ -613,6 +629,7 @@ export const useSessionsStore = defineStore('sessions', () => {
       sessionId: result.data.session.id,
       generation: result.data.session.generation,
     });
+    void useTunnelsStore().autoStartForSession(result.data.session.id, result.data.session.profileId);
     if (meta?.openSftp) {
       const settings = useSettingsStore();
       settings.value.fileBrowserOpen = true;
@@ -781,7 +798,7 @@ export const useSessionsStore = defineStore('sessions', () => {
       return;
     }
     if (isQuickProfile(profileId)) {
-      const session = summaries.value.find((item) => item.profileId === profileId);
+      const session = resolvePendingQuickSession(profileId);
       if (!session) {
         error.value = {
           code: 'SESSION_NOT_FOUND',
@@ -799,7 +816,7 @@ export const useSessionsStore = defineStore('sessions', () => {
         if (!result.ok) {
           suppressAutoReconnect.add(session.id);
           await refreshSummary(session.id);
-          clearQuickProfile(profileId);
+          clearQuickProfileIfUnused(profileId);
           passwordProfileId.value = null;
           challenge.value = null;
           currentRouteProfileId.value = null;
@@ -817,6 +834,7 @@ export const useSessionsStore = defineStore('sessions', () => {
           sessionId: result.data.session.id,
           generation: result.data.session.generation,
         });
+        void useTunnelsStore().autoStartForSession(result.data.session.id, result.data.session.profileId);
         return;
       } finally {
         busy.value = false;
@@ -859,7 +877,7 @@ export const useSessionsStore = defineStore('sessions', () => {
       return;
     }
     if (isQuickProfile(profileId)) {
-      const session = summaries.value.find((item) => item.profileId === profileId);
+      const session = resolvePendingQuickSession(profileId);
       if (!session) {
         error.value = {
           code: 'SESSION_NOT_FOUND',
@@ -994,7 +1012,6 @@ export const useSessionsStore = defineStore('sessions', () => {
     if (!activeSessionId.value || busy.value) return;
     const disconnectedId = activeSessionId.value;
     const current = summaries.value.find((item) => item.id === disconnectedId);
-    const quickProfileId = current?.profileId;
     const localSession = isLocalSession(current);
     suppressAutoReconnect.add(disconnectedId);
     busy.value = true;
@@ -1005,16 +1022,68 @@ export const useSessionsStore = defineStore('sessions', () => {
         : await disconnectSession(activeSessionId.value);
       if (!result.ok) {
         suppressAutoReconnect.delete(disconnectedId);
-        clearQuickProfile(quickProfileId);
         error.value = result.error;
         return;
       }
       upsert(result.data);
-      clearQuickProfile(quickProfileId);
       useEventsStore().record('session', localSession ? 'LOCAL_TERMINAL_CLOSED' : 'SSH_DISCONNECTED', 'info', { sessionId: result.data.id });
     } finally {
       busy.value = false;
     }
+  }
+
+  async function duplicateSession(sourceSessionId?: string): Promise<boolean> {
+    if (busy.value) return false;
+    const source = sourceSessionId
+      ? summaries.value.find((item) => item.id === sourceSessionId)
+      : activeSession.value;
+    if (!source) return false;
+    if (isLocalSession(source)) {
+      const meta = localMetadataForSession(source.id);
+      return openLocalSession({
+        shellKind: meta?.shellKind ?? null,
+        workingDirectory: meta?.workingDirectory ?? null,
+        columns: 120,
+        rows: 32,
+      });
+    }
+    const profile = profileForId(source.profileId);
+    if (!profile) {
+      error.value = missingProfileError();
+      return false;
+    }
+    if (isQuickProfile(source.profileId)) {
+      if (source.state === 'connected') {
+        busy.value = true;
+        error.value = null;
+        try {
+          const result = await duplicateConnectedSession(source.id);
+          if (result.ok) {
+            upsert(result.data);
+            markQuickProfileUsed(result.data.profileId);
+            useEventsStore().record('session', 'SSH_CONNECTED', 'success', {
+              sessionId: result.data.id,
+              generation: result.data.generation,
+            });
+            return true;
+          }
+          if (profile.authenticationMethod !== 'password') {
+            error.value = result.error;
+            return false;
+          }
+        } finally {
+          busy.value = false;
+        }
+      }
+      return beginQuick({
+        host: profile.host,
+        port: profile.port,
+        username: profile.username,
+      });
+    }
+    const previousId = activeSessionId.value;
+    await begin(profile);
+    return activeSessionId.value !== previousId;
   }
 
   async function writeToSession(sessionId: string, data: Uint8Array): Promise<boolean> {
@@ -1183,15 +1252,20 @@ export const useSessionsStore = defineStore('sessions', () => {
   }
 
   async function closeSession(sessionId: string): Promise<void> {
-    if (pendingConnectionSessionId.value === sessionId) await cancelPendingAttempt();
+    const wasPending = pendingConnectionSessionId.value === sessionId;
+    if (wasPending) await cancelPendingAttempt();
     const summary = summaries.value.find((item) => item.id === sessionId);
     const profileId = summary?.profileId;
+    const localSession = isLocalSession(summary);
     if (summary?.state === 'connected') {
       activeSessionId.value = sessionId;
       await disconnectActive();
     }
-    clearQuickProfile(profileId);
     summaries.value = summaries.value.filter((item) => item.id !== sessionId);
+    if (!wasPending && summary && !localSession && isTauriRuntime()) {
+      await cancelSessionAttempt(sessionId);
+    }
+    clearQuickProfileIfUnused(profileId);
     const nextEphemeral = { ...ephemeralHistoryEntries.value };
     delete nextEphemeral[sessionId];
     ephemeralHistoryEntries.value = nextEphemeral;
@@ -1244,7 +1318,6 @@ export const useSessionsStore = defineStore('sessions', () => {
         if (current) summaries.value[index] = { ...current, state: 'disconnected' };
         useEventsStore().record('session', payload.kind === 'exit' ? 'PTY_EXITED' : 'PTY_CLOSED', 'warning', { sessionId: payload.sessionId, exitStatus: payload.exitStatus ?? -1 });
         if (payload.kind === 'closed' && current) {
-          clearQuickProfile(current.profileId);
           if (quickSession || localSession) suppressAutoReconnect.add(payload.sessionId);
           else void autoReconnect(payload.sessionId);
         }
@@ -1255,18 +1328,19 @@ export const useSessionsStore = defineStore('sessions', () => {
 
   async function cancelPendingAttempt(): Promise<void> {
     const sessionId = pendingConnectionSessionId.value;
-    const quickProfileId = challenge.value?.profileId ?? passwordProfileId.value;
+    const quickProfileId = challenge.value?.profileId ?? passwordProfileId.value ?? privateKeyPassphraseProfileId.value;
     challenge.value = null;
     currentRouteProfileId.value = null;
     pendingConnectionSessionId.value = null;
     passwordProfileId.value = null;
     privateKeyPassphraseProfileId.value = null;
-    clearQuickProfile(quickProfileId);
-    if (!sessionId) return;
-    const result = await cancelSessionAttempt(sessionId);
-    if (!result.ok) error.value = result.error;
-    summaries.value = summaries.value.filter((item) => item.id !== sessionId);
-    if (activeSessionId.value === sessionId) activeSessionId.value = summaries.value.at(-1)?.id ?? null;
+    if (sessionId) {
+      const result = await cancelSessionAttempt(sessionId);
+      if (!result.ok) error.value = result.error;
+      summaries.value = summaries.value.filter((item) => item.id !== sessionId);
+      if (activeSessionId.value === sessionId) activeSessionId.value = summaries.value.at(-1)?.id ?? null;
+    }
+    clearQuickProfileIfUnused(quickProfileId);
     scheduleNextExternalLaunch();
   }
 
@@ -1355,6 +1429,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     isQuickProfile,
     begin,
     beginQuick,
+    duplicateSession,
     reconnectActive,
     reconnectSession,
     acceptHostKey,

@@ -18,6 +18,7 @@ mod terminal_logging;
 mod text_encoding;
 mod transfer_resume;
 mod transient_transfers;
+mod transient_tunnels;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -3498,6 +3499,21 @@ async fn connect_quick_password_session(
     }
 }
 
+#[tauri::command]
+async fn duplicate_session(
+    app: tauri::AppHandle,
+    session_id: String,
+    sessions: State<'_, SessionRuntime>,
+) -> Result<OperationResult<SessionSummary>, ()> {
+    match sessions.duplicate_connected_session(&session_id).await {
+        Ok((summary, output)) => {
+            spawn_terminal_output(app, summary.id.clone(), output);
+            Ok(OperationResult::success(summary))
+        }
+        Err(error) => Ok(OperationResult::failure(error)),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn connect_private_key_session(
@@ -6114,7 +6130,9 @@ pub fn run() {
                 .recover_interrupted()
                 .map_err(|error| io::Error::other(error.code))?;
             app.manage(transfers);
-            app.manage(TunnelRuleService::new(repository.clone()));
+            app.manage(TunnelRuleService::new(Arc::new(
+                transient_tunnels::HybridTunnelRuleRepository::new(repository.clone()),
+            )));
             app.manage(SystemCredentialStore);
             app.manage(LocalTerminalRuntime::default());
             app.manage(SessionRuntime::default());
@@ -6223,6 +6241,7 @@ pub fn run() {
             save_profile_private_key_passphrase,
             connect_password_session,
             connect_quick_password_session,
+            duplicate_session,
             connect_private_key_session,
             connect_agent_session,
             external_launch::commands::drain_external_launch_events,

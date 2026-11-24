@@ -129,6 +129,10 @@ async function openProfile(profile: ConnectionProfile): Promise<void> {
     if (existing.state === 'disconnected' || existing.state === 'failed') await sessions.reconnectActive();
     return;
   }
+  if (sessions.isQuickProfile(profile.id)) {
+    await sessions.beginQuick({ host: profile.host, port: profile.port, username: profile.username });
+    return;
+  }
   await sessions.begin(profile);
 }
 

@@ -1366,16 +1366,67 @@ impl SessionRuntime {
             .remove(session_id))
     }
 
-    fn remove_quick_profile(&self, session_id: &str) -> Result<(), AppError> {
-        self.quick_profiles
-            .lock()
-            .map_err(|_| session_lock_error())?
-            .remove(session_id);
+    fn remove_quick_secret(&self, session_id: &str) -> Result<(), AppError> {
         self.quick_secrets
             .lock()
             .map_err(|_| session_lock_error())?
             .remove(session_id);
         Ok(())
+    }
+
+    fn remove_quick_profile(&self, session_id: &str) -> Result<(), AppError> {
+        self.quick_profiles
+            .lock()
+            .map_err(|_| session_lock_error())?
+            .remove(session_id);
+        self.remove_quick_secret(session_id)
+    }
+
+    pub async fn duplicate_connected_session(
+        &self,
+        source_session_id: &str,
+    ) -> Result<(SessionSummary, TerminalOutput), AppError> {
+        let source_summary = self.summary(source_session_id)?;
+        if source_summary.state != SessionState::Connected {
+            return Err(session_not_found_error());
+        }
+        let (ssh_session, upstream_sessions) = {
+            let connections = self.connections.lock().await;
+            let connection = connections
+                .get(source_session_id)
+                .ok_or_else(session_not_found_error)?;
+            (
+                connection.session.clone(),
+                connection.upstream_sessions.clone(),
+            )
+        };
+        let (terminal, output) = ssh_session
+            .open_terminal(120, 32)
+            .await
+            .map_err(|error| ssh_error(&error))?;
+        let machine = SessionMachine::new_connected_channel(&source_summary);
+        let summary = machine.summary();
+        let new_session_id = summary.id.clone();
+        self.machines
+            .lock()
+            .map_err(|_| session_lock_error())?
+            .insert(new_session_id.clone(), machine);
+        self.connections.lock().await.insert(
+            new_session_id.clone(),
+            RuntimeConnection {
+                session: ssh_session,
+                terminal: Arc::new(AsyncMutex::new(terminal)),
+                upstream_sessions,
+            },
+        );
+        if let Some(quick_profile) = self.quick_profile(source_session_id)?
+            && let Err(error) = self.bind_quick_profile(&new_session_id, quick_profile)
+        {
+            let _ = self.disconnect(&new_session_id).await;
+            let _ = self.cancel_attempt(&new_session_id).await;
+            return Err(error);
+        }
+        Ok((self.decorate_summary(summary), output))
     }
 
     async fn connect_route_hop(
@@ -1822,23 +1873,54 @@ impl SessionRuntime {
     pub async fn disconnect(&self, session_id: &str) -> Result<SessionSummary, AppError> {
         self.elevated_access.invalidate_session(session_id);
         self.transition(session_id, SessionState::Disconnecting)?;
-        self.remove_quick_profile(session_id)?;
+        self.remove_quick_secret(session_id)?;
         self.invalidate_process_snapshot(session_id)?;
         self.cancel_session_transfers(session_id)?;
         self.stop_session_tunnels(session_id).await?;
-        let connection = self.connections.lock().await.remove(session_id);
+        let (connection, transport_shared, unshared_upstreams) = {
+            let mut connections = self.connections.lock().await;
+            let connection = connections.remove(session_id);
+            let shared = connection.as_ref().is_some_and(|removed| {
+                connections
+                    .values()
+                    .any(|other| Arc::ptr_eq(&other.session, &removed.session))
+            });
+            let unshared_upstreams = connection
+                .as_ref()
+                .map(|removed| {
+                    removed
+                        .upstream_sessions
+                        .iter()
+                        .filter(|upstream| {
+                            !connections.values().any(|other| {
+                                other
+                                    .upstream_sessions
+                                    .iter()
+                                    .any(|other_up| Arc::ptr_eq(other_up, upstream))
+                            })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (connection, shared, unshared_upstreams)
+        };
         if let Some(connection) = connection {
             {
                 let terminal = connection.terminal.lock().await;
                 let _ = terminal.close().await;
             }
-            let mut first_error = connection
-                .session
-                .disconnect()
-                .await
-                .err()
-                .map(|error| ssh_error(&error));
-            for upstream in connection.upstream_sessions.iter().rev() {
+            let mut first_error = if transport_shared {
+                None
+            } else {
+                connection
+                    .session
+                    .disconnect()
+                    .await
+                    .err()
+                    .map(|error| ssh_error(&error))
+            };
+            for upstream in unshared_upstreams.iter().rev() {
                 match tokio::time::timeout(Duration::from_secs(2), upstream.disconnect()).await {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) if first_error.is_none() => {
@@ -1999,18 +2081,47 @@ impl SessionRuntime {
 
     pub async fn remote_closed(&self, session_id: &str) -> Result<SessionSummary, AppError> {
         self.elevated_access.invalidate_session(session_id);
-        let connection = self.connections.lock().await.remove(session_id);
+        let (connection, transport_shared, unshared_upstreams) = {
+            let mut connections = self.connections.lock().await;
+            let connection = connections.remove(session_id);
+            let shared = connection.as_ref().is_some_and(|removed| {
+                connections
+                    .values()
+                    .any(|other| Arc::ptr_eq(&other.session, &removed.session))
+            });
+            let unshared_upstreams = connection
+                .as_ref()
+                .map(|removed| {
+                    removed
+                        .upstream_sessions
+                        .iter()
+                        .filter(|upstream| {
+                            !connections.values().any(|other| {
+                                other
+                                    .upstream_sessions
+                                    .iter()
+                                    .any(|other_up| Arc::ptr_eq(other_up, upstream))
+                            })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (connection, shared, unshared_upstreams)
+        };
         if let Some(connection) = connection {
             {
                 let terminal = connection.terminal.lock().await;
                 let _ = terminal.close().await;
             }
-            let _ = connection.session.disconnect().await;
-            for upstream in connection.upstream_sessions.iter().rev() {
+            if !transport_shared {
+                let _ = connection.session.disconnect().await;
+            }
+            for upstream in unshared_upstreams.iter().rev() {
                 let _ = tokio::time::timeout(Duration::from_secs(2), upstream.disconnect()).await;
             }
         }
-        self.remove_quick_profile(session_id)?;
+        self.remove_quick_secret(session_id)?;
         let summary = self.summary(session_id)?;
         if summary.state == SessionState::Connected {
             self.transition(session_id, SessionState::Disconnecting)?;
@@ -4750,7 +4861,7 @@ impl SessionRuntime {
 
     fn fail(&self, session_id: &str, error: AppError) -> Result<SessionSummary, AppError> {
         self.elevated_access.invalidate_session(session_id);
-        self.remove_quick_profile(session_id)?;
+        self.remove_quick_secret(session_id)?;
         let summary = self
             .machines
             .lock()

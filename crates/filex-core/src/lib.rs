@@ -1600,6 +1600,23 @@ impl SessionMachine {
         }
     }
 
+    pub fn new_connected_channel(source: &SessionSummary) -> Self {
+        Self {
+            summary: SessionSummary {
+                id: uuid::Uuid::new_v4().to_string(),
+                generation: 1,
+                profile_id: source.profile_id.clone(),
+                session_kind: SessionKind::Ssh,
+                capabilities: capabilities_for_ssh(false),
+                state: SessionState::Connected,
+                host: source.host.clone(),
+                port: source.port,
+                username: source.username.clone(),
+                last_error: None,
+            },
+        }
+    }
+
     pub fn summary(&self) -> SessionSummary {
         self.summary.clone()
     }

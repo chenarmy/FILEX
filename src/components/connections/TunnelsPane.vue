@@ -23,7 +23,7 @@ onMounted(() => {
 });
 
 function profileName(profileId: string): string {
-  return connections.profiles.find((profile) => profile.id === profileId)?.name ?? t('tunnel.unknownProfile');
+  return sessions.profileForId(profileId)?.name ?? t('tunnel.unknownProfile');
 }
 
 function tunnelTarget(tunnel: Pick<TunnelRule, 'kind' | 'targetHost' | 'targetPort'>): string {
@@ -67,7 +67,7 @@ async function removeRule(rule: TunnelRule): Promise<void> {
 }
 
 async function startRule(rule: TunnelRule): Promise<void> {
-  const profile = connections.profiles.find((item) => item.id === rule.profileId);
+  const profile = sessions.profileForId(rule.profileId);
   if (!profile) {
     ui.notify(t('tunnel.unknownProfile'));
     return;
@@ -75,7 +75,15 @@ async function startRule(rule: TunnelRule): Promise<void> {
   const session = [...sessions.summaries].reverse().find((item) => item.profileId === rule.profileId && item.state === 'connected');
   if (!session) {
     connections.select(profile.id);
-    if (!sessions.busy) await sessions.begin(profile);
+    if (!sessions.busy) {
+      const existing = [...sessions.summaries].reverse().find((item) => item.profileId === rule.profileId && ['disconnected', 'failed'].includes(item.state));
+      if (existing) await sessions.reconnectSession(existing.id);
+      else if (sessions.isQuickProfile(profile.id)) {
+        await sessions.beginQuick({ host: profile.host, port: profile.port, username: profile.username });
+      } else {
+        await sessions.begin(profile);
+      }
+    }
     ui.notify(t('tunnel.connectToStart'));
     return;
   }
@@ -120,7 +128,7 @@ async function startRule(rule: TunnelRule): Promise<void> {
   <section class="tunnels-pane" :aria-label="t('nav.tunnels')">
     <header class="tunnels-heading">
       <strong>{{ t('tunnel.savedRules') }}</strong>
-      <button type="button" class="icon-button" :disabled="!connections.activeProfile" :aria-label="t('nav.tunnelAddRule')" :title="t('nav.tunnelAddRule')" @click="ui.openTunnel()"><Plus :size="14" /></button>
+      <button type="button" class="icon-button" :disabled="!(sessions.profileForSession(sessions.activeSession) ?? connections.activeProfile)" :aria-label="t('nav.tunnelAddRule')" :title="t('nav.tunnelAddRule')" @click="ui.openTunnel()"><Plus :size="14" /></button>
     </header>
     <p v-if="tunnels.error" class="tunnel-error" role="alert"><CircleAlert :size="13" />{{ t(tunnels.error.messageKey as Parameters<typeof t>[0]) }}</p>
 

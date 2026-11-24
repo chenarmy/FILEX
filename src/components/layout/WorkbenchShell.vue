@@ -176,18 +176,28 @@ const commandPaletteCommands = computed<CommandPaletteCommand[]>(() => {
 });
 
 async function startSession(): Promise<void> {
+  const active = sessions.activeSession;
+  const activeProfile = sessions.profileForSession(active) ?? connections.activeProfile;
   if (
-    sessions.activeSession
-    && connections.activeProfile?.id === sessions.activeSession.profileId
-    && ['disconnected', 'failed'].includes(sessions.activeSession.state)
+    active
+    && activeProfile?.id === active.profileId
+    && ['disconnected', 'failed'].includes(active.state)
   ) await sessions.reconnectActive();
-  else if (connections.activeProfile) await sessions.begin(connections.activeProfile);
+  else if (activeProfile && sessions.isQuickProfile(activeProfile.id)) {
+    if (active?.state === 'connected') await sessions.duplicateSession(active.id);
+    else await sessions.beginQuick({ host: activeProfile.host, port: activeProfile.port, username: activeProfile.username });
+  } else if (activeProfile) await sessions.begin(activeProfile);
   else ui.openQuickConnect();
 }
 
 async function createNewSession(): Promise<void> {
   if (sessions.busy || sessions.challenge) return;
-  if (connections.activeProfile) await sessions.begin(connections.activeProfile);
+  const active = sessions.activeSession;
+  const activeProfile = sessions.profileForSession(active) ?? connections.activeProfile;
+  if (activeProfile && sessions.isQuickProfile(activeProfile.id)) {
+    if (active?.state === 'connected') await sessions.duplicateSession(active.id);
+    else await sessions.beginQuick({ host: activeProfile.host, port: activeProfile.port, username: activeProfile.username });
+  } else if (activeProfile) await sessions.begin(activeProfile);
   else ui.openQuickConnect();
 }
 
@@ -602,7 +612,7 @@ onBeforeUnmount(() => {
           class="icon-button"
           :aria-label="t('terminal.tunnel')"
           :title="t('terminal.tunnel')"
-          :disabled="sessions.activeSession?.state !== 'connected' || sessions.isQuickProfile(sessions.activeSession?.profileId)"
+          :disabled="sessions.activeSession?.state !== 'connected' || !hasCapability(sessions.activeSession, 'tunneling')"
           @click="ui.openTunnel()"
         >
           <KeyRound :size="15" />
@@ -791,7 +801,7 @@ onBeforeUnmount(() => {
       @close="ui.closeOpsDialog"
     />
     <div class="sr-only" role="status" aria-live="polite">
-      {{ connections.activeProfile ? `Selected ${connections.activeProfile.name}` : '' }}
+      {{ (sessions.profileForSession(sessions.activeSession) ?? connections.activeProfile) ? `Selected ${(sessions.profileForSession(sessions.activeSession) ?? connections.activeProfile)!.name}` : '' }}
     </div>
   </main>
 </template>

@@ -17,7 +17,18 @@ const tunnels = useTunnelsStore();
 const settings = useSettingsStore();
 const exposureConfirmed = ref(false);
 const selectedRuleId = ref('');
-const profileRules = computed(() => tunnels.rules.filter((rule) => rule.profileId === connections.activeProfile?.id));
+const requestedRuleProfile = computed(() => {
+  const ruleId = selectedRuleId.value || ui.tunnelDialogRuleId;
+  if (!ruleId) return null;
+  const rule = tunnels.rules.find((item) => item.id === ruleId);
+  return rule ? sessions.profileForId(rule.profileId) : null;
+});
+const activeProfile = computed(() => (
+  requestedRuleProfile.value
+  ?? sessions.profileForSession(sessions.activeSession)
+  ?? connections.activeProfile
+));
+const profileRules = computed(() => tunnels.rules.filter((rule) => rule.profileId === activeProfile.value?.id));
 interface TunnelForm {
   name: string;
   kind: TunnelKind;
@@ -73,9 +84,12 @@ function close(): void {
 }
 
 async function submit(): Promise<void> {
-  const session = sessions.activeSession;
-  const profile = connections.activeProfile;
-  if (!session || !profile || session.profileId !== profile.id) return;
+  const profile = activeProfile.value;
+  if (!profile) return;
+  const session = sessions.activeSession?.profileId === profile.id && sessions.activeSession.state === 'connected'
+    ? sessions.activeSession
+    : [...sessions.summaries].reverse().find((item) => item.profileId === profile.id && item.state === 'connected') ?? null;
+  if (!session) return;
   if (exposesNetwork.value && !exposureConfirmed.value) return;
   const started = await tunnels.start({
     sessionId: session.id,
@@ -96,7 +110,7 @@ async function submit(): Promise<void> {
 }
 
 async function saveRule(): Promise<void> {
-  const profile = connections.activeProfile;
+  const profile = activeProfile.value;
   if (!profile) return;
   const saved = await tunnels.saveRule({
     profileId: profile.id,

@@ -1019,15 +1019,10 @@ async function openDownload(): Promise<void> {
 
 function openRemoteRelayEntry(source: RemoteFileEntry): void {
   if (!remoteReady.value || source.isSymlink) return;
-  if (quickSession.value) {
-    ui.notify(t('quick.savedHint'));
-    return;
-  }
   const sourceProfileId = sessions.activeSession?.profileId;
   const otherConnected = sessions.summaries.find((item) => (
     item.sessionKind === 'ssh'
     && item.state === 'connected'
-    && !sessions.isQuickProfile(item.profileId)
     && item.profileId !== sourceProfileId
   ));
   const destProfileId = otherConnected?.profileId ?? sourceProfileId;
@@ -1941,7 +1936,7 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
       :quick-session="quickSession"
       :can-edit="fileMenu.entry ? !fileMenu.entry.isSymlink && (fileMenu.pane === 'local' || remoteReady) : true"
       :can-download="fileMenu.pane === 'remote' && Boolean(fileMenu.entry) && !fileMenu.entry?.isSymlink"
-      :can-remote-relay="fileMenu.pane === 'remote' && Boolean(fileMenu.entry) && !fileMenu.entry?.isSymlink && !quickSession && remoteReady"
+      :can-remote-relay="fileMenu.pane === 'remote' && Boolean(fileMenu.entry) && !fileMenu.entry?.isSymlink && remoteReady"
       :can-permissions="fileMenu.pane === 'remote' && Boolean(fileMenu.entry) && !fileMenu.entry?.isSymlink && remoteReady"
       :can-quick-delete="fileMenu.pane === 'remote' && Boolean(fileMenu.entry) && fileMenu.entry?.path !== '/' && !fileMenu.entry?.isSymlink && remoteReady"
       :can-create="fileMenu.pane === 'local' ? Boolean(localFiles.listing) : remoteReady"

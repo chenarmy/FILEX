@@ -15,8 +15,8 @@ A quick session also crosses two different persistence scopes. Host trust is sec
 - Construct a temporary `ConnectionProfile` in Rust after validating the exact boundary input. Bind it to the session ID in `SessionRuntime` memory only. It is never inserted through `ProfileService`, SQLite, settings, events, diagnostics or export.
 - Run the existing strict host-key probe and trust evaluation. Unknown or changed keys still require the existing explicit confirmation, and confirmed fingerprints are appended to the durable trust ledger.
 - Prompt for the password after host verification. Accept it in a dedicated command that wraps it in `Zeroizing`, bounds its encoded size and passes it directly to one route authentication operation. Do not write it to the OS credential store, session state, command results or logs.
-- Keep the temporary profile while the session is active so terminal naming and session-scoped inspections can resolve the same endpoint. Remove it on cancellation, authentication or transport failure, disconnect, remote closure, restore reset or application shutdown; a later connection starts from a fresh quick-connect decision.
-- Support terminal, PTY, monitoring, direct SFTP and direct remote file operations. Disable durable transfer queue, saved tunnel rules and duplicate-session actions because those features persist or reuse a profile ID. Users who need them create a saved connection profile.
+- Keep the temporary profile while the session tab remains open so terminal naming, reconnect, duplicated/split channels, and session-scoped inspections resolve the same endpoint. Clear one-time secrets immediately upon consumption, failure, disconnect, remote closure, cancellation, restore reset, or shutdown; remove non-secret temporary profile metadata when the last session tab using that profile closes (or on cancellation, restore reset, or shutdown).
+- Provide full workbench parity for temporary sessions — terminal, PTY, monitoring, direct SFTP, remote preview downloads, transfer queue, remote-to-remote relay, port forwarding, tunnel rules, duplicated/split sessions, and reconnect — by routing transient transfers and tunnel rules to bounded in-memory hybrid repositories (`HybridTransferRepository`, `HybridTunnelRuleRepository`) and opening new independent PTY channels on the verified SSH transport (`duplicate_session`) without polluting SQLite or persisting secrets.
 - If a temporary profile is absent during reconnection, fail closed with the existing profile/session error instead of reconstructing endpoint data from UI state.
 
 ## Alternatives considered
@@ -31,5 +31,5 @@ A quick session also crosses two different persistence scopes. Host trust is sec
 - A one-off host can be opened without changing the connection library.
 - Temporary sessions remain multi-tab safe because each mapping is scoped by session/profile ID.
 - Host trust remains auditable across quick and saved connections.
-- Quick sessions intentionally expose fewer workspace actions than saved profiles; the UI must explain the limitation instead of creating orphaned persistent records.
+- Quick sessions expose the same workbench capabilities as saved profiles while keeping transient transfers, tunnel rules, bookmarks, and profile metadata strictly in bounded memory (never polluting SQLite or exports).
 - Runtime lifecycle cleanup needs source fixtures for unknown-key cancellation, authentication failure, disconnect and remote closure. Those fixtures remain pending while verification is deferred.

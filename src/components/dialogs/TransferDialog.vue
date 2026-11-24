@@ -26,12 +26,11 @@ const isRelay = computed(() => direction.value === 'remote_to_remote');
 const profileId = computed(() => ui.transferDialog?.profileId
   ?? sessions.activeSession?.profileId
   ?? connections.activeProfile?.id);
-const activeSavedProfileId = computed(() => (
-  sessions.activeSession && !sessions.isQuickProfile(sessions.activeSession.profileId)
-    ? sessions.activeSession.profileId
-    : connections.activeProfile?.id ?? null
+const activeProfileId = computed(() => (
+  sessions.activeSession?.profileId
+  ?? connections.activeProfile?.id
+  ?? null
 ));
-const quickTarget = computed(() => sessions.isQuickProfile(profileId.value));
 const selectedRemote = computed(() => sftp.entries.find((entry) => entry.path === ui.transferDialog?.remotePath) ?? null);
 const selectedLocal = computed(() => localFiles.listing?.entries.find((entry) => entry.path === ui.transferDialog?.localPath) ?? null);
 
@@ -47,7 +46,7 @@ function profileDisplay(id: string | null | undefined): string {
 const destinationOptions = computed(() => {
   const seen = new Set<string>();
   return sessions.summaries
-    .filter((item) => item.sessionKind === 'ssh' && item.state === 'connected' && !sessions.isQuickProfile(item.profileId))
+    .filter((item) => item.sessionKind === 'ssh' && item.state === 'connected')
     .filter((item) => {
       if (seen.has(item.profileId)) return false;
       seen.add(item.profileId);
@@ -94,8 +93,8 @@ const form = reactive<{
 
 const needsRelayEndpointConfirm = computed(() => (
   isRelay.value && (
-    profileId.value !== activeSavedProfileId.value
-    || form.destinationProfileId !== activeSavedProfileId.value
+    profileId.value !== activeProfileId.value
+    || form.destinationProfileId !== activeProfileId.value
   )
 ));
 const relaySameEndpoint = computed(() => (
@@ -106,8 +105,7 @@ const relaySameEndpoint = computed(() => (
   && form.remotePath.trim() === form.destinationRemotePath.trim()
 ));
 const submitDisabled = computed(() => (
-  (isRelay.value && quickTarget.value)
-  || (isRelay.value
+  (isRelay.value
     ? (
       !profileId.value
       || !form.destinationProfileId
@@ -133,11 +131,6 @@ function close(): void {
 
 async function submit(): Promise<void> {
   if (submitDisabled.value || !profileId.value) return;
-  if (isRelay.value && quickTarget.value) {
-    ui.notify(t('quick.savedHint'));
-    ui.closeTransfer();
-    return;
-  }
   const queued = await transfers.enqueue({
     profileId: profileId.value,
     direction: direction.value,
@@ -177,7 +170,6 @@ async function submit(): Promise<void> {
       <div class="dialog-body">
         <p class="dialog-note">{{ t('transfer.directoryHelp') }}</p>
         <p v-if="isRelay" class="dialog-note relay-note">{{ t('transfer.relayNote') }}</p>
-        <p v-if="isRelay && quickTarget" class="quick-connect-hint">{{ t('quick.savedHint') }}</p>
         <div class="form-grid">
           <template v-if="isRelay">
             <label class="field full">
