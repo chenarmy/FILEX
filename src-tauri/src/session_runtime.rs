@@ -2191,61 +2191,75 @@ impl SessionRuntime {
             return Err(invalid_remote_path_error());
         }
         let session = self.session_handle(session_id).await?;
-        let sftp = session
-            .open_sftp()
+        let reader = session
+            .open_sftp_directory_reader()
             .await
             .map_err(|error| ssh_error(&error))?;
-        let canonical_path = sftp
-            .canonicalize(path)
-            .await
-            .map_err(|_| ssh_error(&SshError::Sftp))?;
-        let entries = sftp
-            .read_dir(canonical_path.clone())
-            .await
-            .map_err(|_| ssh_error(&SshError::Sftp))?;
-        let mut result = entries
-            .take(10_000)
-            .map(|entry| {
-                let metadata = entry.metadata();
-                let is_symlink = metadata.is_symlink();
-                let is_directory = !is_symlink && metadata.is_dir();
-                RemoteFileEntry {
-                    name: entry.file_name(),
-                    path: entry.path(),
-                    is_directory,
-                    is_symlink,
-                    size: if is_directory { None } else { metadata.size },
-                    modified_at_ms: metadata.mtime.map(|seconds| u64::from(seconds) * 1000),
-                    permissions_mode: if is_symlink {
-                        None
+        let operation = tokio::time::timeout(Duration::from_secs(20), async {
+            let canonical_path = reader
+                .canonicalize(path)
+                .await
+                .map_err(|error| ssh_error(&error))?;
+            let entries = reader
+                .read_dir_truncated(&canonical_path, 10_000)
+                .await
+                .map_err(|error| ssh_error(&error))?;
+            let mut result = entries
+                .into_iter()
+                .map(|entry| {
+                    let entry_path = if canonical_path.is_empty() {
+                        entry.name.clone()
+                    } else if canonical_path.ends_with('/') {
+                        format!("{canonical_path}{}", entry.name)
                     } else {
-                        metadata.permissions.map(|mode| mode & 0o7777)
-                    },
-                    uid: metadata.uid,
-                    gid: metadata.gid,
-                    symlink_target: None,
-                }
-            })
-            .collect::<Vec<_>>();
-        let symlink_count = result.iter().filter(|entry| entry.is_symlink).count();
-        if symlink_count > 0 && symlink_count <= 64 {
-            for entry in &mut result {
-                if entry.is_symlink {
-                    entry.symlink_target = sftp.read_link(entry.path.clone()).await.ok();
+                        format!("{canonical_path}/{}", entry.name)
+                    };
+                    let metadata = entry.attributes;
+                    let is_symlink = metadata.is_symlink();
+                    let is_directory = !is_symlink && metadata.is_dir();
+                    RemoteFileEntry {
+                        name: entry.name,
+                        path: entry_path,
+                        is_directory,
+                        is_symlink,
+                        size: if is_directory { None } else { metadata.size },
+                        modified_at_ms: metadata.mtime.map(|seconds| u64::from(seconds) * 1000),
+                        permissions_mode: if is_symlink {
+                            None
+                        } else {
+                            metadata.permissions.map(|mode| mode & 0o7777)
+                        },
+                        uid: metadata.uid,
+                        gid: metadata.gid,
+                        symlink_target: None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let symlink_count = result.iter().filter(|entry| entry.is_symlink).count();
+            if symlink_count > 0 && symlink_count <= 64 {
+                for entry in &mut result {
+                    if entry.is_symlink {
+                        entry.symlink_target = reader.read_link(&entry.path).await.ok();
+                    }
                 }
             }
-        }
-        result.sort_by(|left, right| {
-            right
-                .is_directory
-                .cmp(&left.is_directory)
-                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-        });
-        let _ = sftp.close().await;
-        Ok(RemoteDirectoryListing {
-            path: canonical_path,
-            entries: result,
+            result.sort_by(|left, right| {
+                right
+                    .is_directory
+                    .cmp(&left.is_directory)
+                    .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            });
+            Ok::<RemoteDirectoryListing, AppError>(RemoteDirectoryListing {
+                path: canonical_path,
+                entries: result,
+            })
         })
+        .await;
+        let _ = reader.close();
+        match operation {
+            Ok(result) => result,
+            Err(_) => Err(ssh_error(&SshError::Timeout)),
+        }
     }
 
     pub async fn resolve_remote_link_target(

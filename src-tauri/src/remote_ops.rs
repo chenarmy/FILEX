@@ -33,7 +33,11 @@ if [ "$info_rc" -ne 0 ]; then
 fi
 printf 'DOCKER=AVAILABLE\n'
 printf 'VERSION\t%s\n' "$(printf '%s' "$info_out" | head -n 1 | tr '\t\r\n' '   ')"
-docker ps -a --no-trunc --format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Status}}\t{{.Ports}}\t{{.CreatedAt}}' 2>/dev/null | head -n 101 | while IFS= read -r line; do
+ps_fmt='{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Status}}\t{{.Ports}}\t{{.CreatedAt}}'
+if ! docker ps -n 1 --format '{{.State}}' >/dev/null 2>&1; then
+  ps_fmt='{{.ID}}\t{{.Names}}\t{{.Image}}\t\t{{.Status}}\t{{.Ports}}\t{{.CreatedAt}}'
+fi
+docker ps -a --no-trunc --format "$ps_fmt" 2>/dev/null | head -n 101 | while IFS= read -r line; do
   printf 'C\t%s\n' "$line"
 done
 if command -v timeout >/dev/null 2>&1; then
@@ -207,12 +211,14 @@ pub fn parse_docker_snapshot(
                 .find(|(key, _)| id.starts_with(key.as_str()) || key.starts_with(id.as_str()))
                 .map(|(_, value)| value)
         });
+        let status = sanitize_plain_text(fields[4]);
+        let state = infer_container_state(fields[3], &status);
         containers.push(DockerContainerEntry {
             id,
             name: sanitize_plain_text(fields[1]),
             image: sanitize_plain_text(fields[2]),
-            state: sanitize_plain_text(fields[3]).to_lowercase(),
-            status: sanitize_plain_text(fields[4]),
+            state,
+            status,
             ports: sanitize_plain_text(fields[5]),
             created_at: sanitize_plain_text(fields[6]),
             cpu_percent: stat.map(|entry| entry.0.clone()).filter(|v| !v.is_empty()),
@@ -483,6 +489,37 @@ pub fn parse_ops_snapshot(
     })
 }
 
+fn infer_container_state(raw_state: &str, status: &str) -> String {
+    let explicit = sanitize_plain_text(raw_state).to_lowercase();
+    if !explicit.is_empty() {
+        return explicit;
+    }
+    let normalized_status = status.trim().to_ascii_lowercase();
+    if normalized_status.starts_with("up") {
+        if normalized_status.contains("(paused)") {
+            "paused".to_owned()
+        } else {
+            "running".to_owned()
+        }
+    } else if normalized_status.starts_with("restarting") {
+        "restarting".to_owned()
+    } else if normalized_status.starts_with("exited") {
+        "exited".to_owned()
+    } else if normalized_status.starts_with("created") {
+        "created".to_owned()
+    } else if normalized_status.starts_with("removal in progress")
+        || normalized_status.starts_with("removing")
+    {
+        "removing".to_owned()
+    } else if normalized_status.starts_with("dead") {
+        "dead".to_owned()
+    } else if normalized_status.starts_with("paused") {
+        "paused".to_owned()
+    } else {
+        "unknown".to_owned()
+    }
+}
+
 fn sanitize_plain_text(input: &str) -> String {
     strip_ansi_escape_sequences(input)
         .chars()
@@ -617,6 +654,37 @@ I\tsha256:999\tnginx\t1.27\t187MB\t2 weeks ago
         assert_eq!(snapshot.containers[0].cpu_percent.as_deref(), Some("1.25%"));
         assert_eq!(snapshot.images.len(), 1);
         assert_eq!(snapshot.images[0].repository, "nginx");
+    }
+
+    #[test]
+    fn infers_container_state_for_legacy_docker_engines_without_state_field() {
+        assert!(DOCKER_SNAPSHOT_PROBE.contains("docker ps -n 1 --format '{{.State}}'"));
+        assert!(DOCKER_SNAPSHOT_PROBE.contains(
+            "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t\\t{{.Status}}\\t{{.Ports}}\\t{{.CreatedAt}}"
+        ));
+
+        let sample = "\
+DOCKER=AVAILABLE
+VERSION\t18.09.0
+C\tc5365a3ac178\tkafka-ui\tprovectuslabs/kafka-ui:latest\t\tUp 5 minutes\t0.0.0.0:8080->8080/tcp\t2026-11-25 17:10:00 +0800 CST
+C\te1c7248cec3f\tlogstash\tdocker.elastic.co/logstash/logstash:8.11.0\t\tUp 5 minutes (Paused)\t0.0.0.0:5044->5044/tcp\t2026-11-25 17:10:00 +0800 CST
+C\t8d1841e685e4\tskywalking-ui\tapache/skywalking-ui:9.7.0\t\tExited (0) 2 minutes ago\t\t2026-11-25 17:10:00 +0800 CST
+C\t61376c49a1b3\tkafka\tconfluentinc/cp-kafka:7.5.0\t\tRestarting (1) 3 seconds ago\t\t2026-11-25 17:10:00 +0800 CST
+C\t9a2f23200dac\tkibana\tdocker.elastic.co/kibana/kibana:8.11.0\t\tCreated\t\t2026-11-25 17:10:00 +0800 CST
+C\t0984ad613a2b\tzookeeper\tconfluentinc/cp-zookeeper:7.5.0\t\tRemoval In Progress\t\t2026-11-25 17:10:00 +0800 CST
+C\t8ff5640cc293\telasticsearch\tdocker.elastic.co/elasticsearch/elasticsearch:8.11.0\t\tDead\t\t2026-11-25 17:10:00 +0800 CST
+";
+        let snapshot = parse_docker_snapshot(sample, 1234).unwrap();
+        assert_eq!(snapshot.availability, DockerAvailability::Available);
+        assert_eq!(snapshot.server_version.as_deref(), Some("18.09.0"));
+        assert_eq!(snapshot.containers.len(), 7);
+        assert_eq!(snapshot.containers[0].state, "running");
+        assert_eq!(snapshot.containers[1].state, "paused");
+        assert_eq!(snapshot.containers[2].state, "exited");
+        assert_eq!(snapshot.containers[3].state, "restarting");
+        assert_eq!(snapshot.containers[4].state, "created");
+        assert_eq!(snapshot.containers[5].state, "removing");
+        assert_eq!(snapshot.containers[6].state, "dead");
     }
 
     #[test]

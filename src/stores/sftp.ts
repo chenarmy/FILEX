@@ -258,7 +258,11 @@ export const useSftpStore = defineStore('sftp', () => {
     }
   }
 
-  async function load(nextSessionId: string, nextPath = path.value): Promise<boolean> {
+  async function load(
+    nextSessionId: string,
+    nextPath = path.value,
+    options?: { preserveOnError?: boolean },
+  ): Promise<boolean> {
     droppedSessions.delete(nextSessionId);
     const generation = (loadGenerations.get(nextSessionId) ?? 0) + 1;
     loadGenerations.set(nextSessionId, generation);
@@ -280,7 +284,9 @@ export const useSftpStore = defineStore('sftp', () => {
       const stillForeground = activeOwnerSessionId === nextSessionId;
       if (!result.ok) {
         syncPrivilegeFailure(nextSessionId, result.error);
-        if (stillForeground) error.value = result.error;
+        if (stillForeground && !(options?.preserveOnError && sessionId.value === nextSessionId)) {
+          error.value = result.error;
+        }
         return false;
       }
       if (stillForeground) {

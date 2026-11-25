@@ -85,7 +85,17 @@ const activePane = ref<'local' | 'remote'>('remote');
 const remoteDropElement = ref<HTMLElement | null>(null);
 const nativeDropActive = ref(false);
 const localDropActive = ref(false);
-const REMOTE_FILE_DRAG_TYPE = 'application/x-filex-remote-entry';
+let pendingPointerDrag: {
+  entry: LocalFileEntry | RemoteFileEntry;
+  sessionId: string;
+  startX: number;
+  startY: number;
+  pointerId: number;
+} | null = null;
+let pointerDragActive = false;
+let suppressTrailingClick = false;
+let suppressTrailingClickTimer: number | null = null;
+const POINTER_DRAG_THRESHOLD_PX = 6;
 let unlistenNativeDrop: UnlistenFn | null = null;
 let inspectorUnmounted = false;
 const {
@@ -170,6 +180,7 @@ const browserPanes = computed(() => {
 const createDirectoryOpen = ref(false);
 const directoryTargetPane = ref<'local' | 'remote'>('remote');
 const newDirectoryName = ref('');
+const createDirectoryInputRef = ref<HTMLInputElement | null>(null);
 const renameDialogOpen = ref(false);
 const renameTargetPane = ref<'local' | 'remote'>('remote');
 const renameName = ref('');
@@ -335,6 +346,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   inspectorUnmounted = true;
+  endRemotePointerDrag();
   filePaneKeyboard.dispose();
   if (copyOperationId.value) void requestCopyCancellation();
   document.removeEventListener('visibilitychange', updateAppForeground);
@@ -572,63 +584,109 @@ async function queueDroppedLocalPaths(paths: string[]): Promise<void> {
   });
 }
 
-function beginRemoteFileDrag(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote', event: DragEvent): void {
+function detachRemotePointerDragListeners(): void {
+  if (typeof window === 'undefined') return;
+  window.removeEventListener('pointermove', handleRemotePointerMove);
+  window.removeEventListener('pointerup', handleRemotePointerUp);
+  window.removeEventListener('pointercancel', endRemotePointerDrag);
+  window.removeEventListener('blur', endRemotePointerDrag);
+}
+
+function endRemotePointerDrag(): void {
+  pendingPointerDrag = null;
+  pointerDragActive = false;
+  localDropActive.value = false;
+  if (suppressTrailingClickTimer !== null && typeof window !== 'undefined') {
+    window.clearTimeout(suppressTrailingClickTimer);
+    suppressTrailingClickTimer = null;
+  }
+  suppressTrailingClick = false;
+  detachRemotePointerDragListeners();
+}
+
+function isLocalPaneAtPoint(clientX: number, clientY: number): boolean {
+  if (!dualPaneEnabled.value || typeof document === 'undefined') return false;
+  const hit = document.elementFromPoint(clientX, clientY);
+  return hit instanceof HTMLElement && Boolean(hit.closest('.file-list[data-pane="local"]'));
+}
+
+async function queueRemoteDropDownload(entry: LocalFileEntry | RemoteFileEntry, sourceSessionId: string): Promise<void> {
   const session = sessions.activeSession;
-  if (pane !== 'remote' || !session || !remoteReady.value || entry.isSymlink || !event.dataTransfer) {
-    event.preventDefault();
+  const listing = localFiles.listing;
+  if (!session || session.id !== sourceSessionId || !remoteReady.value || !listing || entry.isSymlink || !isSafeTransferName(entry.name)) {
     return;
   }
-  event.dataTransfer.setData(REMOTE_FILE_DRAG_TYPE, JSON.stringify({ path: entry.path, sessionId: session.id }));
-  event.dataTransfer.effectAllowed = 'copy';
-}
-
-function allowRemoteFileDrop(event: DragEvent, pane: 'local' | 'remote'): void {
-  if (pane !== 'local' || !event.dataTransfer) return;
-  const types = Array.from(event.dataTransfer.types);
-  if (!types.includes(REMOTE_FILE_DRAG_TYPE)) return;
-  event.preventDefault();
-  localDropActive.value = true;
-  event.dataTransfer.dropEffect = 'copy';
-}
-
-function leaveRemoteFileDrop(event: DragEvent, pane: 'local' | 'remote'): void {
-  if (pane !== 'local') return;
-  const element = event.currentTarget;
-  if (element instanceof HTMLElement && event.relatedTarget instanceof Node && element.contains(event.relatedTarget)) return;
-  localDropActive.value = false;
-}
-
-async function dropRemoteFileOnLocal(event: DragEvent, pane: 'local' | 'remote'): Promise<void> {
-  if (pane !== 'local' || !event.dataTransfer) return;
-  const raw = event.dataTransfer.getData(REMOTE_FILE_DRAG_TYPE);
-  if (!raw) return;
-  event.preventDefault();
-  localDropActive.value = false;
-  try {
-    const payload = JSON.parse(raw) as { path?: unknown; sessionId?: unknown };
-    if (typeof payload.path !== 'string' || typeof payload.sessionId !== 'string') return;
-    const session = sessions.activeSession;
-    const listing = localFiles.listing;
-    const entry = sftp.entries.find((candidate) => candidate.path === payload.path);
-    if (!session || session.id !== payload.sessionId || !remoteReady.value || !listing || !entry
-      || entry.isSymlink || !isSafeTransferName(entry.name)) return;
-    const input: CreateTransferInput = {
-      profileId: session.profileId,
-      direction: 'download',
-      localPath: localJoin(listing.path, entry.name),
-      remotePath: entry.path,
-      conflictPolicy: 'ask',
-      totalBytes: entry.isDirectory ? null : entry.size,
-    };
-    const task = await transfers.enqueueTask(input, session.id);
-    if (task) {
-      transfers.trackDownloadBatch(listing.path, [task.id]);
-      settings.value.taskTab = 'transfers';
-      ui.notify(t('inspector.dropDownloadQueued', { name: entry.name }));
-    }
-  } catch {
-    ui.notify(t('inspector.dropFailed'));
+  const input: CreateTransferInput = {
+    profileId: session.profileId,
+    direction: 'download',
+    localPath: localJoin(listing.path, entry.name),
+    remotePath: entry.path,
+    conflictPolicy: 'ask',
+    totalBytes: entry.isDirectory ? null : entry.size,
+  };
+  const task = await transfers.enqueueTask(input, session.id);
+  if (task) {
+    transfers.trackDownloadBatch(listing.path, [task.id]);
+    settings.value.taskTab = 'transfers';
+    ui.notify(t('inspector.dropDownloadQueued', { name: entry.name }));
   }
+}
+
+function handleRemotePointerMove(event: PointerEvent): void {
+  const pending = pendingPointerDrag;
+  if (!pending || event.pointerId !== pending.pointerId) return;
+  if (sftp.loading || sessions.activeSession?.id !== pending.sessionId || !remoteReady.value) {
+    endRemotePointerDrag();
+    return;
+  }
+  if (!pointerDragActive) {
+    if (Math.hypot(event.clientX - pending.startX, event.clientY - pending.startY) < POINTER_DRAG_THRESHOLD_PX) {
+      return;
+    }
+    pointerDragActive = true;
+  }
+  localDropActive.value = isLocalPaneAtPoint(event.clientX, event.clientY);
+}
+
+function handleRemotePointerUp(event: PointerEvent): void {
+  const pending = pendingPointerDrag;
+  if (!pending || event.pointerId !== pending.pointerId) return;
+  const wasActive = pointerDragActive;
+  const droppedOnLocal = wasActive && isLocalPaneAtPoint(event.clientX, event.clientY);
+  endRemotePointerDrag();
+  if (!wasActive) return;
+  suppressTrailingClick = true;
+  if (typeof window !== 'undefined') {
+    suppressTrailingClickTimer = window.setTimeout(() => {
+      suppressTrailingClick = false;
+      suppressTrailingClickTimer = null;
+    }, 0);
+  }
+  if (droppedOnLocal) {
+    void queueRemoteDropDownload(pending.entry, pending.sessionId);
+  }
+}
+
+function beginRowPointerDrag(
+  entry: LocalFileEntry | RemoteFileEntry,
+  pane: 'local' | 'remote',
+  event: PointerEvent,
+): void {
+  if (event.button !== 0 || pane !== 'remote' || typeof window === 'undefined') return;
+  const session = sessions.activeSession;
+  if (!session || !remoteReady.value || sftp.loading || entry.isSymlink) return;
+  endRemotePointerDrag();
+  pendingPointerDrag = {
+    entry,
+    sessionId: session.id,
+    startX: event.clientX,
+    startY: event.clientY,
+    pointerId: event.pointerId,
+  };
+  window.addEventListener('pointermove', handleRemotePointerMove);
+  window.addEventListener('pointerup', handleRemotePointerUp);
+  window.addEventListener('pointercancel', endRemotePointerDrag);
+  window.addEventListener('blur', endRemotePointerDrag);
 }
 
 function defaultCopyName(name: string, isDirectory: boolean): string {
@@ -660,6 +718,18 @@ async function openDownload(): Promise<void> {
 async function refreshActivePane(): Promise<void> {
   if (activePane.value === 'local') await localFiles.load(localFiles.listing?.path);
   else if (sessions.activeSessionId) await sftp.load(sessions.activeSessionId, sftp.path);
+}
+
+function handlePaneRowClick(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote'): void {
+  if (suppressTrailingClick) {
+    suppressTrailingClick = false;
+    return;
+  }
+  selectPaneEntry(entry, pane);
+}
+
+function handlePaneRowDblClick(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote'): void {
+  void openPaneEntry(entry, pane);
 }
 
 function selectPaneEntry(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote'): void {
@@ -861,6 +931,9 @@ function openCreateDirectory(): void {
   if (activePane.value === 'local') localFiles.error = null;
   else sftp.error = null;
   createDirectoryOpen.value = true;
+  void nextTick(() => {
+    createDirectoryInputRef.value?.focus();
+  });
 }
 
 async function submitCreateDirectory(): Promise<void> {
@@ -1096,17 +1169,15 @@ defineExpose({ focusInspector });
             :ref="(el) => bindPaneListElement(pane.id, el)"
             tabindex="-1"
             class="file-list"
+            :data-pane="pane.id"
             :class="{ 'file-list-drop-target': (pane.id === 'remote' && nativeDropActive) || (pane.id === 'local' && localDropActive) }"
-            @dragover="allowRemoteFileDrop($event, pane.id)"
-            @dragleave="leaveRemoteFileDrop($event, pane.id)"
-            @drop="dropRemoteFileOnLocal($event, pane.id)"
           >
             <div v-if="pane.loading" class="task-empty">{{ t('inspector.loadingFiles') }}</div>
             <div v-else-if="pane.error" class="inline-notice error"><ShieldQuestion :size="14" /><span>{{ t(pane.error.messageKey as Parameters<typeof t>[0]) }}</span></div>
             <div v-else-if="pane.entries.length === 0" class="task-empty">{{ t('inspector.emptyDirectory') }}</div>
             <template v-else>
               <p v-if="pane.truncated" class="dialog-note preview-truncated">{{ t('inspector.directoryTruncated') }}</p>
-              <button v-for="entry in pane.entries" :key="entry.path" type="button" class="file-row" :class="{ selected: entry.path === pane.selectedPath }" :data-entry-path="entry.path" :draggable="pane.id === 'remote' && !entry.isSymlink" @dragstart="beginRemoteFileDrag(entry, pane.id, $event)" @click="selectPaneEntry(entry, pane.id)" @dblclick="openPaneEntry(entry, pane.id)" @keydown.enter.prevent="openPaneEntry(entry, pane.id)">
+              <button v-for="entry in pane.entries" :key="entry.path" type="button" class="file-row" :class="{ selected: entry.path === pane.selectedPath }" :data-entry-path="entry.path" @pointerdown="beginRowPointerDrag(entry, pane.id, $event)" @click="handlePaneRowClick(entry, pane.id)" @dblclick="handlePaneRowDblClick(entry, pane.id)" @keydown.enter.prevent="openPaneEntry(entry, pane.id)">
                 <FileEntryIcon :name="entry.name" :is-directory="entry.isDirectory" :is-symlink="entry.isSymlink" :size="14" />
                 <span>{{ entry.name }}</span><small>{{ pane.id === 'remote' && entry.isDirectory ? (sftp.directoryUsage?.path === sftp.path ? (sftp.directoryUsage.entrySizeLabels[entry.name] ?? '—') : '—') : formatSize(entry.size) }}</small>
                 <small class="file-permissions" :title="permissionModeTitle(entry.permissionsMode)">{{ t('inspector.permissionModeShort', { mode: formatPermissionMode(entry.permissionsMode) }) }}</small>
@@ -1196,15 +1267,15 @@ defineExpose({ focusInspector });
     </section>
 
     <div v-if="createDirectoryOpen" class="dialog-layer" @mousedown.self="createDirectoryOpen = false" @keydown.esc="createDirectoryOpen = false">
-      <form class="dialog remote-directory-dialog" role="dialog" aria-modal="true" @submit.prevent="submitCreateDirectory">
+      <form class="dialog remote-directory-dialog" role="dialog" aria-modal="true" aria-labelledby="inspector-create-directory-title" @submit.prevent="submitCreateDirectory">
         <header class="dialog-header">
-          <div><FolderPlus :size="15" /><strong>{{ t(directoryTargetPane === 'local' ? 'inspector.createLocalDirectory' : 'inspector.createDirectory') }}</strong></div>
+          <div><FolderPlus :size="15" /><strong id="inspector-create-directory-title">{{ t(directoryTargetPane === 'local' ? 'inspector.createLocalDirectory' : 'inspector.createDirectory') }}</strong></div>
           <button type="button" class="icon-button" :aria-label="t('settings.cancel')" @click="createDirectoryOpen = false"><X :size="14" /></button>
         </header>
         <div class="dialog-content">
           <label class="field">
             {{ t('inspector.directoryName') }}
-            <input v-model="newDirectoryName" autofocus maxlength="255" autocomplete="off" :placeholder="t('inspector.directoryName')">
+            <input ref="createDirectoryInputRef" v-model="newDirectoryName" autofocus maxlength="255" autocomplete="off" :placeholder="t('inspector.directoryName')">
           </label>
           <p v-if="directoryError" class="form-error">{{ t(directoryError.messageKey as Parameters<typeof t>[0]) }}</p>
         </div>

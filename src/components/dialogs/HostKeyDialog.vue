@@ -1,22 +1,64 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { Fingerprint, ShieldAlert, X } from 'lucide-vue-next';
 import { t } from '@/i18n';
 import { useSessionsStore } from '@/stores/sessions';
 
 const sessions = useSessionsStore();
-const confirmed = ref(false);
 const challenge = computed(() => sessions.challenge);
 const changed = computed(() => challenge.value?.trust === 'changed');
+const confirmed = ref(challenge.value?.trust !== 'changed');
+const cancelButtonRef = ref<HTMLButtonElement | null>(null);
+const trustButtonRef = ref<HTMLButtonElement | null>(null);
+
+function focusPrimaryAction(): void {
+  void nextTick(() => {
+    if (changed.value) {
+      cancelButtonRef.value?.focus();
+    } else {
+      trustButtonRef.value?.focus();
+    }
+  });
+}
+
+watch(
+  [
+    () => challenge.value?.session.id,
+    () => challenge.value?.hopIndex,
+    () => challenge.value?.trust,
+    () => challenge.value?.fingerprintSha256,
+  ],
+  () => {
+    confirmed.value = challenge.value?.trust !== 'changed';
+    focusPrimaryAction();
+  },
+  { immediate: true },
+);
+
+onMounted(() => {
+  focusPrimaryAction();
+});
 
 function close(): void {
   if (!sessions.busy) sessions.dismissChallenge();
 }
+
+function submit(): void {
+  if (confirmed.value && !sessions.busy) {
+    void sessions.acceptHostKey();
+  }
+}
 </script>
 
 <template>
-  <div class="dialog-layer" @mousedown.self="close" @keydown.esc="close">
-    <section class="dialog trust-dialog" role="alertdialog" aria-modal="true" aria-labelledby="host-key-title">
+  <div class="dialog-layer" @mousedown.self="close" @keydown.esc.stop="close">
+    <form
+      class="dialog trust-dialog"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="host-key-title"
+      @submit.prevent="submit"
+    >
       <header class="dialog-header">
         <div><ShieldAlert :size="15" /><strong id="host-key-title">{{ changed ? t('ssh.hostKeyChanged') : t('ssh.hostKeyUnknown') }}</strong></div>
         <button type="button" class="icon-button" aria-label="Close" @click="close"><X :size="14" /></button>
@@ -39,11 +81,11 @@ function close(): void {
         <p v-if="sessions.error" class="form-error" role="alert">{{ t(sessions.error.messageKey as Parameters<typeof t>[0]) }}</p>
       </div>
       <footer class="dialog-footer">
-        <button type="button" class="button" @click="close">{{ t('profile.cancel') }}</button>
-        <button type="button" class="button primary" :disabled="!confirmed || sessions.busy" @click="sessions.acceptHostKey">
+        <button ref="cancelButtonRef" type="button" class="button" @click="close">{{ t('profile.cancel') }}</button>
+        <button ref="trustButtonRef" type="submit" class="button primary" :disabled="!confirmed || sessions.busy">
           {{ t('ssh.trustAndContinue') }}
         </button>
       </footer>
-    </section>
+    </form>
   </div>
 </template>

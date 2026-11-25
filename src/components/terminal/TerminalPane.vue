@@ -19,7 +19,7 @@ import {
   classifyTerminalClipboardShortcut,
   resolveTerminalFontFamily,
 } from '@/domain/terminalInteractions';
-import { resolveCdCommand } from '@/domain/terminalCwd';
+import { createTerminalCwdTracker } from '@/domain/terminalCwd';
 import { hasCapability, isLocalSession } from '@/domain/sessionCapabilities';
 import TerminalQuickOpsBar from '@/components/terminal/TerminalQuickOpsBar.vue';
 import { formatRemainingTtl, usePrivilegeStore } from '@/stores/privilege';
@@ -173,7 +173,7 @@ let outputDecoder = new TextDecoder(settings.value.terminalEncoding);
 let lastResizeSignature: string | null = null;
 let fontFallbackNotified = false;
 let pendingFontRefit = false;
-let terminalInputBuffer = '';
+const terminalCwdTracker = createTerminalCwdTracker();
 let bannerStage: 'none' | 'connecting' | 'connected' = 'none';
 
 const searchOptions = {
@@ -535,26 +535,39 @@ function writeDecodedOutput(chunk: Uint8Array): void {
   if (text) terminal?.write(text);
 }
 
+function readActiveTerminalLine(): string | null {
+  if (!terminal) return null;
+  const buffer = terminal.buffer.active;
+  let row = buffer.baseY + buffer.cursorY;
+  let startRow = row;
+  while (startRow > 0 && buffer.getLine(startRow)?.isWrapped) {
+    startRow -= 1;
+  }
+  let combined = '';
+  for (let index = startRow; index <= row; index += 1) {
+    const line = buffer.getLine(index);
+    if (!line) break;
+    combined += line.translateToString(true);
+  }
+  row += 1;
+  while (buffer.getLine(row)?.isWrapped) {
+    const line = buffer.getLine(row);
+    if (!line) break;
+    combined += line.translateToString(true);
+    row += 1;
+  }
+  return combined || null;
+}
+
 function trackTerminalInput(data: string): void {
   const sessionId = props.sessionId;
   if (!sessionId) return;
-  for (const character of data) {
-    if (character === '\r' || character === '\n') {
-      const resolved = resolveCdCommand(terminalInputBuffer, sessions.sessionCwd(sessionId));
-      terminalInputBuffer = '';
-      if (resolved) sessions.setSessionCwd(sessionId, resolved);
-      continue;
-    }
-    if (character === '\x7f') {
-      terminalInputBuffer = terminalInputBuffer.slice(0, -1);
-      continue;
-    }
-    if (character === '\x03' || character === '\x1b') {
-      terminalInputBuffer = '';
-      continue;
-    }
-    if (character >= ' ' && terminalInputBuffer.length < 4_096) terminalInputBuffer += character;
-  }
+  const resolved = terminalCwdTracker.feed(
+    data,
+    sessions.sessionCwd(sessionId),
+    readActiveTerminalLine,
+  );
+  if (resolved) sessions.setSessionCwd(sessionId, resolved);
 }
 
 function scheduleSearchRefresh(): void {
@@ -786,7 +799,7 @@ watch(
   () => props.sessionId,
   (nextSessionId, prevSessionId) => {
     if (nextSessionId === prevSessionId) return;
-    terminalInputBuffer = '';
+    terminalCwdTracker.reset();
     if (resizeTimer !== null) {
       window.clearTimeout(resizeTimer);
       resizeTimer = null;

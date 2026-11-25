@@ -11,13 +11,13 @@ const props = defineProps<{
   expandedPaths: string[];
   loadingPaths: string[];
   errorPaths: string[];
-  canDropDirectory?: ((targetPath: string) => boolean) | undefined;
+  pane?: 'local' | 'remote' | undefined;
+  dropTargetPath?: string | null | undefined;
 }>();
 
 const emit = defineEmits<{
   navigate: [path: string];
   toggle: [path: string];
-  dropDirectory: [path: string];
 }>();
 
 const root = computed<DirectoryTreeEntry>(() => ({
@@ -38,10 +38,10 @@ const root = computed<DirectoryTreeEntry>(() => ({
         :expanded-paths="expandedPaths"
         :loading-paths="loadingPaths"
         :error-paths="errorPaths"
-        :can-drop-directory="canDropDirectory"
+        :pane="pane"
+        :drop-target-path="dropTargetPath"
         @navigate="emit('navigate', $event)"
         @toggle="emit('toggle', $event)"
-        @drop-directory="emit('dropDirectory', $event)"
       />
     </ul>
   </nav>

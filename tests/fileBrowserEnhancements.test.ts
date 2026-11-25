@@ -343,4 +343,44 @@ describe('file browser stores for symlinks, du usage, sticky selection, move, an
     expect(localFiles.selectedPaths).toEqual([]);
     expect(localFiles.multiSelectMode).toBe(false);
   });
+
+  it('preserves existing remote directory listing and clears error when follow-terminal load fails with preserveOnError', async () => {
+    const fileA = makeRemoteEntry('docker-compose.yml');
+    sftpApiMocks.listRemoteDirectory
+      .mockResolvedValueOnce({
+        ok: true,
+        requestId: 'list-ok',
+        data: { path: '/home/porlog/software', entries: [fileA] },
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        requestId: 'list-fail',
+        error: {
+          code: 'SFTP_FAILED',
+          messageKey: 'errors.sftpFailed',
+          retryable: true,
+          remoteState: 'reachable',
+        },
+      });
+    sftpApiMocks.calculateRemoteDirectoryUsage.mockResolvedValue({
+      ok: false,
+      requestId: 'du-skip',
+      error: {
+        code: 'SFTP_FAILED',
+        messageKey: 'errors.sftpFailed',
+        retryable: true,
+        remoteState: 'reachable',
+      },
+    });
+
+    const sftp = useSftpStore();
+    expect(await sftp.load('sess-1', '/home/porlog/software')).toBe(true);
+    expect(sftp.path).toBe('/home/porlog/software');
+    expect(sftp.entries).toHaveLength(1);
+
+    expect(await sftp.load('sess-1', '/home/porlog/ap', { preserveOnError: true })).toBe(false);
+    expect(sftp.path).toBe('/home/porlog/software');
+    expect(sftp.entries).toHaveLength(1);
+    expect(sftp.error).toBeNull();
+  });
 });

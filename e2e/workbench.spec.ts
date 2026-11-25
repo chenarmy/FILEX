@@ -634,6 +634,109 @@ test('exposes the keyboard-accessible file menu and recursive permission control
   await page.screenshot({ path: 'test-results/file-context-menu-960x640.png' });
 });
 
+test('focuses the name input when opening new folder or file dialogs', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => Boolean(
+    (document.querySelector('#app') as HTMLElement & { __vue_app__?: unknown }).__vue_app__,
+  ));
+  await page.evaluate(() => {
+    type Store = Record<string, unknown>;
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Store> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__
+      ?.config.globalProperties.$pinia;
+    const sessions = pinia?._s.get('sessions');
+    const sftp = pinia?._s.get('sftp');
+    const settings = pinia?._s.get('settings');
+    const localFiles = pinia?._s.get('local-files');
+    if (!sessions || !sftp || !settings || !localFiles) {
+      throw new Error('File browser fixture stores were not initialized');
+    }
+    const session = {
+      id: 'session-file-create-focus',
+      generation: 1,
+      profileId: 'profile-file-create-focus',
+      state: 'connected',
+      host: '10.24.1.42',
+      port: 22,
+      username: 'operator',
+      lastError: null,
+    };
+    sessions.summaries = [session];
+    sessions.activeSessionId = session.id;
+    sessions.isQuickProfile = () => false;
+    sftp.load = () => Promise.resolve();
+    sftp.sessionId = session.id;
+    sftp.path = '/srv/releases';
+    sftp.entries = [
+      {
+        name: 'release.env',
+        path: '/srv/releases/release.env',
+        isDirectory: false,
+        isSymlink: false,
+        size: 128,
+        modifiedAtMs: Date.now(),
+        permissionsMode: 0o640,
+        uid: 0,
+        gid: 0,
+      },
+    ];
+    Object.assign(settings.value as Record<string, unknown>, {
+      fileBrowserOpen: true,
+      fileBrowserPosition: 'bottom',
+      focusMode: false,
+      dualPaneSftp: false,
+      taskDrawerOpen: false,
+      locale: 'zh-CN',
+      fileBrowserHeight: 260,
+    });
+  });
+
+  const fileRow = page.locator('.file-row', { hasText: 'release.env' });
+
+  await fileRow.click({ button: 'right' });
+  const menu = page.getByRole('menu', { name: '文件操作' });
+  await expect(menu).toBeVisible();
+  await menu.getByRole('menuitem', { name: '新建', exact: true }).hover();
+  await menu.getByRole('menuitem', { name: '文件夹', exact: true }).click();
+  const folderDialog = page.getByRole('dialog', { name: '新建文件夹' });
+  await expect(folderDialog).toBeVisible();
+  const folderInput = folderDialog.getByLabel('文件夹名称');
+  await expect(folderInput).toBeFocused();
+  await page.keyboard.type('logs');
+  await expect(folderInput).toHaveValue('logs');
+  await page.keyboard.press('Escape');
+  await expect(folderDialog).toHaveCount(0);
+
+  await fileRow.click({ button: 'right' });
+  await expect(menu).toBeVisible();
+  await menu.getByRole('menuitem', { name: '新建', exact: true }).hover();
+  await menu.getByRole('menuitem', { name: '文件', exact: true }).click();
+  const fileDialog = page.getByRole('dialog', { name: '新建文件' });
+  await expect(fileDialog).toBeVisible();
+  const fileInput = fileDialog.getByLabel('文件名称');
+  await expect(fileInput).toBeFocused();
+  await page.keyboard.type('notes.txt');
+  await expect(fileInput).toHaveValue('notes.txt');
+  await page.keyboard.press('Escape');
+  await expect(fileDialog).toHaveCount(0);
+
+  await page.getByRole('button', { name: '新建文件夹', exact: true }).click();
+  await expect(folderDialog).toBeVisible();
+  await expect(folderInput).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(folderDialog).toHaveCount(0);
+
+  await fileRow.click({ button: 'right' });
+  await expect(menu).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  await expect(fileRow).toBeFocused();
+});
+
 test('inspects complete session-scoped process, network, interface and route views', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.waitForFunction(() => Boolean(
@@ -3605,4 +3708,83 @@ test('supports symlink navigation, du directory usage, sticky multi-select, drag
   expect(recorded?.copyCalls[0]?.autoRename).toBe(true);
   expect(recorded?.moveCalls[0]?.targetDirectory).toBe('/srv/releases');
   expect(recorded?.resolveCalls).toContain('/srv/current');
+});
+
+test('pre-checks unknown host-key confirmation while keeping changed host-key confirmation unchecked', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto('/');
+  await page.waitForFunction(() => Boolean(
+    (document.querySelector('#app') as HTMLElement & { __vue_app__?: unknown }).__vue_app__,
+  ));
+
+  await page.evaluate(() => {
+    type Store = Record<string, unknown>;
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Store> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__
+      ?.config.globalProperties.$pinia;
+    const sessions = pinia?._s.get('sessions');
+    const settings = pinia?._s.get('settings');
+    if (!sessions || !settings) throw new Error('Stores unavailable');
+    Object.assign(settings.value as Record<string, unknown>, { locale: 'zh-CN' });
+    sessions.challenge = {
+      session: {
+        id: 'sess-host-trust-e2e',
+        generation: 1,
+        profileId: 'prof-host-trust-e2e',
+        sessionKind: 'ssh',
+        capabilities: ['remote_shell'],
+        state: 'connecting',
+        host: '127.0.0.1',
+        port: 62277,
+        username: 'ops',
+        lastError: null,
+      },
+      profileId: 'prof-host-trust-e2e',
+      profileName: 'ybpda(SSH)@192.168.51.208',
+      host: '127.0.0.1',
+      port: 62277,
+      hopIndex: 0,
+      hopCount: 1,
+      algorithm: 'ssh-rsa',
+      fingerprintSha256: 'SHA256:ndpCXyvmPdGwzsxzeJcZwFAI3ByMROa+NzA4ozVxmao',
+      trust: 'unknown',
+    };
+  });
+
+  const dialog = page.locator('.trust-dialog');
+  const checkbox = dialog.locator('.trust-confirm input[type="checkbox"]');
+  const submit = dialog.locator('button.primary');
+
+  await expect(dialog).toBeVisible();
+  await expect(checkbox).toBeChecked();
+  await expect(submit).toBeEnabled();
+  await expect(submit).toBeFocused();
+
+  await page.evaluate(() => {
+    type Store = { challenge?: Record<string, unknown> };
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Store> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__
+      ?.config.globalProperties.$pinia;
+    const sessions = pinia?._s.get('sessions');
+    if (sessions?.challenge) {
+      sessions.challenge = {
+        ...sessions.challenge,
+        trust: 'changed',
+      };
+    }
+  });
+
+  await expect(checkbox).not.toBeChecked();
+  await expect(submit).toBeDisabled();
+  await expect(dialog.getByRole('button', { name: '取消' })).toBeFocused();
+  await checkbox.check();
+  await expect(submit).toBeEnabled();
 });

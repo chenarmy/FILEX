@@ -349,6 +349,86 @@ pub struct SftpDirectoryReader {
 }
 
 impl SftpDirectoryReader {
+    pub async fn canonicalize(&self, path: &str) -> Result<String, SshError> {
+        let name = self
+            .session
+            .realpath(path.to_owned())
+            .await
+            .map_err(|_| SshError::Sftp)?;
+        name.files
+            .into_iter()
+            .next()
+            .map(|file| file.filename)
+            .ok_or(SshError::Sftp)
+    }
+
+    pub async fn read_link(&self, path: &str) -> Result<String, SshError> {
+        let name = self
+            .session
+            .readlink(path.to_owned())
+            .await
+            .map_err(|_| SshError::Sftp)?;
+        name.files
+            .into_iter()
+            .next()
+            .map(|file| file.filename)
+            .ok_or(SshError::Sftp)
+    }
+
+    pub async fn read_dir_truncated(
+        &self,
+        path: &str,
+        max_entries: usize,
+    ) -> Result<Vec<SftpDirectoryEntry>, SshError> {
+        let handle = self
+            .session
+            .opendir(path.to_owned())
+            .await
+            .map_err(|_| SshError::Sftp)?;
+        let result = async {
+            let mut entries = Vec::with_capacity(max_entries.min(1_024));
+            while entries.len() < max_entries {
+                let batch = match self.session.readdir(handle.handle.clone()).await {
+                    Ok(batch) => batch,
+                    Err(SftpClientError::Status(status))
+                        if status.status_code == StatusCode::Eof =>
+                    {
+                        break;
+                    }
+                    Err(_) => return Err(SshError::Sftp),
+                };
+                if batch.files.is_empty() {
+                    return Err(SshError::Sftp);
+                }
+                for entry in batch.files {
+                    if matches!(entry.filename.as_str(), "." | "..") {
+                        continue;
+                    }
+                    if entries.len() >= max_entries {
+                        break;
+                    }
+                    entries.push(SftpDirectoryEntry {
+                        name: entry.filename,
+                        attributes: entry.attrs,
+                    });
+                }
+            }
+            Ok(entries)
+        }
+        .await;
+        let close_result = self.session.close(handle.handle).await;
+        match result {
+            Err(error) => {
+                let _ = close_result;
+                Err(error)
+            }
+            Ok(entries) => {
+                close_result.map_err(|_| SshError::Sftp)?;
+                Ok(entries)
+            }
+        }
+    }
+
     pub async fn read_dir_limited<F>(
         &self,
         path: &str,
@@ -567,25 +647,33 @@ impl ConnectedSshSession {
     }
 
     pub async fn open_sftp(&self) -> Result<russh_sftp::client::SftpSession, SshError> {
-        let channel = self.handle.channel_open_session().await?;
-        channel
-            .request_subsystem(true, "sftp")
-            .await
-            .map_err(SshError::Transport)?;
-        russh_sftp::client::SftpSession::new(channel.into_stream())
-            .await
-            .map_err(|_| SshError::Sftp)
+        tokio::time::timeout(self.connect_timeout, async {
+            let channel = self.handle.channel_open_session().await?;
+            channel
+                .request_subsystem(true, "sftp")
+                .await
+                .map_err(SshError::Transport)?;
+            russh_sftp::client::SftpSession::new(channel.into_stream())
+                .await
+                .map_err(|_| SshError::Sftp)
+        })
+        .await
+        .map_err(|_| SshError::Timeout)?
     }
 
     pub async fn open_sftp_directory_reader(&self) -> Result<SftpDirectoryReader, SshError> {
-        let channel = self.handle.channel_open_session().await?;
-        channel
-            .request_subsystem(true, "sftp")
-            .await
-            .map_err(SshError::Transport)?;
-        let session = RawSftpSession::new(channel.into_stream());
-        session.init().await.map_err(|_| SshError::Sftp)?;
-        Ok(SftpDirectoryReader { session })
+        tokio::time::timeout(self.connect_timeout, async {
+            let channel = self.handle.channel_open_session().await?;
+            channel
+                .request_subsystem(true, "sftp")
+                .await
+                .map_err(SshError::Transport)?;
+            let session = RawSftpSession::new(channel.into_stream());
+            session.init().await.map_err(|_| SshError::Sftp)?;
+            Ok(SftpDirectoryReader { session })
+        })
+        .await
+        .map_err(|_| SshError::Timeout)?
     }
 
     pub async fn execute_bounded(
@@ -594,8 +682,13 @@ impl ConnectedSshSession {
         max_output_bytes: usize,
         timeout: Duration,
     ) -> Result<CommandOutput, SshError> {
-        let mut channel = self.handle.channel_open_session().await?;
-        channel.exec(true, command.as_bytes()).await?;
+        let mut channel = tokio::time::timeout(self.connect_timeout, async {
+            let channel = self.handle.channel_open_session().await?;
+            channel.exec(true, command.as_bytes()).await?;
+            Ok::<_, SshError>(channel)
+        })
+        .await
+        .map_err(|_| SshError::Timeout)??;
         collect_bounded_channel_output(&mut channel, max_output_bytes, timeout).await
     }
 
@@ -606,12 +699,17 @@ impl ConnectedSshSession {
         max_output_bytes: usize,
         timeout: Duration,
     ) -> Result<CommandOutput, SshError> {
-        let mut channel = self.handle.channel_open_session().await?;
-        channel.exec(true, command.as_bytes()).await?;
-        if !stdin_bytes.is_empty() {
-            channel.data(stdin_bytes).await?;
-        }
-        channel.eof().await?;
+        let mut channel = tokio::time::timeout(self.connect_timeout, async {
+            let channel = self.handle.channel_open_session().await?;
+            channel.exec(true, command.as_bytes()).await?;
+            if !stdin_bytes.is_empty() {
+                channel.data(stdin_bytes).await?;
+            }
+            channel.eof().await?;
+            Ok::<_, SshError>(channel)
+        })
+        .await
+        .map_err(|_| SshError::Timeout)??;
         collect_bounded_channel_output(&mut channel, max_output_bytes, timeout).await
     }
 
@@ -619,8 +717,13 @@ impl ConnectedSshSession {
         &self,
         command: &str,
     ) -> Result<(ExecControl, ExecOutput), SshError> {
-        let channel = self.handle.channel_open_session().await?;
-        channel.exec(true, command.as_bytes()).await?;
+        let channel = tokio::time::timeout(self.connect_timeout, async {
+            let channel = self.handle.channel_open_session().await?;
+            channel.exec(true, command.as_bytes()).await?;
+            Ok::<_, SshError>(channel)
+        })
+        .await
+        .map_err(|_| SshError::Timeout)??;
         let (read_half, write_half) = channel.split();
         Ok((
             ExecControl {

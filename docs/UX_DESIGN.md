@@ -149,9 +149,9 @@ Actions:
 - Cancel.
 - Copy fingerprints.
 - Trust once, if policy permits.
-- Trust and save, only after an explicit checkbox or secondary confirmation for changed keys.
+- Trust and save: for unknown (first-seen) host keys the confirmation checkbox defaults to checked so the user can review the fingerprint and click Trust and continue directly; for changed host keys the checkbox starts unchecked and requires explicit manual confirmation.
 
-Do not provide “accept all hosts” or a preselected trust action.
+Do not provide “accept all hosts” or a preselected trust action for changed host keys.
 
 The Settings/Security trust ledger shows current and historical fingerprints with provenance and timestamps. OpenSSH `known_hosts` import uses the native file picker and previews exact hosts, candidate fingerprints, current fingerprints and counted skip reasons. Entries that change current trust are highlighted and listed in the confirmation; the old fingerprint remains in history. Hashed names, wildcard/negated patterns, marked entries, malformed keys and conflicting keys are not broadened or silently imported.
 

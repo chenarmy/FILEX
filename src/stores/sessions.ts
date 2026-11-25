@@ -638,14 +638,38 @@ export const useSessionsStore = defineStore('sessions', () => {
 
   async function reconnectActive(): Promise<void> {
     const session = activeSession.value;
-    if (!session) return;
+    if (!session || isLocalSession(session) || busy.value) return;
+    if (session.state === 'connected' && isQuickProfile(session.profileId)) {
+      const profile = profileForId(session.profileId);
+      if (!profile) {
+        error.value = missingProfileError();
+        return;
+      }
+      const previousId = session.id;
+      const previousProfileId = session.profileId;
+      const started = await beginQuick({
+        host: profile.host,
+        port: profile.port,
+        username: profile.username,
+      });
+      if (started) {
+        suppressAutoReconnect.add(previousId);
+        await disconnectSession(previousId);
+        removeSessionState(previousId, previousProfileId);
+      }
+      return;
+    }
     await reconnectSession(session.id);
   }
 
   async function reconnectSession(sessionId: string, automatic = false): Promise<void> {
-    if (!automatic) suppressAutoReconnect.delete(sessionId);
     const session = summaries.value.find((item) => item.id === sessionId);
-    if (!session || isLocalSession(session) || busy.value || !['disconnected', 'failed'].includes(session.state)) return;
+    if (!session || isLocalSession(session) || busy.value) return;
+    const canDisconnectInPlace = !automatic
+      && session.state === 'connected'
+      && !isQuickProfile(session.profileId);
+    if (!canDisconnectInPlace && !['disconnected', 'failed'].includes(session.state)) return;
+    if (!automatic && !canDisconnectInPlace) suppressAutoReconnect.delete(sessionId);
     const profile = profileForId(session.profileId);
     if (!profile) {
       suppressAutoReconnect.add(sessionId);
@@ -664,7 +688,19 @@ export const useSessionsStore = defineStore('sessions', () => {
     passwordProfileId.value = null;
     privateKeyPassphraseProfileId.value = null;
     try {
+      if (canDisconnectInPlace) {
+        suppressAutoReconnect.add(sessionId);
+        const disconnected = await disconnectSession(sessionId);
+        if (!disconnected.ok) {
+          suppressAutoReconnect.delete(sessionId);
+          error.value = disconnected.error;
+          return;
+        }
+        upsert(disconnected.data);
+        useEventsStore().record('session', 'SSH_DISCONNECTED', 'info', { sessionId });
+      }
       const result = await reprobeSessionHostKey(session.id);
+      if (canDisconnectInPlace) suppressAutoReconnect.delete(sessionId);
       if (!result.ok) {
         await refreshSummary(session.id);
         error.value = result.error;
@@ -1333,7 +1369,9 @@ export const useSessionsStore = defineStore('sessions', () => {
           removeSessionState(payload.sessionId, current.profileId);
           useUiStore().notify(t('quick.disconnectedRemoved'));
         } else {
-          if (current) summaries.value[index] = { ...current, state: 'disconnected' };
+          if (current && current.state === 'connected') {
+            summaries.value[index] = { ...current, state: 'disconnected' };
+          }
           if (payload.kind === 'closed' && current) {
             if (localSession) suppressAutoReconnect.add(payload.sessionId);
             else void autoReconnect(payload.sessionId);

@@ -3840,7 +3840,19 @@ async fn list_remote_directory(
 }
 
 #[tauri::command]
-fn list_local_directory(
+async fn list_local_directory(
+    app: tauri::AppHandle,
+    path: Option<String>,
+) -> Result<OperationResult<LocalDirectoryListing>, ()> {
+    Ok(
+        match tokio::task::spawn_blocking(move || list_local_directory_sync(app, path)).await {
+            Ok(result) => result,
+            Err(_) => OperationResult::failure(local_directory_error()),
+        },
+    )
+}
+
+fn list_local_directory_sync(
     app: tauri::AppHandle,
     path: Option<String>,
 ) -> OperationResult<LocalDirectoryListing> {

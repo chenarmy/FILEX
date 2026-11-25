@@ -55,3 +55,115 @@ function normalizePosixPath(path: string): string {
   }
   return `/${parts.join('/')}`;
 }
+
+export function extractCommandFromPromptLine(line: string): string | null {
+  const normalized = line.replace(/[\r\n]+$/, '').trimEnd();
+  const match = /^(?:.*?[$#%>]\s+)?(cd(?:\s+[^\r\n]*)?)$/.exec(normalized);
+  return match?.[1]?.trim() ?? null;
+}
+
+type EscapeState = 'none' | 'esc' | 'csi' | 'ss3' | 'osc' | 'osc_esc';
+
+export interface TerminalCwdTracker {
+  feed: (
+    data: string,
+    currentDirectory: string | null,
+    readPromptLine?: () => string | null,
+  ) => string | null;
+  reset: () => void;
+}
+
+export function createTerminalCwdTracker(): TerminalCwdTracker {
+  let buffer = '';
+  let tainted = false;
+  let escapeState: EscapeState = 'none';
+
+  function reset(): void {
+    buffer = '';
+    tainted = false;
+    escapeState = 'none';
+  }
+
+  function feed(
+    data: string,
+    currentDirectory: string | null,
+    readPromptLine?: () => string | null,
+  ): string | null {
+    let resolvedDirectory: string | null = null;
+    for (const character of data) {
+      if (escapeState === 'esc') {
+        tainted = true;
+        if (character === '[') escapeState = 'csi';
+        else if (character === 'O') escapeState = 'ss3';
+        else if (character === ']') escapeState = 'osc';
+        else escapeState = 'none';
+        continue;
+      }
+      if (escapeState === 'csi') {
+        if (character >= '@' && character <= '~') escapeState = 'none';
+        continue;
+      }
+      if (escapeState === 'ss3') {
+        escapeState = 'none';
+        continue;
+      }
+      if (escapeState === 'osc') {
+        if (character === '\x07') escapeState = 'none';
+        else if (character === '\x1b') escapeState = 'osc_esc';
+        continue;
+      }
+      if (escapeState === 'osc_esc') {
+        escapeState = character === '\\' ? 'none' : 'osc';
+        continue;
+      }
+
+      if (character === '\r' || character === '\n') {
+        const raw = buffer;
+        const wasTainted = tainted;
+        buffer = '';
+        tainted = false;
+        if (!wasTainted) {
+          resolvedDirectory = resolveCdCommand(raw, currentDirectory) ?? resolvedDirectory;
+        } else {
+          const line = readPromptLine?.() ?? null;
+          const command = line ? extractCommandFromPromptLine(line) : null;
+          if (command) {
+            resolvedDirectory = resolveCdCommand(command, currentDirectory) ?? resolvedDirectory;
+          }
+        }
+        continue;
+      }
+      if (character === '\x03') {
+        buffer = '';
+        tainted = false;
+        continue;
+      }
+      if (character === '\x15') {
+        buffer = '';
+        tainted = false;
+        continue;
+      }
+      if (character === '\x1b') {
+        tainted = true;
+        escapeState = 'esc';
+        continue;
+      }
+      if (character === '\t') {
+        tainted = true;
+        continue;
+      }
+      if (character === '\x7f' || character === '\x08') {
+        if (!tainted) buffer = buffer.slice(0, -1);
+        continue;
+      }
+      if (character < ' ') {
+        tainted = true;
+        continue;
+      }
+      if (!tainted && buffer.length < 4_096) buffer += character;
+    }
+    return resolvedDirectory;
+  }
+
+  return { feed, reset };
+}

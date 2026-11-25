@@ -97,7 +97,7 @@ async function reconnect(): Promise<void> {
   if (
     sessions.activeSession
     && profile?.id === sessions.activeSession.profileId
-    && ['disconnected', 'failed'].includes(sessions.activeSession.state)
+    && ['connected', 'disconnected', 'failed'].includes(sessions.activeSession.state)
   ) await sessions.reconnectActive();
   else if (profile && sessions.isQuickProfile(profile.id)) {
     await sessions.beginQuick({ host: profile.host, port: profile.port, username: profile.username });
