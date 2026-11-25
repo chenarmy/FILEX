@@ -4,17 +4,22 @@ import {
   Check,
   ChevronRight,
   Clipboard,
+  ClipboardPaste,
+  Copy,
+  CopyPlus,
   ArrowLeftRight,
   Download,
   Edit3,
   ExternalLink,
   FileCode2,
   FilePlus2,
+  FolderInput,
   FolderOpen,
   FolderPlus,
   MoveUpRight,
   Package,
   RefreshCw,
+  Scissors,
   ShieldCheck,
   Sparkles,
   Trash2,
@@ -38,6 +43,12 @@ type FileContextMenuAction =
   | 'configureExternal'
   | 'copyPath'
   | 'copyForUpload'
+  | 'clipboardCopy'
+  | 'clipboardCut'
+  | 'clipboardPaste'
+  | 'duplicate'
+  | 'move'
+  | 'copyTo'
   | 'download'
   | 'downloadArchive'
   | 'remoteRelay'
@@ -58,7 +69,12 @@ const props = defineProps<{
   editorPreference: TextEditorPreference;
   remoteReady: boolean;
   quickSession: boolean;
+  canOpen: boolean;
   canEdit: boolean;
+  canMove: boolean;
+  canCopyEntry: boolean;
+  canPasteEntry: boolean;
+  pasteLabel?: string;
   canDownload: boolean;
   canDownloadArchive: boolean;
   canRemoteRelay: boolean;
@@ -194,7 +210,7 @@ onBeforeUnmount(() => {
       <button type="button" role="menuitem" @click="run('refresh')">
         <RefreshCw :size="13" />{{ t('fileMenu.refresh') }}
       </button>
-      <button type="button" role="menuitem" :disabled="!entry || !canEdit" @click="run('open')">
+      <button type="button" role="menuitem" :disabled="!entry || !canOpen" @click="run('open')">
         <FolderOpen :size="13" />{{ t('fileMenu.open') }}
       </button>
       <button
@@ -297,6 +313,25 @@ onBeforeUnmount(() => {
           <FilePlus2 :size="13" />{{ t('fileMenu.newFile') }}
         </button>
       </div>
+      <button type="button" role="menuitem" :disabled="!canCopyEntry" @click="run('clipboardCopy')">
+        <Copy :size="13" />{{ t('fileMenu.copyEntry') }}
+      </button>
+      <button type="button" role="menuitem" :disabled="!canMove" @click="run('clipboardCut')">
+        <Scissors :size="13" />{{ t('fileMenu.cutEntry') }}
+      </button>
+      <button type="button" role="menuitem" :disabled="!canPasteEntry" @click="run('clipboardPaste')">
+        <ClipboardPaste :size="13" />{{ pasteLabel || t('fileMenu.pasteEntry') }}
+      </button>
+      <button type="button" role="menuitem" :disabled="!canCopyEntry" @click="run('duplicate')">
+        <CopyPlus :size="13" />{{ t('fileMenu.duplicate') }}
+      </button>
+      <button type="button" role="menuitem" :disabled="!canMove" @click="run('move')">
+        <FolderInput :size="13" />{{ t('fileMenu.moveTo') }}
+      </button>
+      <button type="button" role="menuitem" :disabled="!canCopyEntry || (selectedCount !== undefined && selectedCount > 1)" @click="run('copyTo')">
+        <Copy :size="13" />{{ t('fileMenu.copyTo') }}
+      </button>
+      <div class="file-context-separator" />
       <button type="button" role="menuitem" :disabled="!canRename" @click="run('rename')">
         <Edit3 :size="13" />{{ t('fileMenu.rename') }}
       </button>

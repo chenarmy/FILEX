@@ -19,6 +19,12 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/api/domain/sftpApi', () => ({
   listRemoteDirectory: mocks.listRemoteDirectory,
+  calculateRemoteDirectoryUsage: vi.fn().mockResolvedValue({
+    ok: true,
+    requestId: 'du-1',
+    data: { path: '/', totalSizeLabel: '4.0K', entrySizeLabels: {}, partial: false },
+  }),
+  resolveRemoteLinkTarget: vi.fn(),
   previewRemoteText: vi.fn(),
   saveRemoteText: vi.fn(),
   deleteRemoteEntry: vi.fn(),
@@ -34,6 +40,13 @@ vi.mock('@/api/domain/sftpApi', () => ({
 
 vi.mock('@/api/domain/privilegeApi', () => ({
   elevatedListDirectory: mocks.elevatedListDirectory,
+  elevatedDirectoryUsage: vi.fn().mockResolvedValue({
+    ok: true,
+    requestId: 'edu-1',
+    data: { path: '/', totalSizeLabel: '4.0K', entrySizeLabels: {}, partial: false },
+  }),
+  elevatedResolveLinkTarget: vi.fn(),
+  elevatedMoveEntry: vi.fn(),
   elevatedPreviewText: vi.fn(),
   elevatedSaveText: vi.fn(),
   elevatedDeleteEntry: vi.fn(),

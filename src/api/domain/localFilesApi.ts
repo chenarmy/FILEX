@@ -6,6 +6,7 @@ import type {
   LocalTextPreview,
   LocalTextSaveResult,
   OperationResult,
+  ResolvedLinkTarget,
   TerminalEncoding,
 } from '@/types/contracts';
 
@@ -38,6 +39,22 @@ export async function inspectLocalEntry(path: string): Promise<OperationResult<L
     return await invoke<OperationResult<LocalFileEntry>>('inspect_local_entry', { path });
   } catch (error: unknown) {
     return failure(normalizeUnknownError(error, 'LOCAL_FILE_OPERATION_FAILED'));
+  }
+}
+
+export async function resolveLocalLinkTarget(path: string): Promise<OperationResult<ResolvedLinkTarget>> {
+  if (!isTauriRuntime()) {
+    return failure({
+      code: 'LOCAL_FILES_DESKTOP_ONLY',
+      messageKey: 'errors.localFilesDesktopOnly',
+      retryable: false,
+      remoteState: 'not_applicable',
+    });
+  }
+  try {
+    return await invoke<OperationResult<ResolvedLinkTarget>>('resolve_local_link_target', { path });
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'SYMLINK_TARGET_UNAVAILABLE'));
   }
 }
 
@@ -92,17 +109,33 @@ export function moveLocalEntry(path: string, targetDirectory: string): Promise<O
   return runLocalOperation('move_local_entry', { path, targetDirectory }, 'LOCAL_FILE_OPERATION_FAILED');
 }
 
-export function copyLocalEntry(
+export async function copyLocalEntry(
   path: string,
   targetDirectory: string,
   targetName: string,
   operationId: string,
-): Promise<OperationResult<void>> {
-  return runLocalOperation(
-    'copy_local_entry',
-    { operationId, path, targetDirectory, targetName },
-    'LOCAL_FILE_OPERATION_FAILED',
-  );
+  options?: { autoRename?: boolean; copySuffix?: string },
+): Promise<OperationResult<string>> {
+  if (!isTauriRuntime()) {
+    return failure({
+      code: 'LOCAL_FILES_DESKTOP_ONLY',
+      messageKey: 'errors.localFilesDesktopOnly',
+      retryable: false,
+      remoteState: 'not_applicable',
+    });
+  }
+  try {
+    return await invoke<OperationResult<string>>('copy_local_entry', {
+      operationId,
+      path,
+      targetDirectory,
+      targetName,
+      autoRename: options?.autoRename ?? false,
+      copySuffix: options?.copySuffix ?? null,
+    });
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'LOCAL_FILE_OPERATION_FAILED'));
+  }
 }
 
 export function deleteLocalEntry(path: string): Promise<OperationResult<void>> {

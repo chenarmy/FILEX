@@ -1,5 +1,33 @@
 # FILEX verification evidence
 
+## 2026-11-25 — File browser symlink navigation/download, sticky multi-selection, `du` directory usage, drag/context move & auto-rename copy, and v0.1.21 release
+
+- Scope: added `docs/adr/ADR-0034-symlink-navigation-download-selection-and-directory-usage.md` and updated `docs/PRODUCT_DESIGN.md` and `docs/ROADMAP.md` (`Phase 3`), implemented full-stack enhancements and regression tests, synchronized manifests and `Cargo.lock` to `0.1.21`, updated `CHANGELOG.md` (`## [0.1.21] - 2026-11-25`), and built the local Windows NSIS installer:
+  - **Symlink navigation & dereferenced folder downloads**: added `LinkTargetKind`, `ResolvedLinkTarget`, and optional `symlinkTarget` (`crates/filex-contracts/src/lib.rs`, `src/types/contracts.ts`); added `resolve_remote_link_target`, `elevated_resolve_link_target`, `resolve_local_link_target`, and bounded `scan_remote_download_tree` with symlink dereferencing, canonical ancestor cycle detection, and broken-link/special-entry skipping for folder & archive downloads (`src-tauri/src/session_runtime.rs`, `src-tauri/src/elevated_access.rs`, `src-tauri/src/lib.rs`); updated `useSftpStore`, `useLocalFilesStore`, `FileBrowserPanel.vue`, `InspectorPane.vue`, and `TransferDialog.vue` so double-clicking/opening symlinks jumps to resolved targets (and explicit editor opens target the resolved file).
+  - **Sticky multi-selection across remote & local panes**: widened checkbox hit targets (`.file-header-check-hit`, `.file-row-check-hit` inside column 1), added header select-all/indeterminate checkbox, pointer drag-sweep across checkboxes, toolbar `多选` mode toggle (`toggleMultiSelectMode`), `Escape` clear selection, double-click guard during sticky multi-select, and full `useLocalFilesStore` parity.
+  - **`du -ah --max-depth=1` directory totals & folder sizes**: omitted SFTP inode `size` on directories (`size: None` in `list_remote_directory`), added cancellable `calculate_remote_directory_usage` / `elevated_directory_usage` executing POSIX `du -ah --max-depth=1` with NUL/newline parsing and partial-result handling, and rendered the directory total badge and child directory size column from `sftp.directoryUsage`.
+  - **Same-pane drag-move, context copy/cut/paste/duplicate/move, and automatic conflict-free rename**: added shared conflict-free naming helpers (`next_copy_candidate_name` in `crates/filex-core/src/lib.rs`, `resolveUniqueCopyName` & `isSameOrDescendantPath` in `src/domain/fileSelection.ts`), `auto_rename` / `copy_suffix` support in `copy_remote_entry` and `copy_local_entry_sync` returning the created filename, `elevated_move_entry`, `DirectoryTree` / row drop targets in `FileBrowserPanel.vue`, compact `.file-context-menu` row height keeping 960×640 viewport height within bounds, and `FileContextMenu.vue` copy/cut/paste/duplicate/move/copy-to actions while preserving clipboard-upload and cross-pane download drag flows.
+- Artifact: `target/release/bundle/nsis/FILEX_0.1.21_x64-setup.exe` (`19,007,856` bytes / `18.13 MiB`, SHA-256 `3AEE8CFE367DC2367008EA1A0BA334CE28E839ADC9D13CF30B4DEB59E8191647`, unsigned local NSIS build).
+- Scope limits preserved honestly:
+  - Cross-platform signed installers and `latest.json` verification run inside `.github/workflows/release.yml` upon pushing tag `v0.1.21`.
+  - Playwright `e2e/workbench.spec.ts` ran against locally installed `ms-playwright/chromium-1243` with mocked Tauri IPC (`__TAURI_INTERNALS__`) because `chromium_headless_shell-1248` is not installed on this Windows host; `e2e/live-ssh.spec.ts`, live SSH/SFTP/`du` execution, and interactive installer runs require live hosts/WebView2 CDP.
+  - Updated `e2e/workbench.spec.ts` (`supports Ctrl+C and Ctrl+V upload from local pane and desktop clipboard`) to click `活动中心` before asserting `.task-drawer` visibility (matching `cbb54c4`), and constrained `getByRole('button', { name: '终端', exact: true })` at line 1853 so `MCP 终端诊断` does not cause a strict-mode collision.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Version sync | `pnpm.cmd version:check` | Passed (`0.1.21`) |
+| Release notes | `node scripts/release-notes.mjs v0.1.21` | Passed |
+| TypeScript | `pnpm.cmd typecheck` | Passed (0 errors) |
+| ESLint | `pnpm.cmd lint` | Passed (0 warnings) |
+| Frontend unit tests | `pnpm.cmd test` | Passed, 36 files and 157 tests (`tests/fileBrowserEnhancements.test.ts`: 5 tests) |
+| Production bundle & Windows NSIS installer | `pnpm tauri build --bundles nsis` | Passed (`FILEX_0.1.21_x64-setup.exe`, 18.13 MiB; existing Vite >500 kB chunk-size warning retained) |
+| Rust format | `cargo fmt --all -- --check` | Passed |
+| Rust locked check | `cargo check --workspace --locked` | Passed |
+| Rust Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | Passed (0 warnings) |
+| Rust workspace tests | `cargo test --workspace --locked` | Passed, 110 tests (`filex_contracts`: 0, `filex_core`: 27, `filex_credentials`: 3, `filex_desktop_lib`: 57, `filex_desktop`: 0, `filex_local_terminal`: 4, `filex_ssh`: 7, `filex_storage`: 12) |
+| Workbench Playwright E2E | `pnpm.cmd exec playwright test -c ".../scratch/playwright-local.config.mjs" workbench.spec.ts` | Passed, 34 tests (using local Chromium 1243 and mocked Tauri IPC) |
+| Diff hygiene | `git diff --check` | Passed |
+
 ## 2026-11-23 — AI Diagnose 4-tier command risk classifier and session-scoped approval (v0.1.17)
 
 - Scope: synchronized local `main` with `origin/main` (`b161fe6`, v0.1.16), updated `docs/PRODUCT_DESIGN.md`, `docs/AI_ASSISTANT_DESIGN.md`, and `docs/ROADMAP.md`, implemented the 4-tier `AssistantCommandRisk` model (`read_only`, `requires_confirmation`, `destructive`, `blocked`), closed read-only classifier bypasses (`sed`, `awk`, `systemctl`, `service`, `hostname`, `date`, `dmesg`, `sar`, `pidstat`, `sort`, `uniq`, `ulimit`, `ss`, `dig`, `nslookup`, `journalctl`, `find`, `ip`, `sysctl`, `ping`, `docker`/`podman`), expanded allowlisted read-only diagnostic commands, added session-generation-scoped exact-command approval memory and `Ctrl+Enter`/`Cmd+Enter` keyboard approval for `requires_confirmation` commands, enforced shared target-rich confirmation for `destructive` commands, synchronized manifests to `0.1.17`, updated `CHANGELOG.md`, and built the local Windows NSIS installer.

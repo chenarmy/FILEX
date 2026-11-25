@@ -48,6 +48,7 @@ export function useFilePaneKeyboard<T extends FilePaneEntryLike>(options: {
   onPasteUpload: (pane: 'local' | 'remote', event?: ClipboardEvent) => unknown;
   onRename?: (pane: 'local' | 'remote') => unknown;
   onSelectAll?: (pane: 'local' | 'remote') => unknown;
+  onClearSelection?: (pane: 'local' | 'remote') => boolean;
 }) {
   const listElements = reactive<Record<'local' | 'remote', HTMLElement | null>>({
     local: null,
@@ -185,11 +186,18 @@ export function useFilePaneKeyboard<T extends FilePaneEntryLike>(options: {
       return;
     }
 
-    if (event.key === 'Escape' && typeaheadIndicator.value !== null) {
-      event.preventDefault();
-      event.stopPropagation();
-      clearTypeahead();
-      return;
+    if (event.key === 'Escape') {
+      if (typeaheadIndicator.value !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+        clearTypeahead();
+        return;
+      }
+      if (options.onClearSelection?.(pane)) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
     }
 
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {

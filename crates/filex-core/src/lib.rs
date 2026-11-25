@@ -25,6 +25,106 @@ use filex_contracts::{
 
 pub const PORTABLE_PROFILE_EXPORT_MAX_PROFILES: usize = 10_000;
 
+fn split_copy_name_stem_and_ext(name: &str, is_directory: bool) -> (&str, &str) {
+    if is_directory || name.is_empty() {
+        return (name, "");
+    }
+    let lower = name.to_ascii_lowercase();
+    for compound in [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar.lz4"] {
+        if lower.len() > compound.len() && lower.ends_with(compound) {
+            let split = name.len() - compound.len();
+            if split > 0 && name.is_char_boundary(split) {
+                return (&name[..split], &name[split..]);
+            }
+        }
+    }
+    match name.rfind('.') {
+        Some(dot) if dot > 0 => (&name[..dot], &name[dot..]),
+        _ => (name, ""),
+    }
+}
+
+fn strip_trailing_copy_tag<'a>(stem: &'a str, copy_suffix: &str) -> (&'a str, bool) {
+    let mut current = stem.trim_end();
+    let mut stripped = false;
+    let trimmed_suffix = copy_suffix.trim();
+    while let Some(open) = current.rfind(" (") {
+        if !current.ends_with(')') {
+            break;
+        }
+        let inner = &current[open + 2..current.len() - 1];
+        let matches_tag = ["副本", "copy", trimmed_suffix].iter().any(|candidate| {
+            if candidate.is_empty() {
+                return false;
+            }
+            if inner == *candidate {
+                return true;
+            }
+            inner
+                .strip_prefix(candidate)
+                .and_then(|rest| rest.strip_prefix(' '))
+                .is_some_and(|digits| {
+                    !digits.is_empty()
+                        && digits.len() <= 4
+                        && digits.bytes().all(|b| b.is_ascii_digit())
+                })
+        });
+        if !matches_tag {
+            break;
+        }
+        let next = current[..open].trim_end();
+        if next.is_empty() {
+            break;
+        }
+        current = next;
+        stripped = true;
+    }
+    (current, stripped)
+}
+
+fn truncate_utf8_to_max_bytes(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+/// Computes the `attempt`-th candidate filename for a copy operation (`0` = `requested_name`).
+/// Keeps `.tar.*` compound extensions intact and avoids nested `(copy) (copy)` suffixes.
+pub fn next_copy_candidate_name(
+    requested_name: &str,
+    is_directory: bool,
+    copy_suffix: &str,
+    attempt: usize,
+) -> String {
+    if attempt == 0 {
+        return requested_name.to_owned();
+    }
+    let effective_suffix = match copy_suffix.trim() {
+        "" => "copy",
+        trimmed => trimmed,
+    };
+    let (stem, ext) = split_copy_name_stem_and_ext(requested_name, is_directory);
+    let (base_stem, had_copy_suffix) = strip_trailing_copy_tag(stem, effective_suffix);
+    let tag = if !had_copy_suffix && attempt == 1 {
+        format!(" ({effective_suffix})")
+    } else {
+        let index = if had_copy_suffix {
+            attempt + 1
+        } else {
+            attempt
+        };
+        format!(" ({effective_suffix} {index})")
+    };
+    let budget = 255usize.saturating_sub(tag.len() + ext.len());
+    let bounded_stem = truncate_utf8_to_max_bytes(base_stem, budget);
+    format!("{bounded_stem}{tag}{ext}")
+}
+
 pub trait SettingsRepository: Send + Sync {
     fn load(&self) -> Result<Option<SafeSettings>, AppError>;
     fn save(&self, settings: &SafeSettings) -> Result<(), AppError>;
@@ -2378,5 +2478,39 @@ mod tests {
             destination_remote_path: Some("/srv/file.bin".to_owned()),
         });
         assert!(same_endpoint.is_err());
+    }
+
+    #[test]
+    fn copy_candidate_names_preserve_compound_extensions_and_avoid_nested_tags() {
+        assert_eq!(
+            super::next_copy_candidate_name("report.pdf", false, "副本", 0),
+            "report.pdf"
+        );
+        assert_eq!(
+            super::next_copy_candidate_name("report.pdf", false, "副本", 1),
+            "report (副本).pdf"
+        );
+        assert_eq!(
+            super::next_copy_candidate_name("report.pdf", false, "副本", 2),
+            "report (副本 2).pdf"
+        );
+        assert_eq!(
+            super::next_copy_candidate_name("archive.tar.gz", false, "副本", 1),
+            "archive (副本).tar.gz"
+        );
+        assert_eq!(
+            super::next_copy_candidate_name("report (副本).pdf", false, "副本", 1),
+            "report (副本 2).pdf"
+        );
+        assert_eq!(
+            super::next_copy_candidate_name("release.v2", true, "copy", 1),
+            "release.v2 (copy)"
+        );
+
+        let long_stem = "a".repeat(260);
+        let long_name = format!("{long_stem}.txt");
+        let bounded = super::next_copy_candidate_name(&long_name, false, "copy", 1);
+        assert!(bounded.len() <= 255);
+        assert!(bounded.ends_with(" (copy).txt"));
     }
 }

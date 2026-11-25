@@ -488,6 +488,14 @@ export interface TransferTask {
   updatedAtMs: number;
 }
 
+export type LinkTargetKind = 'directory' | 'file' | 'unsupported';
+
+export interface ResolvedLinkTarget {
+  targetPath: string;
+  targetKind: LinkTargetKind;
+  parentPath?: string | null;
+}
+
 export interface RemoteFileEntry {
   name: string;
   path: string;
@@ -498,11 +506,19 @@ export interface RemoteFileEntry {
   permissionsMode: number | null;
   uid?: number | null;
   gid?: number | null;
+  symlinkTarget?: string | null;
 }
 
 export interface RemoteDirectoryListing {
   path: string;
   entries: RemoteFileEntry[];
+}
+
+export interface RemoteDirectoryUsage {
+  path: string;
+  totalSizeLabel: string;
+  entrySizeLabels: Record<string, string>;
+  partial: boolean;
 }
 
 export type RemotePermissionScope = 'all' | 'files' | 'directories';
@@ -527,6 +543,7 @@ export interface LocalFileEntry {
   size: number | null;
   modifiedAtMs: number | null;
   permissionsMode: number | null;
+  symlinkTarget?: string | null;
 }
 
 export interface LocalDirectoryListing {

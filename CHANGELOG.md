@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.1.21] - 2026-11-25
+
+### Added
+
+- **Symlink Navigation & Dereferenced Folder Downloads** (`resolve_remote_link_target`, `elevated_resolve_link_target`, `resolve_local_link_target`, `scan_remote_download_tree`, ADR-0034):
+  - Double-clicking, pressing `Enter`, or selecting **Open** on symbolic links in the remote (standard SSH or elevated `sudo`) and local panes resolves the canonical target: directories open directly, files switch to their parent directory and select the target item, explicit editor actions open the resolved file, and dangling or inaccessible targets report `errors.symlinkTargetUnavailable`.
+  - Folder, direct symlink, and `.tar.gz` archive downloads dereference symbolic links safely with canonical ancestor cycle detection (`BTreeSet<String>`) and skip dangling links or special filesystem entries instead of failing the entire directory download.
+- **Sticky Multi-Selection UX Across Remote & Local Panes** (`src/domain/fileSelection.ts`, `sftp.ts`, `localFiles.ts`, `FileBrowserPanel.vue`):
+  - Enlarged row checkbox hit targets inside column 1 alongside a header select-all/indeterminate checkbox, pointer drag-sweep across checkboxes, a toolbar **Multi-select** (`多选`) toggle chip, double-click protection while multi-selecting, `Escape` clear selection, and full multi-selection parity for the local file pane (batch move, batch delete, batch duplicate).
+- **Current Directory Size Totals & Child Folder Sizes via `du -ah --max-depth=1`** (`calculate_remote_directory_usage`, `elevated_directory_usage`, `session_runtime.rs`, `FileBrowserPanel.vue`, `InspectorPane.vue`):
+  - Added bounded, cancellable `du -ah --max-depth=1` directory usage calculation displayed in the remote pane header badge (click to recalculate), footer summary, and directory **Size** column (including partial-readability reporting and cleanup on disconnect/shutdown).
+- **Same-Pane Drag-to-Move, Context Copy/Cut/Paste/Duplicate/Move & Automatic Copy Renaming** (`FileContextMenu.vue`, `DirectoryTree.vue`, `FileBrowserPanel.vue`, `crates/filex-core`, `session_runtime.rs`, `src-tauri/src/lib.rs`):
+  - Dragging single or multi-selected entries within either pane onto subfolder rows or `DirectoryTree` nodes moves them directly (including elevated `sudo` sessions via `elevated_move_entry`), while guarding against self/descendant drops and preserving cross-pane downloads and clipboard uploads.
+  - Added context-menu **Copy**, **Cut**, **Paste** (into clicked folder or current directory), **Duplicate**, **Move to…**, and **Copy to…** actions paired with conflict-free automatic copy renaming (`report.pdf` -> `report (副本).pdf` -> `report (副本 2).pdf`, preserving compound `.tar.gz` extensions without nested copy tags).
+
+### Fixed
+
+- **Remote Directory Size Mismatch** (`session_runtime.rs`): stopped copying SFTP directory inode sizes (e.g. `4.0 KiB`) into `RemoteFileEntry.size`; remote directories now omit raw inode byte sizes (`size: None`) and display real `du -ah --max-depth=1` folder usage while preserving regular-file byte sizes for transfer verification.
+
 ## [0.1.20] - 2026-11-24
 
 ### Added

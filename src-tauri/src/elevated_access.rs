@@ -3,9 +3,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use filex_contracts::{
-    AcquireElevatedAccessInput, AppError, ElevatedAccessLeaseSummary, PrivilegeState,
-    RemoteDirectoryListing, RemoteFileEntry, RemoteState, RemoteTextPreview, RemoteTextSaveResult,
-    SessionKind, SessionState, SessionSummary,
+    AcquireElevatedAccessInput, AppError, ElevatedAccessLeaseSummary, LinkTargetKind,
+    PrivilegeState, RemoteDirectoryListing, RemoteDirectoryUsage, RemoteFileEntry, RemoteState,
+    RemoteTextPreview, RemoteTextSaveResult, ResolvedLinkTarget, SessionKind, SessionState,
+    SessionSummary,
 };
 use filex_ssh::ConnectedSshSession;
 use russh_sftp::protocol::{FileAttributes, OpenFlags};
@@ -172,7 +173,8 @@ pub(crate) fn current_epoch_ms() -> u64 {
 pub(crate) mod commands {
     use filex_contracts::{
         AcquireElevatedAccessInput, ElevatedAccessLeaseSummary, OperationResult,
-        RemoteDirectoryListing, RemoteTextPreview, RemoteTextSaveResult,
+        RemoteDirectoryListing, RemoteDirectoryUsage, RemoteTextPreview, RemoteTextSaveResult,
+        ResolvedLinkTarget,
     };
     use tauri::State;
 
@@ -180,8 +182,10 @@ pub(crate) mod commands {
         acquire_elevated_access as acquire_lease_impl, current_epoch_ms,
         elevated_chmod_entry as chmod_impl, elevated_create_directory as create_dir_impl,
         elevated_create_file as create_file_impl, elevated_delete_entry as delete_impl,
-        elevated_list_directory as list_dir_impl, elevated_preview_text as preview_impl,
-        elevated_rename_entry as rename_impl, elevated_save_text as save_impl,
+        elevated_directory_usage as directory_usage_impl, elevated_list_directory as list_dir_impl,
+        elevated_move_entry as move_impl, elevated_preview_text as preview_impl,
+        elevated_rename_entry as rename_impl, elevated_resolve_link_target as resolve_link_impl,
+        elevated_save_text as save_impl,
     };
     use crate::session_runtime::SessionRuntime;
 
@@ -423,6 +427,68 @@ pub(crate) mod commands {
         };
         Ok(match result {
             Ok(saved) => OperationResult::success(saved),
+            Err(error) => OperationResult::failure(error),
+        })
+    }
+
+    #[tauri::command]
+    pub(crate) async fn elevated_resolve_link_target(
+        session_id: String,
+        path: String,
+        sessions: State<'_, SessionRuntime>,
+    ) -> Result<OperationResult<ResolvedLinkTarget>, ()> {
+        let result = match sessions.connected_ssh_target(&session_id).await {
+            Ok((session, ssh)) => {
+                resolve_link_impl(sessions.elevated_access(), &session, &ssh, &path).await
+            }
+            Err(error) => Err(error),
+        };
+        Ok(match result {
+            Ok(resolved) => OperationResult::success(resolved),
+            Err(error) => OperationResult::failure(error),
+        })
+    }
+
+    #[tauri::command]
+    pub(crate) async fn elevated_move_entry(
+        session_id: String,
+        source_path: String,
+        target_directory: String,
+        sessions: State<'_, SessionRuntime>,
+    ) -> Result<OperationResult<()>, ()> {
+        let result = match sessions.connected_ssh_target(&session_id).await {
+            Ok((session, ssh)) => {
+                move_impl(
+                    sessions.elevated_access(),
+                    &session,
+                    &ssh,
+                    &source_path,
+                    &target_directory,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        Ok(match result {
+            Ok(()) => OperationResult::success(()),
+            Err(error) => OperationResult::failure(error),
+        })
+    }
+
+    #[tauri::command]
+    pub(crate) async fn elevated_directory_usage(
+        session_id: String,
+        path: String,
+        sessions: State<'_, SessionRuntime>,
+    ) -> Result<OperationResult<RemoteDirectoryUsage>, ()> {
+        let result = match sessions.connected_ssh_target(&session_id).await {
+            Ok((session, ssh)) => {
+                directory_usage_impl(sessions.elevated_access(), &session, &ssh, &path).await
+            }
+            Err(error) => Err(error),
+        };
+        Ok(match result {
+            Ok(usage) => OperationResult::success(usage),
             Err(error) => OperationResult::failure(error),
         })
     }
@@ -888,6 +954,137 @@ pub(crate) async fn elevated_save_text(
     })
 }
 
+pub(crate) async fn elevated_resolve_link_target(
+    manager: &ElevatedAccessManager,
+    session: &SessionSummary,
+    ssh: &ConnectedSshSession,
+    path: &str,
+) -> Result<ResolvedLinkTarget, AppError> {
+    validate_remote_path(path)?;
+    let (password, _) = manager.require_lease(session, current_epoch_ms())?;
+    let command = sudo_exec_command(password.as_str(), ELEVATED_RESOLVE_LINK_SCRIPT, &[path]);
+    let stdin = password_stdin_bytes(password.as_str());
+    let output = ssh
+        .execute_bounded_with_stdin(
+            &command,
+            stdin.as_slice(),
+            32 * 1024,
+            ELEVATED_FILE_IO_TIMEOUT,
+        )
+        .await
+        .map_err(|_| {
+            elevated_operation_failed_error("SYMLINK_TARGET_UNAVAILABLE", RemoteState::Unchanged)
+        })?;
+    if output.exit_status != Some(0) {
+        let sudo_err = classify_sudo_failure(&output.stderr, RemoteState::Unchanged);
+        if matches!(
+            sudo_err.code.as_str(),
+            "ELEVATED_NOT_SUPPORTED" | "ELEVATED_AUTH_FAILED"
+        ) {
+            return Err(sudo_err);
+        }
+        return Err(crate::session_runtime::symlink_target_unavailable_error());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut lines = text.lines();
+    let kind_flag = lines.next().unwrap_or("").trim();
+    let target_path = lines.next().unwrap_or("").trim().to_owned();
+    if target_path.is_empty() {
+        return Err(crate::session_runtime::symlink_target_unavailable_error());
+    }
+    let target_kind = match kind_flag {
+        "d" => LinkTargetKind::Directory,
+        "f" => LinkTargetKind::File,
+        _ => LinkTargetKind::Unsupported,
+    };
+    Ok(ResolvedLinkTarget {
+        parent_path: crate::session_runtime::posix_parent_path(&target_path),
+        target_path,
+        target_kind,
+    })
+}
+
+pub(crate) async fn elevated_move_entry(
+    manager: &ElevatedAccessManager,
+    session: &SessionSummary,
+    ssh: &ConnectedSshSession,
+    source_path: &str,
+    target_directory: &str,
+) -> Result<(), AppError> {
+    validate_destructive_target(source_path)?;
+    validate_remote_path(target_directory)?;
+    let (password, _) = manager.require_lease(session, current_epoch_ms())?;
+    let command = sudo_exec_command(
+        password.as_str(),
+        ELEVATED_MOVE_SCRIPT,
+        &[source_path, target_directory],
+    );
+    let stdin = password_stdin_bytes(password.as_str());
+    let output = ssh
+        .execute_bounded_with_stdin(
+            &command,
+            stdin.as_slice(),
+            32 * 1024,
+            ELEVATED_FILE_IO_TIMEOUT,
+        )
+        .await
+        .map_err(|_| elevated_operation_failed_error("SFTP_MOVE_FAILED", RemoteState::Unknown))?;
+    if output.exit_status != Some(0) {
+        if output.exit_status == Some(17) {
+            return Err(AppError {
+                code: "SFTP_TARGET_EXISTS".to_owned(),
+                message_key: "errors.sftpTargetExists".to_owned(),
+                retryable: false,
+                remote_state: RemoteState::Unchanged,
+                field: Some("path".to_owned()),
+            });
+        }
+        return Err(classify_sudo_or_fs_failure(
+            &output.stderr,
+            output.exit_status,
+            "SFTP_MOVE_FAILED",
+            "errors.sftpMoveFailed",
+            RemoteState::Unchanged,
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn elevated_directory_usage(
+    manager: &ElevatedAccessManager,
+    session: &SessionSummary,
+    ssh: &ConnectedSshSession,
+    path: &str,
+) -> Result<RemoteDirectoryUsage, AppError> {
+    validate_remote_path(path)?;
+    let (password, _) = manager.require_lease(session, current_epoch_ms())?;
+    let command = sudo_exec_command(
+        password.as_str(),
+        crate::session_runtime::REMOTE_DIRECTORY_USAGE_SCRIPT,
+        &[path],
+    );
+    let stdin = password_stdin_bytes(password.as_str());
+    let output = ssh
+        .execute_bounded_with_stdin(
+            &command,
+            stdin.as_slice(),
+            crate::session_runtime::REMOTE_DU_MAX_OUTPUT_BYTES,
+            crate::session_runtime::REMOTE_DU_TIMEOUT,
+        )
+        .await
+        .map_err(|_| crate::session_runtime::directory_usage_failed_error())?;
+    if matches!(output.exit_status, Some(2) | Some(127)) || output.stdout.is_empty() {
+        let sudo_err = classify_sudo_failure(&output.stderr, RemoteState::Unchanged);
+        if matches!(
+            sudo_err.code.as_str(),
+            "ELEVATED_NOT_SUPPORTED" | "ELEVATED_AUTH_FAILED"
+        ) {
+            return Err(sudo_err);
+        }
+    }
+    crate::session_runtime::parse_remote_directory_usage_output(&output.stdout, output.exit_status)
+}
+
 pub(crate) fn posix_single_quote(value: &str) -> String {
     let mut quoted = String::with_capacity(value.len() + 2);
     quoted.push('\'');
@@ -1209,6 +1406,7 @@ fn parse_elevated_directory_output(stdout: &[u8]) -> Result<RemoteDirectoryListi
                 permissions_mode: if is_symlink { None } else { mode },
                 uid,
                 gid,
+                symlink_target: None,
             });
         }
         sort_remote_entries(&mut entries);
@@ -1302,6 +1500,12 @@ with os.scandir(target) as it:
         is_link = stat.S_ISLNK(st.st_mode)
         is_dir = False if is_link else stat.S_ISDIR(st.st_mode)
         full = ("/" + entry.name) if target == "/" else (target.rstrip("/") + "/" + entry.name)
+        link_target = None
+        if is_link:
+            try:
+                link_target = os.readlink(full)
+            except OSError:
+                link_target = None
         out.append({
             "name": entry.name,
             "path": full,
@@ -1312,6 +1516,7 @@ with os.scandir(target) as it:
             "permissionsMode": None if is_link else (stat.S_IMODE(st.st_mode) & 0o7777),
             "uid": st.st_uid,
             "gid": st.st_gid,
+            "symlinkTarget": link_target,
         })
 print(json.dumps({"path": target, "entries": out}, ensure_ascii=False))
 ' "$target"
@@ -1386,6 +1591,56 @@ elif chown --reference="$target" -- "$tmp" 2>/dev/null; then
 fi
 cat -- "$staging" > "$tmp" || { rm -f -- "$tmp"; exit 1; }
 mv -f -- "$tmp" "$target" || { rm -f -- "$tmp"; exit 1; }"#;
+
+const ELEVATED_RESOLVE_LINK_SCRIPT: &str = r#"target="$1"
+if command -v python3 >/dev/null 2>&1; then
+  exec python3 -c '
+import os, stat, sys
+p = os.path.realpath(sys.argv[1])
+st = os.stat(p)
+if stat.S_ISDIR(st.st_mode):
+    print("d")
+elif stat.S_ISREG(st.st_mode):
+    print("f")
+else:
+    print("u")
+print(p)
+' "$target" 2>/dev/null || exit 2
+fi
+if [ -d "$target" ]; then
+  resolved=$(cd -- "$target" 2>/dev/null && pwd -P) || exit 2
+  printf 'd\n%s\n' "$resolved"
+  exit 0
+fi
+if [ -f "$target" ]; then
+  resolved=$(readlink -f -- "$target" 2>/dev/null || realpath -- "$target" 2>/dev/null) || exit 2
+  printf 'f\n%s\n' "$resolved"
+  exit 0
+fi
+exit 2"#;
+
+const ELEVATED_MOVE_SCRIPT: &str = r#"src="$1"
+dst_dir="$2"
+[ -e "$src" ] || [ -L "$src" ] || exit 2
+[ -d "$dst_dir" ] || exit 20
+dst_real=$(cd -- "$dst_dir" 2>/dev/null && pwd -P) || exit 20
+base=${src##*/}
+[ -n "$base" ] && [ "$base" != "." ] && [ "$base" != ".." ] || exit 22
+if [ ! -L "$src" ] && [ -d "$src" ]; then
+  src_real=$(cd -- "$src" 2>/dev/null && pwd -P) || exit 2
+  case "$dst_real" in
+    "$src_real"|"$src_real"/*) exit 22 ;;
+  esac
+fi
+if [ "$dst_real" = "/" ]; then
+  target="/$base"
+else
+  target="${dst_real%/}/$base"
+fi
+if [ -e "$target" ] || [ -L "$target" ]; then
+  exit 17
+fi
+mv -n -- "$src" "$target""#;
 
 #[cfg(test)]
 mod tests {

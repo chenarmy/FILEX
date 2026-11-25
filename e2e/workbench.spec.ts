@@ -1850,7 +1850,7 @@ test('compact command composer stays hidden by default and manages confirmed rep
   // Enable compact composer in Settings -> Terminal
   await page.locator('.context-actions button[aria-label="设置"]').click();
   const settingsDialog = page.getByRole('dialog', { name: '设置' });
-  await settingsDialog.getByRole('button', { name: '终端' }).click();
+  await settingsDialog.getByRole('button', { name: '终端', exact: true }).click();
   const composerToggle = settingsDialog.locator('.setting-row:has-text("紧凑命令输入栏") input[type="checkbox"]');
   await composerToggle.check();
   await settingsDialog.getByRole('button', { name: '应用并保存' }).click();
@@ -2877,6 +2877,7 @@ test('supports Ctrl+C and Ctrl+V upload from local pane and desktop clipboard', 
   await remotePane.locator('.file-table-header').click();
   await page.keyboard.press('Control+v');
   await expect(page.locator('.toast')).toContainText('已将 2 个粘贴上传任务加入传输队列。');
+  await page.getByRole('button', { name: '活动中心' }).click();
   await expect(page.locator('.task-drawer')).toBeVisible();
   await expect(page.locator('.transfer-row')).toHaveCount(2);
   await expect(page.locator('.task-drawer')).toContainText('/srv/www/dist');
@@ -3338,4 +3339,270 @@ test('moves file browser between bottom and right dock and persists the choice',
 
   await page.reload();
   await expect(fileSlot).not.toHaveClass(/dock-right/);
+});
+
+test('supports symlink navigation, du directory usage, sticky multi-select, drag-move, and copy/duplicate', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+  await page.waitForFunction(() => Boolean(
+    (document.querySelector('#app') as HTMLElement & { __vue_app__?: unknown }).__vue_app__,
+  ));
+
+  await page.evaluate(async () => {
+    const now = Date.now();
+    const state = {
+      copyCalls: [] as Array<Record<string, unknown>>,
+      moveCalls: [] as Array<Record<string, unknown>>,
+      resolveCalls: [] as string[],
+      srvEntries: [
+        {
+          name: 'releases',
+          path: '/srv/releases',
+          isDirectory: true,
+          isSymlink: false,
+          size: null,
+          modifiedAtMs: now,
+          permissionsMode: 0o755,
+          uid: 0,
+          gid: 0,
+          symlinkTarget: null,
+        },
+        {
+          name: 'current',
+          path: '/srv/current',
+          isDirectory: false,
+          isSymlink: true,
+          size: null,
+          modifiedAtMs: now,
+          permissionsMode: 0o777,
+          uid: 0,
+          gid: 0,
+          symlinkTarget: '/srv/releases/v2',
+        },
+        {
+          name: 'notes.txt',
+          path: '/srv/notes.txt',
+          isDirectory: false,
+          isSymlink: false,
+          size: 512,
+          modifiedAtMs: now,
+          permissionsMode: 0o644,
+          uid: 0,
+          gid: 0,
+          symlinkTarget: null,
+        },
+        {
+          name: 'todo.md',
+          path: '/srv/todo.md',
+          isDirectory: false,
+          isSymlink: false,
+          size: 256,
+          modifiedAtMs: now,
+          permissionsMode: 0o644,
+          uid: 0,
+          gid: 0,
+          symlinkTarget: null,
+        },
+      ],
+    };
+
+    const win = window as Window & {
+      __ADR0034_TEST__?: typeof state;
+      __TAURI_INTERNALS__?: { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> };
+    };
+    win.__ADR0034_TEST__ = state;
+    win.__TAURI_INTERNALS__ = {
+      invoke(cmd: string, args?: Record<string, unknown>) {
+        if (cmd === 'list_remote_directory') {
+          const requestedPath = typeof args?.path === 'string' ? args.path : '/srv';
+          if (requestedPath === '/srv/releases/v2') {
+            return Promise.resolve({
+              ok: true,
+              requestId: 'req-list-v2',
+              data: {
+                path: '/srv/releases/v2',
+                entries: [
+                  {
+                    name: 'app.bin',
+                    path: '/srv/releases/v2/app.bin',
+                    isDirectory: false,
+                    isSymlink: false,
+                    size: 4096,
+                    modifiedAtMs: now,
+                    permissionsMode: 0o755,
+                    uid: 0,
+                    gid: 0,
+                    symlinkTarget: null,
+                  },
+                ],
+              },
+            });
+          }
+          return Promise.resolve({
+            ok: true,
+            requestId: 'req-list-srv',
+            data: { path: '/srv', entries: [...state.srvEntries] },
+          });
+        }
+        if (cmd === 'calculate_remote_directory_usage') {
+          const requestedPath = typeof args?.path === 'string' ? args.path : '/srv';
+          if (requestedPath === '/srv/releases/v2') {
+            return Promise.resolve({
+              ok: true,
+              requestId: 'req-du-v2',
+              data: {
+                path: '/srv/releases/v2',
+                totalSizeLabel: '4.0K',
+                entrySizeLabels: { 'app.bin': '4.0K' },
+                partial: false,
+              },
+            });
+          }
+          return Promise.resolve({
+            ok: true,
+            requestId: 'req-du-srv',
+            data: {
+              path: '/srv',
+              totalSizeLabel: '1.2G',
+              entrySizeLabels: { releases: '980M', 'notes.txt': '4.0K', 'todo.md': '4.0K' },
+              partial: false,
+            },
+          });
+        }
+        if (cmd === 'resolve_remote_link_target') {
+          const targetPath = typeof args?.path === 'string' ? args.path : '';
+          state.resolveCalls.push(targetPath);
+          return Promise.resolve({
+            ok: true,
+            requestId: 'req-link',
+            data: {
+              targetPath: '/srv/releases/v2',
+              targetKind: 'directory',
+              parentPath: '/srv/releases',
+            },
+          });
+        }
+        if (cmd === 'copy_remote_entry') {
+          state.copyCalls.push(args ?? {});
+          const createdName = 'notes (副本).txt';
+          state.srvEntries.push({
+            name: createdName,
+            path: `/srv/${createdName}`,
+            isDirectory: false,
+            isSymlink: false,
+            size: 512,
+            modifiedAtMs: now,
+            permissionsMode: 0o644,
+            uid: 0,
+            gid: 0,
+            symlinkTarget: null,
+          });
+          return Promise.resolve({ ok: true, requestId: 'req-copy', data: createdName });
+        }
+        if (cmd === 'move_remote_entry') {
+          state.moveCalls.push(args ?? {});
+          const src = typeof args?.sourcePath === 'string' ? args.sourcePath : '';
+          state.srvEntries = state.srvEntries.filter((entry) => entry.path !== src);
+          return Promise.resolve({ ok: true, requestId: 'req-move', data: null });
+        }
+        if (cmd === 'save_safe_settings') {
+          return Promise.resolve({ ok: true, requestId: 'req-save', data: args?.settings ?? {} });
+        }
+        return Promise.resolve({ ok: true, requestId: 'req-noop', data: null });
+      },
+    };
+
+    type Store = Record<string, unknown> & {
+      load?: (...args: unknown[]) => Promise<boolean>;
+    };
+    type Root = HTMLElement & {
+      __vue_app__?: {
+        config: { globalProperties: { $pinia?: { _s: Map<string, Store> } } };
+      };
+    };
+    const pinia = (document.querySelector('#app') as Root).__vue_app__
+      ?.config.globalProperties.$pinia;
+    const sessions = pinia?._s.get('sessions');
+    const sftp = pinia?._s.get('sftp');
+    const settings = pinia?._s.get('settings');
+    if (!sessions || !sftp || !settings) {
+      throw new Error('Stores unavailable for ADR-0034 E2E fixture');
+    }
+
+    const session = {
+      id: 'session-adr0034-e2e',
+      generation: 1,
+      profileId: 'profile-adr0034-e2e',
+      sessionKind: 'ssh',
+      capabilities: ['remote_shell', 'sftp', 'remote_edit'],
+      state: 'connected',
+      host: '10.24.1.60',
+      port: 22,
+      username: 'ops',
+      lastError: null,
+    };
+    sessions.summaries = [session];
+    sessions.activeSessionId = session.id;
+    sessions.isQuickProfile = () => false;
+    Object.assign(settings.value as Record<string, unknown>, {
+      fileBrowserOpen: true,
+      focusMode: false,
+      dualPaneSftp: false,
+      locale: 'zh-CN',
+      fileBrowserHeight: 280,
+    });
+    await sftp.load?.(session.id, '/srv');
+  });
+
+  const remotePane = page.getByRole('region', { name: '远端目录' });
+  await expect(remotePane).toBeVisible();
+
+  // 1) du -ah --max-depth=1 header badge & folder size column match
+  await expect(remotePane.locator('.pane-dir-usage-badge')).toContainText('目录总计：1.2G');
+  const releasesRow = remotePane.locator('.file-row[data-entry-path="/srv/releases"]');
+  await expect(releasesRow).toContainText('980M');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1440);
+
+  // 2) Sticky multi-selection: checking row 1 lets plain click select row 2 without losing row 1
+  const notesRow = remotePane.locator('.file-row[data-entry-path="/srv/notes.txt"]');
+  const todoRow = remotePane.locator('.file-row[data-entry-path="/srv/todo.md"]');
+  await notesRow.locator('.file-row-check-hit').dispatchEvent('pointerdown', { button: 0 });
+  await page.evaluate(() => window.dispatchEvent(new PointerEvent('pointerup')));
+  await todoRow.click();
+  await expect(page.locator('.file-selection-badge')).toContainText('已选 2 项');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.file-selection-badge')).toBeHidden();
+
+  // 3) Context menu Duplicate with automatic conflict-free rename
+  await notesRow.click({ button: 'right' });
+  const menu = page.getByRole('menu', { name: '文件操作' });
+  await menu.getByRole('menuitem', { name: '创建副本' }).click();
+  await expect(page.locator('.toast')).toContainText('已复制为「notes (副本).txt」。');
+  await expect(remotePane.locator('.file-row[data-entry-path="/srv/notes (副本).txt"]')).toBeVisible();
+
+  // 4) Drag-and-drop move into subfolder row
+  await notesRow.dragTo(releasesRow);
+  await expect(page.locator('.toast')).toContainText('已将 1 项移动到「/srv/releases」。');
+  await expect(remotePane.locator('.file-row[data-entry-path="/srv/notes.txt"]')).toHaveCount(0);
+
+  // 5) Symlink double-click resolves target directory and jumps
+  const currentLinkRow = remotePane.locator('.file-row[data-entry-path="/srv/current"]');
+  await expect(currentLinkRow).toContainText('-> /srv/releases/v2');
+  await currentLinkRow.dblclick();
+  await expect(remotePane.getByRole('textbox', { name: '当前目录路径' })).toHaveValue('/srv/releases/v2');
+  await expect(remotePane.locator('.file-row', { hasText: 'app.bin' })).toBeVisible();
+
+  const recorded = await page.evaluate(() => {
+    const win = window as Window & {
+      __ADR0034_TEST__?: { copyCalls: Array<Record<string, unknown>>; moveCalls: Array<Record<string, unknown>>; resolveCalls: string[] };
+      __TAURI_INTERNALS__?: unknown;
+    };
+    const data = win.__ADR0034_TEST__;
+    delete win.__TAURI_INTERNALS__;
+    return data;
+  });
+  expect(recorded?.copyCalls).toHaveLength(1);
+  expect(recorded?.copyCalls[0]?.autoRename).toBe(true);
+  expect(recorded?.moveCalls[0]?.targetDirectory).toBe('/srv/releases');
+  expect(recorded?.resolveCalls).toContain('/srv/current');
 });

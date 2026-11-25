@@ -164,7 +164,7 @@ async function submit(): Promise<void> {
     conflictPolicy: form.conflictPolicy,
     totalBytes: direction.value === 'upload'
       ? (selectedLocal.value?.isDirectory ? null : selectedLocal.value?.size ?? null)
-      : (selectedRemote.value?.isDirectory ? null : selectedRemote.value?.size ?? null),
+      : ((selectedRemote.value?.isDirectory || selectedRemote.value?.isSymlink) ? null : selectedRemote.value?.size ?? null),
   });
   if (task) {
     if (direction.value === 'download') {

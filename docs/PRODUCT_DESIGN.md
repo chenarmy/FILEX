@@ -143,8 +143,8 @@ A typed, inspectable proposal produced by the assistant. It contains the target 
 
 ### P0 — SFTP and transfer queue
 
-- Remote file browser bound to the active session.
-- Optional local file pane for deliberate drag/drop and path selection.
+- Remote file browser bound to the active session, including on-demand symlink target resolution on open/double-click, cycle-safe symlink dereferencing for downloads, bounded `du -ah --max-depth=1` directory size totals and folder sizes, and sticky checkbox/toolbar multi-selection across local and remote panes.
+- Optional local file pane for deliberate drag/drop, same-pane drag-to-move into subfolders or the directory tree, context-menu copy/cut/paste/duplicate/move with conflict-free automatic copy renaming, and path selection.
 - A keyboard-accessible right-click menu for selection, opening, copy path, upload/download, create file or folder, rename, delete, quick recursive delete, refresh, and permission editing.
 - Native multi-file and folder upload selection, drag-and-drop, and clipboard copy/paste (`Ctrl+C`/`Ctrl+V` or `Cmd+C`/`Cmd+V` from the OS file manager or local browser pane into the remote pane). Opening a remote file can use the built-in editor, the OS association, or a user-selected external editor executable.
 - Keyboard letter/prefix typeahead navigation in both local and remote folder panes to locate and focus matching folders or files across standard and virtualized directory listings.

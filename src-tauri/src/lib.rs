@@ -42,12 +42,13 @@ use filex_contracts::{
     CreateTunnelRuleInput, CredentialStoreStatus, DirectorySyncPreview, DockerContainerAction,
     DockerLogsSnapshot, DockerSnapshot, DownloadRemoteArchiveInput, EnvironmentKind,
     FileChecksumComparison, HostKeyChallenge, HostTrustEvaluation, HostTrustRecord,
-    ImportKnownHostsInput, ImportKnownHostsResult, KnownHostsImportPreview, LocalDirectoryListing,
-    LocalFileEntry, LocalTextPreview, LocalTextSaveResult, MaintenanceArtifact, NetworkSnapshot,
-    OperationResult, OpsCategory, OpsSnapshot, ProcessSignal, ProcessSnapshot, ProcessSortBy,
-    QuickConnectInput, RecordHostTrustInput, RemoteDirectoryListing, RemoteJobOutputChunk,
-    RemoteJobSummary, RemotePermissionUpdateResult, RemoteState, RemoteTextPreview,
-    RemoteTextSaveResult, RouteTraceResult, RuntimePaths, SafeSettings, SaveCommandSnippetInput,
+    ImportKnownHostsInput, ImportKnownHostsResult, KnownHostsImportPreview, LinkTargetKind,
+    LocalDirectoryListing, LocalFileEntry, LocalTextPreview, LocalTextSaveResult,
+    MaintenanceArtifact, NetworkSnapshot, OperationResult, OpsCategory, OpsSnapshot, ProcessSignal,
+    ProcessSnapshot, ProcessSortBy, QuickConnectInput, RecordHostTrustInput,
+    RemoteDirectoryListing, RemoteDirectoryUsage, RemoteJobOutputChunk, RemoteJobSummary,
+    RemotePermissionUpdateResult, RemoteState, RemoteTextPreview, RemoteTextSaveResult,
+    ResolvedLinkTarget, RouteTraceResult, RuntimePaths, SafeSettings, SaveCommandSnippetInput,
     SessionConnectionProgress, SessionSummary, SshConfigImportPreview, StartRemoteJobInput,
     SystemMonitorSnapshot, TransferDirection, TransferState, TransferTask, TunnelRule,
     TunnelSummary, UpdateConnectionProfileInput, UpdateRemotePermissionsInput, UpdateStatus,
@@ -56,7 +57,7 @@ use filex_contracts::{
 use filex_core::{
     CommandHistoryService, HostTrustService, PathBookmarkService, ProfileService,
     ProxyProfileService, SettingsService, SshKeyService, TransferService, TunnelRuleService,
-    parse_ssh_config, validate_profile,
+    next_copy_candidate_name, parse_ssh_config, validate_profile,
 };
 use filex_credentials::{CredentialError, CredentialKind, CredentialStore, SystemCredentialStore};
 use filex_local_terminal::LocalTerminalRuntime;
@@ -3880,6 +3881,13 @@ fn list_local_directory(
                         None
                     }
                 };
+                let symlink_target = if file_type.is_symlink() {
+                    fs::read_link(entry.path())
+                        .ok()
+                        .map(|target| target.to_string_lossy().into_owned())
+                } else {
+                    None
+                };
                 files.push(LocalFileEntry {
                     name: entry.file_name().to_string_lossy().into_owned(),
                     path: normalize_local_display_path(&entry.path()),
@@ -3892,6 +3900,7 @@ fn list_local_directory(
                         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
                         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64),
                     permissions_mode,
+                    symlink_target,
                 });
             }
             files
@@ -3973,6 +3982,13 @@ fn inspect_local_entry(path: String) -> OperationResult<LocalFileEntry> {
             None
         }
     };
+    let symlink_target = if file_type.is_symlink() {
+        fs::read_link(&entry_path)
+            .ok()
+            .map(|target| target.to_string_lossy().into_owned())
+    } else {
+        None
+    };
     OperationResult::success(LocalFileEntry {
         name: name.to_owned(),
         path: normalize_local_display_path(&entry_path),
@@ -3985,6 +4001,52 @@ fn inspect_local_entry(path: String) -> OperationResult<LocalFileEntry> {
             .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
             .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64),
         permissions_mode,
+        symlink_target,
+    })
+}
+
+#[tauri::command]
+fn resolve_local_link_target(path: String) -> OperationResult<ResolvedLinkTarget> {
+    if path.is_empty() || path.len() > 4_096 || path.contains('\0') {
+        return OperationResult::failure(local_file_operation_error());
+    }
+    let resolved = match fs::canonicalize(&path) {
+        Ok(resolved) => resolved,
+        Err(_) => {
+            return OperationResult::failure(AppError {
+                code: "SYMLINK_TARGET_UNAVAILABLE".to_owned(),
+                message_key: "errors.symlinkTargetUnavailable".to_owned(),
+                retryable: false,
+                remote_state: RemoteState::NotApplicable,
+                field: Some("path".to_owned()),
+            });
+        }
+    };
+    let metadata = match fs::metadata(&resolved) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return OperationResult::failure(AppError {
+                code: "SYMLINK_TARGET_UNAVAILABLE".to_owned(),
+                message_key: "errors.symlinkTargetUnavailable".to_owned(),
+                retryable: false,
+                remote_state: RemoteState::NotApplicable,
+                field: Some("path".to_owned()),
+            });
+        }
+    };
+    let target_kind = if metadata.is_dir() {
+        LinkTargetKind::Directory
+    } else if metadata.is_file() {
+        LinkTargetKind::File
+    } else {
+        LinkTargetKind::Unsupported
+    };
+    let target_path = normalize_local_display_path(&resolved);
+    let parent_path = resolved.parent().map(normalize_local_display_path);
+    OperationResult::success(ResolvedLinkTarget {
+        target_path,
+        target_kind,
+        parent_path,
     })
 }
 
@@ -4318,18 +4380,29 @@ async fn copy_local_entry(
     path: String,
     target_directory: String,
     target_name: String,
+    auto_rename: Option<bool>,
+    copy_suffix: Option<String>,
     copy_operations: State<'_, CopyOperationRuntime>,
-) -> Result<OperationResult<()>, ()> {
+) -> Result<OperationResult<String>, ()> {
     Ok(async {
         let operation = match copy_operations.register(&operation_id) {
             Ok(operation) => operation,
             Err(error) => return OperationResult::failure(error),
         };
         let control = operation.control.clone();
+        let auto_rename = auto_rename.unwrap_or(false);
+        let copy_suffix = copy_suffix.unwrap_or_else(|| "copy".to_owned());
         // Keep the lease on the blocking worker so shutdown still tracks it if
         // this command future is dropped while the worker is finishing cleanup.
         let result = tauri::async_runtime::spawn_blocking(move || {
-            let result = copy_local_entry_sync(path, target_directory, target_name, &control);
+            let result = copy_local_entry_sync(
+                path,
+                target_directory,
+                target_name,
+                auto_rename,
+                &copy_suffix,
+                &control,
+            );
             operation.control.finish();
             drop(operation);
             result
@@ -4354,12 +4427,54 @@ fn cancel_copy_operation(
     }
 }
 
+fn resolve_local_copy_target(
+    destination_parent: &Path,
+    requested_name: &str,
+    is_directory: bool,
+    auto_rename: bool,
+    copy_suffix: &str,
+    attempt: &mut usize,
+) -> Result<(String, PathBuf), AppError> {
+    if !auto_rename {
+        let target = destination_parent.join(requested_name);
+        if target.to_string_lossy().len() > 4_096 {
+            return Err(directory_tree_limit_error());
+        }
+        match fs::symlink_metadata(&target) {
+            Ok(_) => return Err(local_file_target_exists_error()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(local_file_operation_error()),
+        }
+        return Ok((requested_name.to_owned(), target));
+    }
+    while *attempt < 1_000 {
+        let candidate =
+            next_copy_candidate_name(requested_name, is_directory, copy_suffix, *attempt);
+        let target = destination_parent.join(&candidate);
+        if target.to_string_lossy().len() > 4_096 {
+            return Err(directory_tree_limit_error());
+        }
+        match fs::symlink_metadata(&target) {
+            Ok(_) => {
+                *attempt += 1;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok((candidate, target));
+            }
+            Err(_) => return Err(local_file_operation_error()),
+        }
+    }
+    Err(local_file_target_exists_error())
+}
+
 fn copy_local_entry_sync(
     path: String,
     target_directory: String,
     target_name: String,
+    auto_rename: bool,
+    copy_suffix: &str,
     control: &CopyOperationControl,
-) -> OperationResult<()> {
+) -> OperationResult<String> {
     if let Err(error) = control.check_cancelled() {
         return OperationResult::failure(error);
     }
@@ -4382,15 +4497,18 @@ fn copy_local_entry_sync(
     if file_type.is_symlink() || (!file_type.is_file() && !file_type.is_dir()) {
         return OperationResult::failure(local_file_copy_unsupported_error());
     }
-    let target = destination_parent.join(target_name);
-    if target.to_string_lossy().len() > 4_096 {
-        return OperationResult::failure(directory_tree_limit_error());
-    }
-    match fs::symlink_metadata(&target) {
-        Ok(_) => return OperationResult::failure(local_file_target_exists_error()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => return OperationResult::failure(local_file_operation_error()),
-    }
+    let mut attempt = 0_usize;
+    let (final_name, target) = match resolve_local_copy_target(
+        &destination_parent,
+        &target_name,
+        file_type.is_dir(),
+        auto_rename,
+        copy_suffix,
+        &mut attempt,
+    ) {
+        Ok(pair) => pair,
+        Err(error) => return OperationResult::failure(error),
+    };
 
     if file_type.is_dir() {
         if destination_parent.starts_with(&source) {
@@ -4400,15 +4518,19 @@ fn copy_local_entry_sync(
             &source,
             &destination_parent,
             &target,
+            &target_name,
+            auto_rename,
+            copy_suffix,
+            &mut attempt,
             &metadata,
             control,
         ) {
-            Ok(()) => OperationResult::success(()),
+            Ok(committed_name) => OperationResult::success(committed_name),
             Err(error) => OperationResult::failure(error),
         };
     }
 
-    let result = (|| -> Result<(), AppError> {
+    let result = (|| -> Result<String, AppError> {
         let mut source_file = fs::File::open(&source).map_err(|_| local_file_operation_error())?;
         let mut temporary = tempfile::Builder::new()
             .prefix(".filex-copy-")
@@ -4425,18 +4547,35 @@ fn copy_local_entry_sync(
             .sync_all()
             .map_err(|_| local_file_operation_error())?;
         control.begin_commit()?;
-        temporary.persist_noclobber(&target).map_err(|error| {
-            if error.error.kind() == io::ErrorKind::AlreadyExists {
-                local_file_target_exists_error()
-            } else {
-                local_file_operation_error()
+        let mut committed_name = final_name;
+        let mut commit_target = target;
+        loop {
+            match temporary.persist_noclobber(&commit_target) {
+                Ok(_) => return Ok(committed_name),
+                Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists && auto_rename => {
+                    temporary = error.file;
+                    attempt += 1;
+                    let (next_name, next_target) = resolve_local_copy_target(
+                        &destination_parent,
+                        &target_name,
+                        false,
+                        true,
+                        copy_suffix,
+                        &mut attempt,
+                    )?;
+                    committed_name = next_name;
+                    commit_target = next_target;
+                }
+                Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                    return Err(local_file_target_exists_error());
+                }
+                Err(_) => return Err(local_file_operation_error()),
             }
-        })?;
-        Ok(())
+        }
     })();
 
     match result {
-        Ok(()) => OperationResult::success(()),
+        Ok(committed_name) => OperationResult::success(committed_name),
         Err(error) => OperationResult::failure(error),
     }
 }
@@ -4448,13 +4587,18 @@ struct LocalCopyTreeEntry {
     permissions: fs::Permissions,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn copy_local_directory_tree(
     source_root: &Path,
     destination_parent: &Path,
-    target: &Path,
+    initial_target: &Path,
+    requested_name: &str,
+    auto_rename: bool,
+    copy_suffix: &str,
+    attempt: &mut usize,
     root_metadata: &fs::Metadata,
     control: &CopyOperationControl,
-) -> Result<(), AppError> {
+) -> Result<String, AppError> {
     const ENTRY_LIMIT: usize = 5_000;
     const DEPTH_LIMIT: usize = 16;
     let entries = scan_local_copy_tree(source_root, ENTRY_LIMIT, DEPTH_LIMIT, control)?;
@@ -4464,7 +4608,7 @@ fn copy_local_directory_tree(
     }
     fs::create_dir(&staging).map_err(|_| local_file_operation_error())?;
 
-    let result = (|| -> Result<(), AppError> {
+    let result = (|| -> Result<String, AppError> {
         for entry in entries.iter().filter(|entry| entry.is_directory) {
             control.check_cancelled()?;
             let destination = staging.join(&entry.relative_path);
@@ -4507,13 +4651,32 @@ fn copy_local_directory_tree(
         fs::set_permissions(&staging, root_metadata.permissions())
             .map_err(|_| local_file_operation_error())?;
         control.begin_commit()?;
-        match fs::symlink_metadata(target) {
+        let mut committed_name = initial_target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(requested_name)
+            .to_owned();
+        let mut commit_target = initial_target.to_path_buf();
+        match fs::symlink_metadata(&commit_target) {
+            Ok(_) if auto_rename => {
+                *attempt += 1;
+                let (next_name, next_target) = resolve_local_copy_target(
+                    destination_parent,
+                    requested_name,
+                    true,
+                    true,
+                    copy_suffix,
+                    attempt,
+                )?;
+                committed_name = next_name;
+                commit_target = next_target;
+            }
             Ok(_) => return Err(local_file_target_exists_error()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(_) => return Err(local_file_operation_error()),
         }
-        fs::rename(&staging, target).map_err(|_| local_file_target_exists_error())?;
-        Ok(())
+        fs::rename(&staging, &commit_target).map_err(|_| local_file_target_exists_error())?;
+        Ok(committed_name)
     })();
 
     if result.is_err() {
@@ -5171,15 +5334,52 @@ async fn move_remote_entry(
 }
 
 #[tauri::command]
+async fn resolve_remote_link_target(
+    session_id: String,
+    path: String,
+    sessions: State<'_, SessionRuntime>,
+) -> Result<OperationResult<ResolvedLinkTarget>, ()> {
+    Ok(
+        match sessions
+            .resolve_remote_link_target(&session_id, &path)
+            .await
+        {
+            Ok(resolved) => OperationResult::success(resolved),
+            Err(error) => OperationResult::failure(error),
+        },
+    )
+}
+
+#[tauri::command]
+async fn calculate_remote_directory_usage(
+    session_id: String,
+    path: String,
+    sessions: State<'_, SessionRuntime>,
+) -> Result<OperationResult<RemoteDirectoryUsage>, ()> {
+    Ok(
+        match sessions
+            .calculate_remote_directory_usage(&session_id, &path)
+            .await
+        {
+            Ok(usage) => OperationResult::success(usage),
+            Err(error) => OperationResult::failure(error),
+        },
+    )
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn copy_remote_entry(
     operation_id: String,
     session_id: String,
     source_path: String,
     target_directory: String,
     target_name: String,
+    auto_rename: Option<bool>,
+    copy_suffix: Option<String>,
     sessions: State<'_, SessionRuntime>,
     copy_operations: State<'_, CopyOperationRuntime>,
-) -> Result<OperationResult<()>, ()> {
+) -> Result<OperationResult<String>, ()> {
     let operation = match copy_operations.register(&operation_id) {
         Ok(operation) => operation,
         Err(error) => return Ok(OperationResult::failure(error)),
@@ -5191,13 +5391,15 @@ async fn copy_remote_entry(
             &source_path,
             &target_directory,
             &target_name,
+            auto_rename.unwrap_or(false),
+            copy_suffix.as_deref(),
             &control,
         )
         .await;
     control.finish();
     drop(operation);
     Ok(match result {
-        Ok(()) => OperationResult::success(()),
+        Ok(final_name) => OperationResult::success(final_name),
         Err(error) => OperationResult::failure(error),
     })
 }
@@ -6418,7 +6620,10 @@ pub fn run() {
             write_terminal,
             resize_terminal,
             list_remote_directory,
+            resolve_remote_link_target,
+            calculate_remote_directory_usage,
             list_local_directory,
+            resolve_local_link_target,
             get_default_download_directory,
             open_local_directory,
             inspect_local_entry,
@@ -6478,6 +6683,9 @@ pub fn run() {
             elevated_access::commands::acquire_elevated_access,
             elevated_access::commands::revoke_elevated_access,
             elevated_access::commands::elevated_list_directory,
+            elevated_access::commands::elevated_resolve_link_target,
+            elevated_access::commands::elevated_directory_usage,
+            elevated_access::commands::elevated_move_entry,
             elevated_access::commands::elevated_create_directory,
             elevated_access::commands::elevated_create_file,
             elevated_access::commands::elevated_rename_entry,
@@ -7059,5 +7267,80 @@ mod assistant_security_tests {
         assert!(payload.contains("[REDACTED_PRIVATE_KEY]"));
         assert!(payload.contains("[REDACTED_TOKEN]"));
         assert!(payload.contains("password=[REDACTED]"));
+    }
+}
+
+#[cfg(test)]
+mod local_file_ops_tests {
+    use std::fs;
+
+    use crate::session_runtime::CopyOperationControl;
+
+    #[test]
+    fn copy_local_entry_auto_renames_conflicting_targets() {
+        let dir = std::env::temp_dir().join(format!("filex-copy-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("create temp test dir");
+
+        let source = dir.join("note.txt");
+        fs::write(&source, b"hello").expect("write source file");
+
+        let control_first = CopyOperationControl::new();
+        let control_second = CopyOperationControl::new();
+        let dir_str = dir.to_string_lossy().into_owned();
+        let source_str = source.to_string_lossy().into_owned();
+
+        let first = super::copy_local_entry_sync(
+            source_str.clone(),
+            dir_str.clone(),
+            "note.txt".to_owned(),
+            true,
+            "副本",
+            &control_first,
+        );
+        assert!(first.ok, "first copy failed: {:?}", first.error);
+        assert_eq!(first.data.as_deref(), Some("note (副本).txt"));
+
+        let second = super::copy_local_entry_sync(
+            source_str,
+            dir_str,
+            "note.txt".to_owned(),
+            true,
+            "副本",
+            &control_second,
+        );
+        assert!(second.ok, "second copy failed: {:?}", second.error);
+        assert_eq!(second.data.as_deref(), Some("note (副本 2).txt"));
+        assert_eq!(
+            fs::read(dir.join("note (副本 2).txt")).expect("read second copy"),
+            b"hello"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_local_link_target_rejects_missing_target_and_resolves_real_paths() {
+        let dir = std::env::temp_dir().join(format!("filex-link-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("create temp test dir");
+        let missing = dir.join("missing-link");
+
+        let missing_res = super::resolve_local_link_target(missing.to_string_lossy().into_owned());
+        assert!(!missing_res.ok);
+        assert_eq!(
+            missing_res.error.as_ref().map(|err| err.code.as_str()),
+            Some("SYMLINK_TARGET_UNAVAILABLE")
+        );
+
+        let target_dir = dir.join("docs");
+        fs::create_dir_all(&target_dir).expect("create docs dir");
+        let resolved_dir =
+            super::resolve_local_link_target(target_dir.to_string_lossy().into_owned());
+        assert!(resolved_dir.ok);
+        assert_eq!(
+            resolved_dir.data.as_ref().map(|value| value.target_kind),
+            Some(filex_contracts::LinkTargetKind::Directory)
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

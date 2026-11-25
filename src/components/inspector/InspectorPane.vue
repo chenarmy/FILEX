@@ -651,7 +651,7 @@ function openUpload(): void {
 async function openDownload(): Promise<void> {
   if (!remoteReady.value) return;
   const source = selectedRemoteEntry.value;
-  if (!source || source.isSymlink) return;
+  if (!source) return;
   if (!localFiles.listing) await localFiles.load();
   const directory = localFiles.listing?.path;
   ui.openTransfer('download', source.path, directory ? localJoin(directory, source.name) : undefined, sessions.activeSession?.profileId);
@@ -671,10 +671,42 @@ function selectPaneEntry(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' 
   }
 }
 
-function openPaneEntry(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote'): void {
+async function openPaneEntry(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote'): Promise<void> {
   selectPaneEntry(entry, pane);
-  if (pane === 'local') void localFiles.open(entry);
-  else void sftp.open(entry);
+  if (entry.isSymlink) {
+    const resolved = pane === 'local'
+      ? await localFiles.resolveLink(entry.path)
+      : await sftp.resolveLink(entry.path);
+    if (!resolved) {
+      ui.notify(t('errors.symlinkTargetUnavailable'));
+      return;
+    }
+    if (resolved.targetKind === 'directory') {
+      if (pane === 'local') await localFiles.load(resolved.targetPath);
+      else if (sessions.activeSessionId) await sftp.load(sessions.activeSessionId, resolved.targetPath);
+      return;
+    }
+    if (resolved.targetKind === 'file' && resolved.parentPath) {
+      if (pane === 'local') {
+        if (localFiles.listing?.path !== resolved.parentPath) {
+          await localFiles.load(resolved.parentPath);
+        }
+        const target = localFiles.listing?.entries.find((item) => item.path === resolved.targetPath);
+        if (target) localFiles.select(target);
+      } else if (sessions.activeSessionId) {
+        if (sftp.path !== resolved.parentPath) {
+          await sftp.load(sessions.activeSessionId, resolved.parentPath);
+        }
+        const target = sftp.entries.find((item) => item.path === resolved.targetPath);
+        if (target) sftp.select(target);
+      }
+      return;
+    }
+    ui.notify(t('errors.symlinkTargetUnavailable'));
+    return;
+  }
+  if (pane === 'local') await localFiles.open(entry);
+  else await sftp.open(entry);
 }
 
 function metricUsage(total: number | null | undefined, available: number | null | undefined): string {
@@ -965,10 +997,11 @@ async function submitCopy(): Promise<void> {
         destinationDirectory,
         targetName,
         operationId,
+        { autoRename: true, copySuffix: t('inspector.copyNameSuffix') },
       );
       if (copied) {
         closeCopyDialog();
-        ui.notify(t('inspector.localCopied'));
+        ui.notify(copied === targetName ? t('inspector.localCopied') : t('files.copiedAsName', { name: copied }));
       } else if (copyCancelling.value) {
         ui.notify(t('inspector.copyCancelled'));
       }
@@ -984,10 +1017,11 @@ async function submitCopy(): Promise<void> {
       destinationDirectory,
       targetName,
       operationId,
+      { autoRename: true, copySuffix: t('inspector.copyNameSuffix') },
     );
     if (copied) {
       closeCopyDialog();
-      ui.notify(t('inspector.remoteCopied'));
+      ui.notify(copied === targetName ? t('inspector.remoteCopied') : t('files.copiedAsName', { name: copied }));
     } else if (copyCancelling.value) {
       ui.notify(t('inspector.copyCancelled'));
     }
@@ -1030,7 +1064,7 @@ defineExpose({ focusInspector });
         <strong>{{ t('inspector.browserPath') }}</strong>
         <span>
           <button type="button" class="icon-button" :disabled="!remoteReady || sftp.loading || (dualPaneEnabled && (activePane !== 'local' || !selectedLocalEntry || selectedLocalEntry.isSymlink))" :aria-label="t('inspector.uploadFile')" :title="t('inspector.uploadFile')" @click="openUpload"><Upload :size="12" /></button>
-          <button type="button" class="icon-button" :disabled="!remoteReady || sftp.loading || activePane !== 'remote' || !selectedRemoteEntry || selectedRemoteEntry.isSymlink" :aria-label="t('inspector.downloadFile')" :title="t('inspector.downloadFile')" @click="openDownload"><Download :size="12" /></button>
+          <button type="button" class="icon-button" :disabled="!remoteReady || sftp.loading || activePane !== 'remote' || !selectedRemoteEntry" :aria-label="t('inspector.downloadFile')" :title="t('inspector.downloadFile')" @click="openDownload"><Download :size="12" /></button>
           <button v-if="dualPaneEnabled" type="button" class="icon-button" :disabled="!canCompareChecksums || checksums.loading" :aria-label="t('inspector.compareChecksums')" :title="t('inspector.compareChecksums')" @click="openChecksumComparison"><ShieldCheck :size="12" /></button>
           <button v-if="dualPaneEnabled" type="button" class="icon-button" :disabled="!canPreviewDirectorySync || syncPreviews.loading" :aria-label="t('inspector.previewSync')" :title="t('inspector.previewSync')" @click="openSyncPreviewDialog"><ArrowLeftRight :size="12" /></button>
           <button type="button" class="icon-button" :disabled="activePane === 'local' ? (!selectedLocalEntry || localFiles.mutating) : (!remoteReady || !selectedRemoteEntry || sftp.deleting)" :aria-label="t(activePane === 'local' ? 'inspector.deleteLocal' : 'inspector.deleteRemote')" :title="t(activePane === 'local' ? 'inspector.deleteLocal' : 'inspector.deleteRemote')" @click="deleteActiveEntry"><Trash2 :size="12" /></button>
@@ -1074,7 +1108,7 @@ defineExpose({ focusInspector });
               <p v-if="pane.truncated" class="dialog-note preview-truncated">{{ t('inspector.directoryTruncated') }}</p>
               <button v-for="entry in pane.entries" :key="entry.path" type="button" class="file-row" :class="{ selected: entry.path === pane.selectedPath }" :data-entry-path="entry.path" :draggable="pane.id === 'remote' && !entry.isSymlink" @dragstart="beginRemoteFileDrag(entry, pane.id, $event)" @click="selectPaneEntry(entry, pane.id)" @dblclick="openPaneEntry(entry, pane.id)" @keydown.enter.prevent="openPaneEntry(entry, pane.id)">
                 <FileEntryIcon :name="entry.name" :is-directory="entry.isDirectory" :is-symlink="entry.isSymlink" :size="14" />
-                <span>{{ entry.name }}</span><small>{{ formatSize(entry.size) }}</small>
+                <span>{{ entry.name }}</span><small>{{ pane.id === 'remote' && entry.isDirectory ? (sftp.directoryUsage?.path === sftp.path ? (sftp.directoryUsage.entrySizeLabels[entry.name] ?? '—') : '—') : formatSize(entry.size) }}</small>
                 <small class="file-permissions" :title="permissionModeTitle(entry.permissionsMode)">{{ t('inspector.permissionModeShort', { mode: formatPermissionMode(entry.permissionsMode) }) }}</small>
               </button>
             </template>

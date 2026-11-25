@@ -5,8 +5,10 @@ import type {
   ElevatedAccessLeaseSummary,
   OperationResult,
   RemoteDirectoryListing,
+  RemoteDirectoryUsage,
   RemoteTextPreview,
   RemoteTextSaveResult,
+  ResolvedLinkTarget,
 } from '@/types/contracts';
 
 function desktopOnly<T>(): OperationResult<T> {
@@ -54,6 +56,28 @@ export function elevatedListDirectory(
   path: string,
 ): Promise<OperationResult<RemoteDirectoryListing>> {
   return invokePrivilege('elevated_list_directory', { sessionId, path }, 'ELEVATED_LIST_FAILED');
+}
+
+export function elevatedResolveLinkTarget(
+  sessionId: string,
+  path: string,
+): Promise<OperationResult<ResolvedLinkTarget>> {
+  return invokePrivilege('elevated_resolve_link_target', { sessionId, path }, 'SYMLINK_TARGET_UNAVAILABLE');
+}
+
+export function elevatedDirectoryUsage(
+  sessionId: string,
+  path: string,
+): Promise<OperationResult<RemoteDirectoryUsage>> {
+  return invokePrivilege('elevated_directory_usage', { sessionId, path }, 'DIRECTORY_USAGE_FAILED');
+}
+
+export function elevatedMoveEntry(
+  sessionId: string,
+  sourcePath: string,
+  targetDirectory: string,
+): Promise<OperationResult<void>> {
+  return invokePrivilege('elevated_move_entry', { sessionId, sourcePath, targetDirectory }, 'SFTP_MOVE_FAILED');
 }
 
 export function elevatedCreateDirectory(

@@ -27,18 +27,18 @@ use filex_contracts::{
     AppError, AuthenticationMethod, ConflictPolicy, ConnectionProfile, CreateLocalTunnelInput,
     DirectorySyncChangeKind, DirectorySyncEntryKind, DirectorySyncPreview,
     DirectorySyncPreviewEntry, DockerAvailability, DockerContainerAction, DockerLogsSnapshot,
-    DockerSnapshot, FileChecksumComparison, HostKeyChallenge, HostTrustEvaluation, MonitorState,
-    NetworkEndpoint, NetworkInterface, NetworkPlatform, NetworkSnapshot, OpsCategory, OpsSnapshot,
-    ProcessEntry, ProcessPlatform, ProcessSignal, ProcessSnapshot, ProcessSortBy,
-    RemoteDirectoryListing, RemoteFileEntry, RemotePermissionScope, RemotePermissionUpdateResult,
-    RemoteState, RemoteTextPreview, RemoteTextSaveResult, RouteEntry, SessionConnectionProgress,
-    SessionKind, SessionState, SessionSummary, SystemMonitorSnapshot, TransferDirection,
-    TransferResumeState, TransferTask, TunnelKind, TunnelState, TunnelSummary,
-    capabilities_for_ssh,
+    DockerSnapshot, FileChecksumComparison, HostKeyChallenge, HostTrustEvaluation, LinkTargetKind,
+    MonitorState, NetworkEndpoint, NetworkInterface, NetworkPlatform, NetworkSnapshot, OpsCategory,
+    OpsSnapshot, ProcessEntry, ProcessPlatform, ProcessSignal, ProcessSnapshot, ProcessSortBy,
+    RemoteDirectoryListing, RemoteDirectoryUsage, RemoteFileEntry, RemotePermissionScope,
+    RemotePermissionUpdateResult, RemoteState, RemoteTextPreview, RemoteTextSaveResult,
+    ResolvedLinkTarget, RouteEntry, SessionConnectionProgress, SessionKind, SessionState,
+    SessionSummary, SystemMonitorSnapshot, TransferDirection, TransferResumeState, TransferTask,
+    TunnelKind, TunnelState, TunnelSummary, capabilities_for_ssh,
 };
-use filex_core::{HostTrustService, SessionMachine, parse_monitor_probe};
+use filex_core::{HostTrustService, SessionMachine, next_copy_candidate_name, parse_monitor_probe};
 use filex_ssh::{
-    ConnectedSshSession, PreparedPrivateKey, PresentedHostKey, ProbedSshHandle,
+    ConnectedSshSession, ExecStreamEvent, PreparedPrivateKey, PresentedHostKey, ProbedSshHandle,
     ProxyConnectionSpec, RusshEngine, SftpDirectoryReader, SshError, TerminalInput, TerminalOutput,
     connect_via_proxy,
 };
@@ -65,6 +65,8 @@ const REMOTE_TREE_MAX_ENTRIES: usize = 5_000;
 const REMOTE_TREE_MAX_DEPTH: usize = 16;
 const EXTERNAL_EDIT_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const EXTERNAL_EDIT_SYNC_TIMEOUT_SECONDS: u64 = 60;
+pub(crate) const REMOTE_DU_MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const REMOTE_DU_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct SessionRuntime {
     engine: RwLock<RusshEngine>,
@@ -80,6 +82,8 @@ pub struct SessionRuntime {
     process_snapshots: Mutex<HashMap<String, CachedProcessSnapshot>>,
     checksum_cancellations: Mutex<HashMap<String, CancellationToken>>,
     sync_preview_cancellations: Mutex<HashMap<String, CancellationToken>>,
+    directory_usage_cancellations: Mutex<HashMap<String, (u64, CancellationToken)>>,
+    next_usage_id: AtomicU64,
     elevated_access: crate::elevated_access::ElevatedAccessManager,
 }
 
@@ -492,6 +496,8 @@ impl Default for SessionRuntime {
             process_snapshots: Mutex::new(HashMap::new()),
             checksum_cancellations: Mutex::new(HashMap::new()),
             sync_preview_cancellations: Mutex::new(HashMap::new()),
+            directory_usage_cancellations: Mutex::new(HashMap::new()),
+            next_usage_id: AtomicU64::new(1),
             elevated_access: crate::elevated_access::ElevatedAccessManager::default(),
         }
     }
@@ -500,6 +506,22 @@ impl Default for SessionRuntime {
 impl SessionRuntime {
     pub fn elevated_access(&self) -> &crate::elevated_access::ElevatedAccessManager {
         &self.elevated_access
+    }
+
+    fn cancel_directory_usage(&self, session_id: &str) {
+        if let Ok(mut pending) = self.directory_usage_cancellations.lock()
+            && let Some((_, token)) = pending.remove(session_id)
+        {
+            token.cancel();
+        }
+    }
+
+    fn cancel_all_directory_usage(&self) {
+        if let Ok(mut pending) = self.directory_usage_cancellations.lock() {
+            for (_, (_, token)) in pending.drain() {
+                token.cancel();
+            }
+        }
     }
 
     pub(crate) async fn connected_ssh_target(
@@ -1887,6 +1909,7 @@ impl SessionRuntime {
 
     pub async fn disconnect(&self, session_id: &str) -> Result<SessionSummary, AppError> {
         self.elevated_access.invalidate_session(session_id);
+        self.cancel_directory_usage(session_id);
         self.transition(session_id, SessionState::Disconnecting)?;
         let was_quick = self.remove_quick_profile(session_id)?;
         self.invalidate_process_snapshot(session_id)?;
@@ -2049,6 +2072,7 @@ impl SessionRuntime {
             .lock()
             .map_err(|_| session_lock_error())?
             .clear();
+        self.cancel_all_directory_usage();
         self.elevated_access.clear_all();
 
         match first_error {
@@ -2102,6 +2126,7 @@ impl SessionRuntime {
     }
 
     pub async fn remote_closed(&self, session_id: &str) -> Result<SessionSummary, AppError> {
+        self.cancel_directory_usage(session_id);
         self.elevated_access.invalidate_session(session_id);
         let (connection, transport_shared, unshared_upstreams) = {
             let mut connections = self.connections.lock().await;
@@ -2183,12 +2208,13 @@ impl SessionRuntime {
             .map(|entry| {
                 let metadata = entry.metadata();
                 let is_symlink = metadata.is_symlink();
+                let is_directory = !is_symlink && metadata.is_dir();
                 RemoteFileEntry {
                     name: entry.file_name(),
                     path: entry.path(),
-                    is_directory: metadata.is_dir(),
+                    is_directory,
                     is_symlink,
-                    size: metadata.size,
+                    size: if is_directory { None } else { metadata.size },
                     modified_at_ms: metadata.mtime.map(|seconds| u64::from(seconds) * 1000),
                     permissions_mode: if is_symlink {
                         None
@@ -2197,9 +2223,18 @@ impl SessionRuntime {
                     },
                     uid: metadata.uid,
                     gid: metadata.gid,
+                    symlink_target: None,
                 }
             })
             .collect::<Vec<_>>();
+        let symlink_count = result.iter().filter(|entry| entry.is_symlink).count();
+        if symlink_count > 0 && symlink_count <= 64 {
+            for entry in &mut result {
+                if entry.is_symlink {
+                    entry.symlink_target = sftp.read_link(entry.path.clone()).await.ok();
+                }
+            }
+        }
         result.sort_by(|left, right| {
             right
                 .is_directory
@@ -2211,6 +2246,126 @@ impl SessionRuntime {
             path: canonical_path,
             entries: result,
         })
+    }
+
+    pub async fn resolve_remote_link_target(
+        &self,
+        session_id: &str,
+        path: &str,
+    ) -> Result<ResolvedLinkTarget, AppError> {
+        if path.is_empty() || path.len() > 4_096 || path.contains('\0') {
+            return Err(invalid_remote_path_error());
+        }
+        let session = self.session_handle(session_id).await?;
+        let sftp = session
+            .open_sftp()
+            .await
+            .map_err(|error| ssh_error(&error))?;
+        let result = async {
+            let target_path = sftp
+                .canonicalize(path)
+                .await
+                .map_err(|_| symlink_target_unavailable_error())?;
+            let metadata = sftp
+                .metadata(target_path.clone())
+                .await
+                .map_err(|_| symlink_target_unavailable_error())?;
+            let target_kind = if metadata.is_dir() {
+                LinkTargetKind::Directory
+            } else if metadata.is_regular() {
+                LinkTargetKind::File
+            } else {
+                LinkTargetKind::Unsupported
+            };
+            Ok(ResolvedLinkTarget {
+                parent_path: posix_parent_path(&target_path),
+                target_path,
+                target_kind,
+            })
+        }
+        .await;
+        let _ = sftp.close().await;
+        result
+    }
+
+    pub async fn calculate_remote_directory_usage(
+        &self,
+        session_id: &str,
+        path: &str,
+    ) -> Result<RemoteDirectoryUsage, AppError> {
+        if path.is_empty() || path.len() > 4_096 || path.contains('\0') {
+            return Err(invalid_remote_path_error());
+        }
+        let session = self.session_handle(session_id).await?;
+        let command = build_remote_directory_usage_command(path);
+        let usage_id = self.next_usage_id.fetch_add(1, Ordering::Relaxed);
+        let cancellation = CancellationToken::new();
+        {
+            let mut pending = self
+                .directory_usage_cancellations
+                .lock()
+                .map_err(|_| session_lock_error())?;
+            if let Some((_, previous)) =
+                pending.insert(session_id.to_owned(), (usage_id, cancellation.clone()))
+            {
+                previous.cancel();
+            }
+        }
+
+        let operation = async {
+            let (exec_control, mut exec_output) = session
+                .open_exec_stream(&command)
+                .await
+                .map_err(|error| ssh_error(&error))?;
+            let mut stdout = Vec::new();
+            let mut exit_status = None;
+            let deadline = tokio::time::sleep(REMOTE_DU_TIMEOUT);
+            tokio::pin!(deadline);
+            loop {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => {
+                        let _ = exec_control.signal_kill().await;
+                        let _ = exec_control.close().await;
+                        return Err(transfer_cancelled_error());
+                    }
+                    () = &mut deadline => {
+                        let _ = exec_control.signal_kill().await;
+                        let _ = exec_control.close().await;
+                        return Err(directory_usage_failed_error());
+                    }
+                    event = exec_output.next() => match event {
+                        ExecStreamEvent::Stdout(chunk) => {
+                            if stdout.len().saturating_add(chunk.len()) > REMOTE_DU_MAX_OUTPUT_BYTES {
+                                let _ = exec_control.signal_kill().await;
+                                let _ = exec_control.close().await;
+                                return Err(directory_usage_failed_error());
+                            }
+                            stdout.extend_from_slice(&chunk);
+                        }
+                        ExecStreamEvent::Stderr(_) => {}
+                        ExecStreamEvent::ExitStatus(code) => exit_status = Some(code),
+                        ExecStreamEvent::ExitSignal { .. } => {
+                            let _ = exec_control.close().await;
+                            return Err(directory_usage_failed_error());
+                        }
+                        ExecStreamEvent::Eof | ExecStreamEvent::Closed => break,
+                    }
+                }
+            }
+            let _ = exec_control.close().await;
+            parse_remote_directory_usage_output(&stdout, exit_status)
+        }
+        .await;
+
+        if let Ok(mut pending) = self.directory_usage_cancellations.lock()
+            && pending
+                .get(session_id)
+                .is_some_and(|(current_id, _)| *current_id == usage_id)
+        {
+            pending.remove(session_id);
+        }
+        operation
     }
 
     pub async fn create_remote_file(
@@ -2996,20 +3151,27 @@ impl SessionRuntime {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn copy_remote_entry(
         &self,
         session_id: &str,
         source_path: &str,
         target_directory: &str,
         target_name: &str,
+        auto_rename: bool,
+        copy_suffix: Option<&str>,
         copy_control: &CopyOperationControl,
-    ) -> Result<(), AppError> {
+    ) -> Result<String, AppError> {
         copy_control.check_cancelled()?;
         validate_remote_delete_path(source_path)?;
         validate_remote_directory_name(target_directory, target_name)?;
         if source_path.len() > 4_096 || target_directory.len() > 4_096 {
             return Err(invalid_remote_path_error());
         }
+        let suffix = copy_suffix
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("copy");
 
         let session = self.session_handle(session_id).await?;
         let sftp = tokio::time::timeout(Duration::from_secs(8), session.open_sftp())
@@ -3073,13 +3235,18 @@ impl SessionRuntime {
                 if remote_path_is_same_or_child(&destination_parent, &source) {
                     return Err(remote_copy_unsupported_error());
                 }
-                let target = join_remote_path(&destination_parent, target_name);
-                if target.len() > 4_096 {
-                    return Err(invalid_remote_path_error());
-                }
-                if remote_entry_exists(&sftp, target.clone()).await? {
-                    return Err(remote_move_target_exists_error());
-                }
+                let mut current_attempt = 0_usize;
+                let mut final_name = resolve_remote_copy_target_name(
+                    &sftp,
+                    &destination_parent,
+                    target_name,
+                    true,
+                    auto_rename,
+                    suffix,
+                    &mut current_attempt,
+                )
+                .await?;
+                let mut target = join_remote_path(&destination_parent, &final_name);
                 let temporary_path = join_remote_path(
                     &destination_parent,
                     &format!(".filex-copy-{}", uuid::Uuid::new_v4()),
@@ -3186,13 +3353,27 @@ impl SessionRuntime {
                 }
                 copy_control.begin_commit()?;
                 if remote_entry_exists(&sftp, target.clone()).await? {
-                    return Err(remote_move_target_exists_error());
+                    if !auto_rename {
+                        return Err(remote_move_target_exists_error());
+                    }
+                    current_attempt += 1;
+                    final_name = resolve_remote_copy_target_name(
+                        &sftp,
+                        &destination_parent,
+                        target_name,
+                        true,
+                        true,
+                        suffix,
+                        &mut current_attempt,
+                    )
+                    .await?;
+                    target = join_remote_path(&destination_parent, &final_name);
                 }
                 sftp.rename(temporary_path.clone(), target.clone())
                     .await
                     .map_err(|_| remote_copy_error())?;
                 temporary_for_cleanup = None;
-                return Ok(());
+                return Ok(final_name);
             }
             if !source_metadata.is_regular() {
                 return Err(remote_copy_unsupported_error());
@@ -3215,13 +3396,18 @@ impl SessionRuntime {
             if !destination_metadata.is_dir() {
                 return Err(remote_copy_error());
             }
-            let target = join_remote_path(&destination_parent, target_name);
-            if target.len() > 4_096 {
-                return Err(invalid_remote_path_error());
-            }
-            if remote_entry_exists(&sftp, target.clone()).await? {
-                return Err(remote_move_target_exists_error());
-            }
+            let mut current_attempt = 0_usize;
+            let mut final_name = resolve_remote_copy_target_name(
+                &sftp,
+                &destination_parent,
+                target_name,
+                false,
+                auto_rename,
+                suffix,
+                &mut current_attempt,
+            )
+            .await?;
+            let mut target = join_remote_path(&destination_parent, &final_name);
 
             let temporary_path = join_remote_path(
                 &destination_parent,
@@ -3283,7 +3469,21 @@ impl SessionRuntime {
             }
             copy_control.begin_commit()?;
             if remote_entry_exists(&sftp, target.clone()).await? {
-                return Err(remote_move_target_exists_error());
+                if !auto_rename {
+                    return Err(remote_move_target_exists_error());
+                }
+                current_attempt += 1;
+                final_name = resolve_remote_copy_target_name(
+                    &sftp,
+                    &destination_parent,
+                    target_name,
+                    false,
+                    true,
+                    suffix,
+                    &mut current_attempt,
+                )
+                .await?;
+                target = join_remote_path(&destination_parent, &final_name);
             }
             if sftp
                 .rename(temporary_path.clone(), target.clone())
@@ -3297,7 +3497,7 @@ impl SessionRuntime {
                 };
             }
             temporary_for_cleanup = None;
-            Ok(())
+            Ok(final_name)
         };
         let result =
             match tokio::time::timeout(Duration::from_secs(REMOTE_COPY_TIMEOUT_SECONDS), operation)
@@ -5037,6 +5237,7 @@ impl SessionRuntime {
             .lock()
             .map_err(|_| session_lock_error())?
             .clear();
+        self.cancel_all_directory_usage();
         self.elevated_access.clear_all();
         Ok(())
     }
@@ -8620,10 +8821,33 @@ async fn download(
         .await
         .map_err(|_| transfer_io_error("SFTP_STAT_FAILED", "errors.sftpFailed"))?;
     if metadata.is_symlink() {
-        return Err(directory_tree_unsupported_error());
+        let canonical_source = sftp
+            .canonicalize(task.remote_path.clone())
+            .await
+            .map_err(|_| symlink_target_unavailable_error())?;
+        let target_metadata = sftp
+            .metadata(canonical_source.clone())
+            .await
+            .map_err(|_| symlink_target_unavailable_error())?;
+        if target_metadata.is_regular() {
+            return download_regular_file(
+                sftp,
+                task,
+                &canonical_source,
+                &target_metadata,
+                control,
+                on_event,
+            )
+            .await;
+        }
+        if target_metadata.is_dir() {
+            return download_directory(sftp, session, task, control, on_event).await;
+        }
+        return Err(symlink_target_unavailable_error());
     }
     if metadata.is_regular() {
-        return download_regular_file(sftp, task, &metadata, control, on_event).await;
+        return download_regular_file(sftp, task, &task.remote_path, &metadata, control, on_event)
+            .await;
     }
     if metadata.is_dir() {
         return download_directory(sftp, session, task, control, on_event).await;
@@ -8634,6 +8858,7 @@ async fn download(
 async fn download_regular_file(
     sftp: &russh_sftp::client::SftpSession,
     task: &TransferTask,
+    source_remote_path: &str,
     source_metadata: &FileAttributes,
     control: &TransferControl,
     on_event: &(dyn Fn(TransferRuntimeEvent) + Send + Sync),
@@ -8733,7 +8958,7 @@ async fn download_regular_file(
 
     let transfer_result = async {
         let mut remote = sftp
-            .open(task.remote_path.clone())
+            .open(source_remote_path.to_owned())
             .await
             .map_err(|_| transfer_io_error("SFTP_OPEN_FAILED", "errors.sftpFailed"))?;
         let mut local = if resume_offset > 0 {
@@ -8813,7 +9038,7 @@ async fn download_regular_file(
             return Err(transfer_size_mismatch_error());
         }
         let recheck = sftp
-            .symlink_metadata(task.remote_path.clone())
+            .symlink_metadata(source_remote_path.to_owned())
             .await
             .map_err(|_| transfer_identity_changed_error())?;
         let recheck_mtime_ms = recheck.mtime.map(|seconds| u64::from(seconds) * 1_000);
@@ -8923,7 +9148,7 @@ async fn download_directory(
         .await
         .map_err(|error| ssh_error(&error))?;
     let scan_result =
-        scan_remote_transfer_tree(&directory_reader, &source_root, Some(control), None).await;
+        scan_remote_download_tree(&directory_reader, sftp, &source_root, control).await;
     let close_result = directory_reader.close();
     let entries = scan_result?;
     close_result.map_err(|_| transfer_io_error("SFTP_CLOSE_FAILED", "errors.sftpFailed"))?;
@@ -9350,6 +9575,142 @@ async fn scan_local_transfer_tree(
                     return Err(directory_tree_limit_error());
                 }
                 child_directories.push((source_path, relative_path, depth + 1));
+            }
+        }
+        child_directories.sort_by(|left, right| right.1.cmp(&left.1));
+        directories.extend(child_directories);
+    }
+    entries.sort_by(|left, right| {
+        left.relative_path
+            .matches('/')
+            .count()
+            .cmp(&right.relative_path.matches('/').count())
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+    });
+    Ok(entries)
+}
+
+pub(crate) async fn scan_remote_download_tree(
+    directory_reader: &SftpDirectoryReader,
+    sftp: &russh_sftp::client::SftpSession,
+    root: &str,
+    control: &TransferControl,
+) -> Result<Vec<RemoteTransferEntry>, AppError> {
+    if root.is_empty() || root.len() > 4_096 {
+        return Err(directory_tree_limit_error());
+    }
+    let mut entries = Vec::new();
+    let initial_ancestors = BTreeSet::from([root.to_owned()]);
+    let mut directories = vec![(root.to_owned(), String::new(), 0_usize, initial_ancestors)];
+
+    while let Some((directory_path, relative_parent, depth, ancestors)) = directories.pop() {
+        control.wait_until_running().await?;
+        let remaining = DIRECTORY_SYNC_MAX_ENTRIES.saturating_sub(entries.len());
+        let listed = directory_reader
+            .read_dir_limited(&directory_path, remaining, control.cancellation.cancelled())
+            .await
+            .map_err(map_transfer_directory_read_error)?;
+        let mut child_directories = Vec::new();
+        for entry in listed {
+            control.wait_until_running().await?;
+            if control.cancellation.is_cancelled() {
+                return Err(transfer_cancelled_error());
+            }
+            let name = entry.name;
+            if name == "." || name == ".." {
+                continue;
+            }
+            if !valid_directory_sync_segment(&name) {
+                return Err(directory_tree_unsupported_error());
+            }
+            let relative_path = join_relative_sync_path(&relative_parent, &name);
+            if relative_path.len() > 4_096 || entries.len() >= DIRECTORY_SYNC_MAX_ENTRIES {
+                return Err(directory_tree_limit_error());
+            }
+            let remote_path = join_remote_directory_path(&directory_path, &name);
+            if remote_path.len() > 4_096 {
+                return Err(directory_tree_limit_error());
+            }
+            let metadata = entry.attributes;
+            if metadata.is_symlink() {
+                let canon_result = tokio::select! {
+                    biased;
+                    () = control.cancellation.cancelled() => return Err(control.cancellation_error()),
+                    result = sftp.canonicalize(remote_path.clone()) => result,
+                };
+                let Ok(canon_target) = canon_result else {
+                    continue;
+                };
+                if canon_target.len() > 4_096 {
+                    return Err(directory_tree_limit_error());
+                }
+                let meta_result = tokio::select! {
+                    biased;
+                    () = control.cancellation.cancelled() => return Err(control.cancellation_error()),
+                    result = sftp.metadata(canon_target.clone()) => result,
+                };
+                let Ok(target_meta) = meta_result else {
+                    continue;
+                };
+                if target_meta.is_dir() {
+                    if ancestors.contains(&canon_target) {
+                        continue;
+                    }
+                    entries.push(RemoteTransferEntry {
+                        remote_path: canon_target.clone(),
+                        relative_path: relative_path.clone(),
+                        is_directory: true,
+                        size: Some(0),
+                        permissions: target_meta.permissions,
+                    });
+                    if depth >= DIRECTORY_SYNC_MAX_DEPTH {
+                        return Err(directory_tree_limit_error());
+                    }
+                    let mut next_ancestors = ancestors.clone();
+                    next_ancestors.insert(canon_target.clone());
+                    child_directories.push((
+                        canon_target,
+                        relative_path,
+                        depth + 1,
+                        next_ancestors,
+                    ));
+                } else if target_meta.is_regular() {
+                    entries.push(RemoteTransferEntry {
+                        remote_path: canon_target,
+                        relative_path,
+                        is_directory: false,
+                        size: target_meta.size,
+                        permissions: target_meta.permissions,
+                    });
+                }
+                continue;
+            }
+            let is_directory = metadata.is_dir();
+            if !is_directory && !metadata.is_regular() {
+                continue;
+            }
+            entries.push(RemoteTransferEntry {
+                remote_path: remote_path.clone(),
+                relative_path: relative_path.clone(),
+                is_directory,
+                size: if is_directory { Some(0) } else { metadata.size },
+                permissions: metadata.permissions,
+            });
+            if is_directory {
+                if depth >= DIRECTORY_SYNC_MAX_DEPTH {
+                    return Err(directory_tree_limit_error());
+                }
+                let canon_dir = tokio::select! {
+                    biased;
+                    () = control.cancellation.cancelled() => return Err(control.cancellation_error()),
+                    result = sftp.canonicalize(remote_path.clone()) => result.unwrap_or(remote_path),
+                };
+                if ancestors.contains(&canon_dir) {
+                    continue;
+                }
+                let mut next_ancestors = ancestors.clone();
+                next_ancestors.insert(canon_dir.clone());
+                child_directories.push((canon_dir, relative_path, depth + 1, next_ancestors));
             }
         }
         child_directories.sort_by(|left, right| right.1.cmp(&left.1));
@@ -9847,6 +10208,170 @@ pub(crate) fn build_remote_tar_command(
     Ok(parts.join(" "))
 }
 
+pub(crate) const REMOTE_DIRECTORY_USAGE_SCRIPT: &str = r#"target=$(cd -- "$1" 2>/dev/null && pwd -P) || exit 2
+if LC_ALL=C du -ah -0 --max-depth=0 -- /dev/null >/dev/null 2>&1; then
+  printf 'NUL\0%s\0' "$target"
+  if [ "$target" = "/" ]; then
+    LC_ALL=C du -ah -0 --max-depth=1 --exclude=/proc --exclude=/sys --exclude=/dev -- "$target" 2>/dev/null
+  else
+    LC_ALL=C du -ah -0 --max-depth=1 -- "$target" 2>/dev/null
+  fi
+  exit $?
+fi
+printf 'NL\n%s\n' "$target"
+if [ "$target" = "/" ]; then
+  LC_ALL=C du -ahx -d 1 -- "$target" 2>/dev/null || LC_ALL=C du -ahx --max-depth=1 -- "$target" 2>/dev/null
+else
+  LC_ALL=C du -ah -d 1 -- "$target" 2>/dev/null || LC_ALL=C du -ah --max-depth=1 -- "$target" 2>/dev/null
+fi"#;
+
+fn build_remote_directory_usage_command(path: &str) -> String {
+    format!(
+        "LC_ALL=C sh -c {} _ {}",
+        posix_single_quote(REMOTE_DIRECTORY_USAGE_SCRIPT),
+        posix_single_quote(path)
+    )
+}
+
+fn normalize_posix_usage_path(raw: &str) -> String {
+    let trimmed = raw.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+pub(crate) fn parse_remote_directory_usage_output(
+    stdout: &[u8],
+    exit_status: Option<u32>,
+) -> Result<RemoteDirectoryUsage, AppError> {
+    let (resolved_path, records): (String, Vec<String>) =
+        if let Some(rest) = stdout.strip_prefix(b"NUL\0") {
+            let mut iter = rest.split(|byte| *byte == 0);
+            let target_bytes = iter.next().ok_or_else(directory_usage_failed_error)?;
+            let target = normalize_posix_usage_path(&String::from_utf8_lossy(target_bytes));
+            let lines = iter
+                .filter(|chunk| !chunk.is_empty())
+                .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+                .collect();
+            (target, lines)
+        } else if let Some(rest) = stdout.strip_prefix(b"NL\n") {
+            let text = String::from_utf8_lossy(rest);
+            let mut lines = text.lines();
+            let target_line = lines.next().ok_or_else(directory_usage_failed_error)?;
+            let target = normalize_posix_usage_path(target_line);
+            let records = lines
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect();
+            (target, records)
+        } else {
+            return Err(directory_usage_failed_error());
+        };
+
+    let mut total_size_label: Option<String> = None;
+    let mut entry_size_labels = BTreeMap::new();
+    let child_prefix = if resolved_path == "/" {
+        "/".to_owned()
+    } else {
+        format!("{resolved_path}/")
+    };
+
+    for record in records {
+        let Some((size_raw, path_raw)) = record.split_once('\t') else {
+            continue;
+        };
+        let size_label = size_raw.trim();
+        if size_label.is_empty() {
+            continue;
+        }
+        let normalized_entry = normalize_posix_usage_path(path_raw);
+        if normalized_entry == resolved_path {
+            total_size_label = Some(size_label.to_owned());
+        } else if let Some(child_name) = normalized_entry.strip_prefix(&child_prefix)
+            && !child_name.is_empty()
+            && !child_name.contains('/')
+        {
+            entry_size_labels.insert(child_name.to_owned(), size_label.to_owned());
+        }
+    }
+
+    let total_size_label = total_size_label.ok_or_else(directory_usage_failed_error)?;
+    Ok(RemoteDirectoryUsage {
+        path: resolved_path,
+        total_size_label,
+        entry_size_labels,
+        partial: exit_status != Some(0),
+    })
+}
+
+async fn resolve_remote_copy_target_name(
+    sftp: &russh_sftp::client::SftpSession,
+    destination_parent: &str,
+    requested_name: &str,
+    is_directory: bool,
+    auto_rename: bool,
+    copy_suffix: &str,
+    attempt: &mut usize,
+) -> Result<String, AppError> {
+    if !auto_rename {
+        let target = join_remote_path(destination_parent, requested_name);
+        if target.len() > 4_096 {
+            return Err(invalid_remote_path_error());
+        }
+        if remote_entry_exists(sftp, target).await? {
+            return Err(remote_move_target_exists_error());
+        }
+        return Ok(requested_name.to_owned());
+    }
+    while *attempt < 1_000 {
+        let candidate =
+            next_copy_candidate_name(requested_name, is_directory, copy_suffix, *attempt);
+        let target = join_remote_path(destination_parent, &candidate);
+        if target.len() > 4_096 {
+            return Err(invalid_remote_path_error());
+        }
+        if !remote_entry_exists(sftp, target).await? {
+            return Ok(candidate);
+        }
+        *attempt += 1;
+    }
+    Err(remote_move_target_exists_error())
+}
+
+pub(crate) fn posix_parent_path(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "/" {
+        return None;
+    }
+    match trimmed.rsplit_once('/') {
+        Some(("", _)) => Some("/".to_owned()),
+        Some((parent, _)) => Some(parent.to_owned()),
+        None => None,
+    }
+}
+
+pub(crate) fn symlink_target_unavailable_error() -> AppError {
+    AppError {
+        code: "SYMLINK_TARGET_UNAVAILABLE".to_owned(),
+        message_key: "errors.symlinkTargetUnavailable".to_owned(),
+        retryable: false,
+        remote_state: RemoteState::Unchanged,
+        field: Some("path".to_owned()),
+    }
+}
+
+pub(crate) fn directory_usage_failed_error() -> AppError {
+    AppError {
+        code: "DIRECTORY_USAGE_FAILED".to_owned(),
+        message_key: "errors.directoryUsageFailed".to_owned(),
+        retryable: true,
+        remote_state: RemoteState::Unchanged,
+        field: Some("path".to_owned()),
+    }
+}
+
 fn posix_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -10306,5 +10831,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn parses_du_directory_usage_nul_and_newline_payloads() {
+        let nul_payload = b"NUL\x00/srv/app\x004.2M\t/srv/app\x001.8M\t/srv/app/dist\x0012K\t/srv/app/README.md\x0099K\t/srv/app/dist/bundle.js\x00";
+        let usage = super::parse_remote_directory_usage_output(nul_payload, Some(0))
+            .expect("NUL du payload should parse");
+        assert_eq!(usage.path, "/srv/app");
+        assert_eq!(usage.total_size_label, "4.2M");
+        assert_eq!(
+            usage.entry_size_labels.get("dist").map(String::as_str),
+            Some("1.8M")
+        );
+        assert_eq!(
+            usage.entry_size_labels.get("README.md").map(String::as_str),
+            Some("12K")
+        );
+        assert!(!usage.entry_size_labels.contains_key("dist/bundle.js"));
+        assert!(!usage.partial);
+
+        let nl_payload = b"NL\n/var/log/\n512M\t/var/log/\n128M\t/var/log/nginx\n";
+        let partial_usage = super::parse_remote_directory_usage_output(nl_payload, Some(1))
+            .expect("newline du payload should parse partial status");
+        assert_eq!(partial_usage.path, "/var/log");
+        assert_eq!(partial_usage.total_size_label, "512M");
+        assert_eq!(
+            partial_usage
+                .entry_size_labels
+                .get("nginx")
+                .map(String::as_str),
+            Some("128M")
+        );
+        assert!(partial_usage.partial);
     }
 }

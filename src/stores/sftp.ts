@@ -1,6 +1,7 @@
 import { ref } from 'vue';
 import { defineStore } from 'pinia';
 import {
+  calculateRemoteDirectoryUsage,
   createRemoteDirectory,
   createRemoteFile,
   copyRemoteEntry,
@@ -10,6 +11,7 @@ import {
   moveRemoteEntry,
   previewRemoteText,
   renameRemoteEntry,
+  resolveRemoteLinkTarget,
   saveRemoteText,
   updateRemoteEntryMode,
   updateRemotePermissions,
@@ -20,21 +22,26 @@ import {
   elevatedCreateDirectory,
   elevatedCreateFile,
   elevatedDeleteEntry,
+  elevatedDirectoryUsage,
   elevatedListDirectory,
+  elevatedMoveEntry,
   elevatedPreviewText,
   elevatedRenameEntry,
+  elevatedResolveLinkTarget,
   elevatedSaveText,
 } from '@/api/domain/privilegeApi';
 import { directoryEntries, type DirectoryTreeEntry } from '@/domain/directoryNavigation';
-import { resolveMultiSelection } from '@/domain/fileSelection';
+import { applyExplicitSelection, resolveMultiSelection } from '@/domain/fileSelection';
 import { createSessionStateCache } from '@/domain/sessionStateCache';
 import { useExternalEditorsStore } from '@/stores/externalEditors';
 import { usePrivilegeStore } from '@/stores/privilege';
 import type {
   AppError,
+  RemoteDirectoryUsage,
   RemoteFileEntry,
   RemotePermissionUpdateResult,
   RemoteTextPreview,
+  ResolvedLinkTarget,
   TerminalEncoding,
   UpdateRemotePermissionsInput,
 } from '@/types/contracts';
@@ -45,7 +52,11 @@ interface SftpSessionSnapshot {
   selectedPath: string | null;
   selectedPaths: string[];
   selectionAnchorPath: string | null;
+  multiSelectMode: boolean;
+  checkboxSticky: boolean;
   error: AppError | null;
+  directoryUsage: RemoteDirectoryUsage | null;
+  directoryUsageError: AppError | null;
   directoryChildren: Record<string, DirectoryTreeEntry[]>;
   directoryErrorPaths: string[];
   expandedTreePaths: string[];
@@ -66,7 +77,12 @@ export const useSftpStore = defineStore('sftp', () => {
   const selectedPath = ref<string | null>(null);
   const selectedPaths = ref<string[]>([]);
   const selectionAnchorPath = ref<string | null>(null);
+  const multiSelectMode = ref(false);
+  const checkboxSticky = ref(false);
   const error = ref<AppError | null>(null);
+  const directoryUsage = ref<RemoteDirectoryUsage | null>(null);
+  const directoryUsageLoading = ref(false);
+  const directoryUsageError = ref<AppError | null>(null);
   const preview = ref<RemoteTextPreview | null>(null);
   const previewPath = ref<string | null>(null);
   const previewEncoding = ref<TerminalEncoding>('utf-8');
@@ -88,6 +104,7 @@ export const useSftpStore = defineStore('sftp', () => {
   const expandedTreePaths = ref<string[]>(['/']);
   const sessionCaches = createSessionStateCache<SftpSessionSnapshot>();
   const loadGenerations = new Map<string, number>();
+  const usageGenerations = new Map<string, number>();
   const droppedSessions = new Set<string>();
   let activeOwnerSessionId: string | null = null;
   let requestGeneration = 0;
@@ -117,7 +134,11 @@ export const useSftpStore = defineStore('sftp', () => {
       selectedPath: selectedPath.value,
       selectedPaths: [...selectedPaths.value],
       selectionAnchorPath: selectionAnchorPath.value,
+      multiSelectMode: multiSelectMode.value,
+      checkboxSticky: checkboxSticky.value,
       error: error.value,
+      directoryUsage: directoryUsage.value,
+      directoryUsageError: directoryUsageError.value,
       directoryChildren: { ...directoryChildren.value },
       directoryErrorPaths: [...directoryErrorPaths.value],
       expandedTreePaths: [...expandedTreePaths.value],
@@ -138,7 +159,12 @@ export const useSftpStore = defineStore('sftp', () => {
       ? [...snapshot.selectedPaths]
       : (snapshot.selectedPath ? [snapshot.selectedPath] : []);
     selectionAnchorPath.value = snapshot.selectionAnchorPath ?? snapshot.selectedPath;
+    multiSelectMode.value = snapshot.multiSelectMode ?? false;
+    checkboxSticky.value = snapshot.checkboxSticky ?? false;
     error.value = snapshot.error;
+    directoryUsage.value = snapshot.directoryUsage ?? null;
+    directoryUsageLoading.value = false;
+    directoryUsageError.value = snapshot.directoryUsageError ?? null;
     loading.value = false;
     directoryChildren.value = { ...snapshot.directoryChildren };
     directoryLoadingPaths.value = [];
@@ -164,6 +190,9 @@ export const useSftpStore = defineStore('sftp', () => {
     path.value = '.';
     sessionId.value = null;
     error.value = null;
+    directoryUsage.value = null;
+    directoryUsageLoading.value = false;
+    directoryUsageError.value = null;
     loading.value = false;
     deleting.value = false;
     creatingDirectory.value = false;
@@ -175,6 +204,8 @@ export const useSftpStore = defineStore('sftp', () => {
     selectedPath.value = null;
     selectedPaths.value = [];
     selectionAnchorPath.value = null;
+    multiSelectMode.value = false;
+    checkboxSticky.value = false;
     directoryChildren.value = {};
     directoryLoadingPaths.value = [];
     directoryErrorPaths.value = [];
@@ -219,6 +250,7 @@ export const useSftpStore = defineStore('sftp', () => {
   function dropSession(targetSessionId: string): void {
     droppedSessions.add(targetSessionId);
     loadGenerations.delete(targetSessionId);
+    usageGenerations.delete(targetSessionId);
     sessionCaches.delete(targetSessionId);
     if (activeOwnerSessionId === targetSessionId || sessionId.value === targetSessionId) {
       activeOwnerSessionId = null;
@@ -259,7 +291,11 @@ export const useSftpStore = defineStore('sftp', () => {
         selectedPath.value = null;
         selectedPaths.value = [];
         selectionAnchorPath.value = null;
+        checkboxSticky.value = false;
+        directoryUsage.value = null;
+        directoryUsageError.value = null;
         sessionCaches.set(nextSessionId, snapshotActive());
+        void loadDirectoryUsage(nextSessionId, result.data.path);
       } else {
         const previous = sessionCaches.get(nextSessionId);
         sessionCaches.set(nextSessionId, {
@@ -268,7 +304,11 @@ export const useSftpStore = defineStore('sftp', () => {
           selectedPath: null,
           selectedPaths: [],
           selectionAnchorPath: null,
+          multiSelectMode: previous?.multiSelectMode ?? false,
+          checkboxSticky: false,
           error: null,
+          directoryUsage: null,
+          directoryUsageError: null,
           directoryChildren: {
             ...(previous?.directoryChildren ?? {}),
             [result.data.path]: directoryEntries(result.data.entries),
@@ -332,10 +372,93 @@ export const useSftpStore = defineStore('sftp', () => {
       }
     }
   }
+  async function loadDirectoryUsage(
+    targetSessionId: string | null = sessionId.value,
+    targetPath: string = path.value,
+  ): Promise<RemoteDirectoryUsage | null> {
+    if (!targetSessionId || !targetPath || targetPath === '.') return null;
+    const generation = (usageGenerations.get(targetSessionId) ?? 0) + 1;
+    usageGenerations.set(targetSessionId, generation);
+    const isCurrentForeground = () => sessionId.value === targetSessionId && path.value === targetPath;
+    if (isCurrentForeground()) {
+      directoryUsageLoading.value = true;
+      directoryUsageError.value = null;
+    }
+    try {
+      const elevated = privilege.isElevated(targetSessionId);
+      const result = elevated
+        ? await elevatedDirectoryUsage(targetSessionId, targetPath)
+        : await calculateRemoteDirectoryUsage(targetSessionId, targetPath);
+      if ((usageGenerations.get(targetSessionId) ?? 0) !== generation || droppedSessions.has(targetSessionId)) {
+        return null;
+      }
+      if (!result.ok) {
+        syncPrivilegeFailure(targetSessionId, result.error);
+        if (result.error.code === 'TRANSFER_CANCELLED') return null;
+        if (isCurrentForeground()) {
+          directoryUsageError.value = result.error;
+          sessionCaches.set(targetSessionId, snapshotActive());
+        }
+        return null;
+      }
+      if (isCurrentForeground()) {
+        directoryUsage.value = result.data;
+        directoryUsageError.value = null;
+        sessionCaches.set(targetSessionId, snapshotActive());
+      } else {
+        const cached = sessionCaches.get(targetSessionId);
+        if (cached && cached.path === targetPath) {
+          sessionCaches.set(targetSessionId, {
+            ...cached,
+            directoryUsage: result.data,
+            directoryUsageError: null,
+          });
+        }
+      }
+      return result.data;
+    } finally {
+      if ((usageGenerations.get(targetSessionId) ?? 0) === generation && sessionId.value === targetSessionId) {
+        directoryUsageLoading.value = false;
+      }
+    }
+  }
+
+  async function resolveLink(targetPath: string): Promise<ResolvedLinkTarget | null> {
+    if (!sessionId.value) return null;
+    const targetSessionId = sessionId.value;
+    error.value = null;
+    const elevated = privilege.isElevated(targetSessionId);
+    const result = elevated
+      ? await elevatedResolveLinkTarget(targetSessionId, targetPath)
+      : await resolveRemoteLinkTarget(targetSessionId, targetPath);
+    if (!result.ok) {
+      syncPrivilegeFailure(targetSessionId, result.error);
+      if (sessionId.value === targetSessionId) error.value = result.error;
+      return null;
+    }
+    return result.data;
+  }
+
   async function open(entry: RemoteFileEntry): Promise<void> {
-    if (entry.isDirectory && sessionId.value) {
+    if (!sessionId.value) return;
+    if (entry.isSymlink) {
+      const resolved = await resolveLink(entry.path);
+      if (!resolved || !sessionId.value) return;
+      if (resolved.targetKind === 'directory') {
+        await load(sessionId.value, resolved.targetPath);
+        return;
+      }
+      if (resolved.targetKind === 'file' && resolved.parentPath) {
+        if (await load(sessionId.value, resolved.parentPath)) {
+          const targetEntry = entries.value.find((candidate) => candidate.path === resolved.targetPath);
+          if (targetEntry) select(targetEntry);
+        }
+      }
+      return;
+    }
+    if (entry.isDirectory) {
       await load(sessionId.value, entry.path);
-    } else if (!entry.isSymlink && sessionId.value) {
+    } else {
       await previewFile(entry.path);
     }
   }
@@ -515,8 +638,12 @@ export const useSftpStore = defineStore('sftp', () => {
     moving.value = true;
     error.value = null;
     try {
-      const result = await moveRemoteEntry(targetSessionId, entry.path, targetDirectory);
+      const elevated = privilege.isElevated(targetSessionId);
+      const result = elevated
+        ? await elevatedMoveEntry(targetSessionId, entry.path, targetDirectory)
+        : await moveRemoteEntry(targetSessionId, entry.path, targetDirectory);
       if (!result.ok) {
+        syncPrivilegeFailure(targetSessionId, result.error);
         if (isCurrentListing()) error.value = result.error;
         return false;
       }
@@ -532,8 +659,9 @@ export const useSftpStore = defineStore('sftp', () => {
     targetDirectory: string,
     targetName: string,
     operationId: string,
-  ): Promise<boolean> {
-    if (!sessionId.value || copying.value) return false;
+    options?: { autoRename?: boolean; copySuffix?: string },
+  ): Promise<string | null> {
+    if (!sessionId.value || copying.value) return null;
     const generation = ++copyGeneration;
     const targetSessionId = sessionId.value;
     const currentPath = path.value;
@@ -544,13 +672,79 @@ export const useSftpStore = defineStore('sftp', () => {
     copying.value = true;
     error.value = null;
     try {
-      const result = await copyRemoteEntry(targetSessionId, entry.path, targetDirectory, targetName, operationId);
+      const result = await copyRemoteEntry(
+        targetSessionId,
+        entry.path,
+        targetDirectory,
+        targetName,
+        operationId,
+        options,
+      );
       if (!result.ok) {
         if (isCurrentListing() && result.error.code !== 'TRANSFER_CANCELLED') error.value = result.error;
-        return false;
+        return null;
       }
-      if (isCurrentListing()) await load(targetSessionId, currentPath);
-      return true;
+      if (isCurrentListing()) {
+        await load(targetSessionId, currentPath);
+        if (targetDirectory.replace(/\/+$/, '') === currentPath.replace(/\/+$/, '')) {
+          const created = entries.value.find((candidate) => candidate.name === result.data);
+          if (created) select(created);
+        }
+      }
+      return result.data;
+    } finally {
+      if (generation === copyGeneration) copying.value = false;
+    }
+  }
+
+  async function duplicateMany(
+    targets: readonly RemoteFileEntry[],
+    targetDirectory: string,
+    copySuffix: string,
+  ): Promise<string[]> {
+    if (!sessionId.value || copying.value || targets.length === 0) return [];
+    const generation = ++copyGeneration;
+    const targetSessionId = sessionId.value;
+    const currentPath = path.value;
+    const listingGeneration = requestGeneration;
+    const isCurrentListing = () => listingGeneration === requestGeneration
+      && targetSessionId === sessionId.value
+      && currentPath === path.value;
+    copying.value = true;
+    error.value = null;
+    const createdNames: string[] = [];
+    try {
+      for (const entry of targets) {
+        if (entry.isSymlink) continue;
+        const result = await copyRemoteEntry(
+          targetSessionId,
+          entry.path,
+          targetDirectory,
+          entry.name,
+          crypto.randomUUID(),
+          { autoRename: true, copySuffix },
+        );
+        if (!result.ok) {
+          if (isCurrentListing() && result.error.code !== 'TRANSFER_CANCELLED') error.value = result.error;
+          break;
+        }
+        createdNames.push(result.data);
+      }
+      if (createdNames.length > 0 && isCurrentListing()) {
+        await load(targetSessionId, currentPath);
+        if (targetDirectory.replace(/\/+$/, '') === currentPath.replace(/\/+$/, '')) {
+          const nameSet = new Set(createdNames);
+          const createdEntries = entries.value.filter((candidate) => nameSet.has(candidate.name));
+          if (createdEntries.length > 0) {
+            selectedPaths.value = createdEntries.map((item) => item.path);
+            selectedPath.value = createdEntries.at(-1)?.path ?? null;
+            selectionAnchorPath.value = createdEntries[0]?.path ?? null;
+            checkboxSticky.value = createdEntries.length > 1;
+            sessionCaches.set(targetSessionId, snapshotActive());
+          }
+        }
+      }
+      return createdNames;
     } finally {
       if (generation === copyGeneration) copying.value = false;
     }
@@ -719,6 +913,7 @@ export const useSftpStore = defineStore('sftp', () => {
     selectedPath.value = entry.path;
     selectedPaths.value = [entry.path];
     selectionAnchorPath.value = entry.path;
+    checkboxSticky.value = false;
     if (sessionId.value && activeOwnerSessionId === sessionId.value) {
       sessionCaches.set(sessionId.value, snapshotActive());
     }
@@ -729,23 +924,61 @@ export const useSftpStore = defineStore('sftp', () => {
     modifiers: { ctrlOrMeta?: boolean; shift?: boolean } = {},
   ): void {
     const ordered = entries.value.map((item) => item.path);
+    const stickyMulti = multiSelectMode.value || checkboxSticky.value || selectedPaths.value.length > 1;
     const next = resolveMultiSelection(
       ordered,
       selectedPaths.value,
       selectionAnchorPath.value,
       entry.path,
-      modifiers,
+      { ...modifiers, stickyMulti },
     );
     selectedPaths.value = next.selectedPaths;
     selectedPath.value = next.primaryPath;
     selectionAnchorPath.value = next.anchorPath;
+    if (next.selectedPaths.length > 1) {
+      checkboxSticky.value = true;
+    } else if (next.selectedPaths.length === 0) {
+      checkboxSticky.value = false;
+    }
     if (sessionId.value && activeOwnerSessionId === sessionId.value) {
       sessionCaches.set(sessionId.value, snapshotActive());
     }
   }
 
   function toggleSelection(entry: RemoteFileEntry): void {
-    selectWithModifiers(entry, { ctrlOrMeta: true });
+    const ordered = entries.value.map((item) => item.path);
+    const next = resolveMultiSelection(
+      ordered,
+      selectedPaths.value,
+      selectionAnchorPath.value,
+      entry.path,
+      { ctrlOrMeta: true },
+    );
+    selectedPaths.value = next.selectedPaths;
+    selectedPath.value = next.primaryPath;
+    selectionAnchorPath.value = next.anchorPath;
+    checkboxSticky.value = next.selectedPaths.length > 0;
+    if (sessionId.value && activeOwnerSessionId === sessionId.value) {
+      sessionCaches.set(sessionId.value, snapshotActive());
+    }
+  }
+
+  function setEntrySelected(entry: RemoteFileEntry, selected: boolean): void {
+    const ordered = entries.value.map((item) => item.path);
+    const next = applyExplicitSelection(
+      ordered,
+      selectedPaths.value,
+      selectionAnchorPath.value,
+      entry.path,
+      selected,
+    );
+    selectedPaths.value = next.selectedPaths;
+    selectedPath.value = next.primaryPath;
+    selectionAnchorPath.value = next.anchorPath;
+    checkboxSticky.value = next.selectedPaths.length > 0;
+    if (sessionId.value && activeOwnerSessionId === sessionId.value) {
+      sessionCaches.set(sessionId.value, snapshotActive());
+    }
   }
 
   function selectAll(): void {
@@ -753,6 +986,7 @@ export const useSftpStore = defineStore('sftp', () => {
     selectedPaths.value = ordered;
     selectedPath.value = ordered.at(-1) ?? null;
     selectionAnchorPath.value = ordered[0] ?? null;
+    checkboxSticky.value = ordered.length > 0;
     if (sessionId.value && activeOwnerSessionId === sessionId.value) {
       sessionCaches.set(sessionId.value, snapshotActive());
     }
@@ -762,6 +996,20 @@ export const useSftpStore = defineStore('sftp', () => {
     selectedPaths.value = [];
     selectedPath.value = null;
     selectionAnchorPath.value = null;
+    checkboxSticky.value = false;
+    multiSelectMode.value = false;
+    if (sessionId.value && activeOwnerSessionId === sessionId.value) {
+      sessionCaches.set(sessionId.value, snapshotActive());
+    }
+  }
+
+  function toggleMultiSelectMode(): void {
+    if (multiSelectMode.value) {
+      multiSelectMode.value = false;
+      checkboxSticky.value = false;
+    } else {
+      multiSelectMode.value = true;
+    }
     if (sessionId.value && activeOwnerSessionId === sessionId.value) {
       sessionCaches.set(sessionId.value, snapshotActive());
     }
@@ -819,9 +1067,13 @@ export const useSftpStore = defineStore('sftp', () => {
     error.value = null;
     let movedCount = 0;
     try {
+      const elevated = privilege.isElevated(targetSessionId);
       for (const entry of targets) {
-        const result = await moveRemoteEntry(targetSessionId, entry.path, targetDirectory);
+        const result = elevated
+          ? await elevatedMoveEntry(targetSessionId, entry.path, targetDirectory)
+          : await moveRemoteEntry(targetSessionId, entry.path, targetDirectory);
         if (!result.ok) {
+          syncPrivilegeFailure(targetSessionId, result.error);
           if (isCurrentListing()) error.value = result.error;
           break;
         }
@@ -891,13 +1143,14 @@ export const useSftpStore = defineStore('sftp', () => {
   }
 
   return {
-    entries, path, sessionId, selectedPath, selectedPaths, loading, error,
+    entries, path, sessionId, selectedPath, selectedPaths, multiSelectMode, checkboxSticky, loading, error,
+    directoryUsage, directoryUsageLoading, directoryUsageError,
     directoryChildren, directoryLoadingPaths, directoryErrorPaths, expandedTreePaths,
     preview, previewPath, previewEncoding, previewLoading, previewError, externalOpening, deleting, creatingDirectory, creatingFile, renaming, moving, copying,
     changingMode, savingPreview, recoveryCopyPath,
     hasSessionState, activateSession, dropSession, setExpandedTreePaths,
-    load, loadTreeDirectory, open, parent, clear, select, selectWithModifiers, toggleSelection, selectAll, clearSelection, isSelected, previewFile, closePreview,
-    remove, removeRecursive, removeMany, createDirectory, createFile, rename, move, moveMany, copy, cancelCopy, changeMode, changePermissions, changePermissionsMany, savePreview,
+    load, loadTreeDirectory, loadDirectoryUsage, resolveLink, open, parent, clear, select, selectWithModifiers, toggleSelection, setEntrySelected, selectAll, clearSelection, toggleMultiSelectMode, isSelected, previewFile, closePreview,
+    remove, removeRecursive, removeMany, createDirectory, createFile, rename, move, moveMany, copy, duplicateMany, cancelCopy, changeMode, changePermissions, changePermissionsMany, savePreview,
     openPreviewExternally,
   };
 });

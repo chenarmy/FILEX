@@ -3,9 +3,11 @@ import { failure, isTauriRuntime, normalizeUnknownError } from '@/api/common';
 import type {
   OperationResult,
   RemoteDirectoryListing,
+  RemoteDirectoryUsage,
   RemotePermissionUpdateResult,
   RemoteTextPreview,
   RemoteTextSaveResult,
+  ResolvedLinkTarget,
   TerminalEncoding,
   UpdateRemotePermissionsInput,
 } from '@/types/contracts';
@@ -26,6 +28,44 @@ export async function listRemoteDirectory(
     return await invoke<OperationResult<RemoteDirectoryListing>>('list_remote_directory', { sessionId, path });
   } catch (error: unknown) {
     return failure(normalizeUnknownError(error, 'SFTP_LIST_FAILED'));
+  }
+}
+
+export async function resolveRemoteLinkTarget(
+  sessionId: string,
+  path: string,
+): Promise<OperationResult<ResolvedLinkTarget>> {
+  if (!isTauriRuntime()) {
+    return failure({
+      code: 'SFTP_DESKTOP_ONLY',
+      messageKey: 'errors.sshDesktopOnly',
+      retryable: false,
+      remoteState: 'not_applicable',
+    });
+  }
+  try {
+    return await invoke<OperationResult<ResolvedLinkTarget>>('resolve_remote_link_target', { sessionId, path });
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'SYMLINK_TARGET_UNAVAILABLE'));
+  }
+}
+
+export async function calculateRemoteDirectoryUsage(
+  sessionId: string,
+  path: string,
+): Promise<OperationResult<RemoteDirectoryUsage>> {
+  if (!isTauriRuntime()) {
+    return failure({
+      code: 'SFTP_DESKTOP_ONLY',
+      messageKey: 'errors.sshDesktopOnly',
+      retryable: false,
+      remoteState: 'not_applicable',
+    });
+  }
+  try {
+    return await invoke<OperationResult<RemoteDirectoryUsage>>('calculate_remote_directory_usage', { sessionId, path });
+  } catch (error: unknown) {
+    return failure(normalizeUnknownError(error, 'DIRECTORY_USAGE_FAILED'));
   }
 }
 
@@ -228,7 +268,8 @@ export async function copyRemoteEntry(
   targetDirectory: string,
   targetName: string,
   operationId: string,
-): Promise<OperationResult<void>> {
+  options?: { autoRename?: boolean; copySuffix?: string },
+): Promise<OperationResult<string>> {
   if (!isTauriRuntime()) {
     return failure({
       code: 'SFTP_DESKTOP_ONLY',
@@ -238,12 +279,14 @@ export async function copyRemoteEntry(
     });
   }
   try {
-    return await invoke<OperationResult<void>>('copy_remote_entry', {
+    return await invoke<OperationResult<string>>('copy_remote_entry', {
       sessionId,
       sourcePath,
       targetDirectory,
       targetName,
       operationId,
+      autoRename: options?.autoRename ?? false,
+      copySuffix: options?.copySuffix ?? null,
     });
   } catch (error: unknown) {
     return failure(normalizeUnknownError(error, 'SFTP_COPY_FAILED'));

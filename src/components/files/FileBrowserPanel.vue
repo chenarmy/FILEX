@@ -5,6 +5,7 @@ import type { UnlistenFn } from '@tauri-apps/api/event';
 import {
   ArrowLeftRight,
   Bookmark,
+  CheckSquare,
   ChevronDown,
   Columns2,
   ChevronRight,
@@ -58,7 +59,12 @@ import DirectoryTree from '@/components/files/DirectoryTree.vue';
 import FileEntryIcon from '@/components/files/FileEntryIcon.vue';
 import { ownerLabel } from '@/domain/permissions';
 import { isSafeTransferName } from '@/domain/fileClipboard';
-import { buildDefaultArchiveName, resolveRenameStemRange } from '@/domain/fileSelection';
+import {
+  buildDefaultArchiveName,
+  isSameOrDescendantPath,
+  resolveRenameStemRange,
+  resolveUniqueCopyName,
+} from '@/domain/fileSelection';
 import { formatTransferSpeed } from '@/domain/transferSpeed';
 import { hasCapability, isLocalSession } from '@/domain/sessionCapabilities';
 import { directoryAncestors, directoryRoot, missingAncestorDirectories } from '@/domain/directoryNavigation';
@@ -75,6 +81,7 @@ import type {
   LocalFileEntry,
   RemotePermissionScope,
   RemoteFileEntry,
+  ResolvedLinkTarget,
 } from '@/types/contracts';
 
 const VIRTUALIZE_THRESHOLD = 200;
@@ -122,13 +129,57 @@ const remoteReady = computed(() => {
   return session !== null && session.state === 'connected' && sftp.sessionId === session.id;
 });
 const selectedLocalEntry = computed(() => localFiles.listing?.entries.find((entry) => entry.path === localFiles.selectedPath) ?? null);
+const selectedLocalEntries = computed<LocalFileEntry[]>(() => {
+  const entries = localFiles.listing?.entries ?? [];
+  const pathSet = new Set(localFiles.selectedPaths);
+  if (pathSet.size === 0 && localFiles.selectedPath) pathSet.add(localFiles.selectedPath);
+  return entries.filter((entry) => pathSet.has(entry.path));
+});
 const selectedRemoteEntry = computed(() => sftp.entries.find((entry) => entry.path === sftp.selectedPath) ?? null);
 const selectedRemoteEntries = computed<RemoteFileEntry[]>(() => {
   const pathSet = new Set(sftp.selectedPaths);
   if (pathSet.size === 0 && sftp.selectedPath) pathSet.add(sftp.selectedPath);
   return sftp.entries.filter((entry) => pathSet.has(entry.path));
 });
-const downloadableRemoteEntries = computed(() => selectedRemoteEntries.value.filter((entry) => !entry.isSymlink && isSafeTransferName(entry.name)));
+const downloadableRemoteEntries = computed(() => selectedRemoteEntries.value.filter((entry) => isSafeTransferName(entry.name)));
+const permissionRemoteEntries = computed(() => selectedRemoteEntries.value.filter((entry) => !entry.isSymlink));
+const activePaneSelectedCount = computed(() => (
+  activePane.value === 'remote' ? selectedRemoteEntries.value.length : selectedLocalEntries.value.length
+));
+const activeMultiSelectMode = computed(() => (
+  activePane.value === 'remote' ? sftp.multiSelectMode : localFiles.multiSelectMode
+));
+const remoteDirectoryUsageSummary = computed(() => {
+  if (!remoteReady.value) return null;
+  if (sftp.directoryUsageLoading) {
+    return {
+      text: t('files.calculatingDirectorySize'),
+      title: t('files.recalculateDirectorySizeHint'),
+      partial: false,
+      loading: true,
+    };
+  }
+  const usage = sftp.directoryUsage;
+  if (usage && usage.path === sftp.path) {
+    return {
+      text: t('files.currentDirectorySize', { size: usage.totalSizeLabel }),
+      title: usage.partial
+        ? t('files.directorySizePartialHint')
+        : t('files.recalculateDirectorySizeHint'),
+      partial: usage.partial,
+      loading: false,
+    };
+  }
+  if (sftp.directoryUsageError) {
+    return {
+      text: t('files.directorySizeRetry'),
+      title: t(sftp.directoryUsageError.messageKey as Parameters<typeof t>[0]),
+      partial: true,
+      loading: false,
+    };
+  }
+  return null;
+});
 const cachedDefaultDownloadDir = ref<string | null>(null);
 const archiveBusy = ref(false);
 const runningTransferSpeedLabel = computed(() => (
@@ -403,9 +454,26 @@ const inlineRenameInput = ref<HTMLInputElement | null>(null);
 const moveDialogOpen = ref(false);
 const moveTargetPane = ref<'local' | 'remote'>('remote');
 const moveSourceEntry = ref<LocalFileEntry | RemoteFileEntry | null>(null);
-const moveSourceEntries = ref<RemoteFileEntry[]>([]);
+const moveSourceEntries = ref<Array<LocalFileEntry | RemoteFileEntry>>([]);
 const moveSourceSessionId = ref<string | null>(null);
 const moveDestinationDirectory = ref('');
+const activeInternalDrag = ref<{
+  pane: 'local' | 'remote';
+  sessionId: string | null;
+  entries: Array<LocalFileEntry | RemoteFileEntry>;
+} | null>(null);
+const dropTargetFolderPath = ref<string | null>(null);
+const paneClipboard = ref<{
+  mode: 'copy' | 'cut';
+  pane: 'local' | 'remote';
+  sessionId: string | null;
+  sourceDirectory: string;
+  entries: Array<LocalFileEntry | RemoteFileEntry>;
+} | null>(null);
+const checkboxSweepState = ref<{
+  pane: 'local' | 'remote';
+  selected: boolean;
+} | null>(null);
 const copyDialogOpen = ref(false);
 const copyTargetPane = ref<'local' | 'remote'>('remote');
 const copySourceEntry = ref<LocalFileEntry | RemoteFileEntry | null>(null);
@@ -456,7 +524,22 @@ const filePaneKeyboard = useFilePaneKeyboard<LocalFileEntry | RemoteFileEntry>({
     if (pane === 'remote' && remoteReady.value) {
       activePane.value = 'remote';
       sftp.selectAll();
+    } else if (pane === 'local' && localFiles.listing) {
+      activePane.value = 'local';
+      localFiles.selectAll();
     }
+  },
+  onClearSelection: (pane) => {
+    if (pane === 'remote') {
+      const hadMulti = sftp.multiSelectMode || sftp.checkboxSticky || sftp.selectedPaths.length > 0;
+      if (!hadMulti) return false;
+      sftp.clearSelection();
+      return true;
+    }
+    const hadMulti = localFiles.multiSelectMode || localFiles.checkboxSticky || localFiles.selectedPaths.length > 0;
+    if (!hadMulti) return false;
+    localFiles.clearSelection();
+    return true;
   },
 });
 const { typeaheadIndicator } = filePaneKeyboard;
@@ -651,6 +734,9 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   panelUnmounted = true;
   filePaneKeyboard.dispose();
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('pointerup', endCheckboxSweep);
+  }
   if (transferRefreshTimer !== null) window.clearTimeout(transferRefreshTimer);
   if (copyOperationId.value) void requestCopyCancellation();
   if (unlistenNativeDrop) {
@@ -704,16 +790,104 @@ function entryTypeLabel(entry: LocalFileEntry | RemoteFileEntry): string {
   return t('files.typeFile');
 }
 
+function formatPaneEntrySize(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote'): string {
+  if (pane === 'remote' && entry.isDirectory) {
+    if (sftp.directoryUsage && sftp.directoryUsage.path === sftp.path) {
+      const label = sftp.directoryUsage.entrySizeLabels[entry.name];
+      if (label) return label;
+    }
+    return sftp.directoryUsageLoading ? '…' : '—';
+  }
+  return formatSize(entry.size);
+}
+
 // ---- row interactions ----------------------------------------------------
 
 function isPaneEntrySelected(pane: 'local' | 'remote', entryPath: string): boolean {
-  return pane === 'remote' ? sftp.isSelected(entryPath) : entryPath === localFiles.selectedPath;
+  return pane === 'remote' ? sftp.isSelected(entryPath) : localFiles.isSelected(entryPath);
+}
+
+function selectedEntriesForPane(pane: 'local' | 'remote'): Array<LocalFileEntry | RemoteFileEntry> {
+  return pane === 'remote' ? selectedRemoteEntries.value : selectedLocalEntries.value;
+}
+
+function hasStickyMultiSelection(pane: 'local' | 'remote'): boolean {
+  return pane === 'remote'
+    ? (sftp.multiSelectMode || sftp.checkboxSticky || selectedRemoteEntries.value.length > 1)
+    : (localFiles.multiSelectMode || localFiles.checkboxSticky || selectedLocalEntries.value.length > 1);
 }
 
 function selectPaneEntry(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote'): void {
   activePane.value = pane;
   if (pane === 'local') localFiles.select(entry);
   else sftp.select(entry);
+}
+
+function setPaneEntrySelected(pane: 'local' | 'remote', entry: LocalFileEntry | RemoteFileEntry, selected: boolean): void {
+  activePane.value = pane;
+  if (pane === 'local') localFiles.setEntrySelected(entry, selected);
+  else sftp.setEntrySelected(entry, selected);
+}
+
+function endCheckboxSweep(): void {
+  checkboxSweepState.value = null;
+}
+
+function beginCheckboxSweep(
+  entry: LocalFileEntry | RemoteFileEntry,
+  pane: 'local' | 'remote',
+  event: PointerEvent,
+): void {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const nextSelected = !isPaneEntrySelected(pane, entry.path);
+  setPaneEntrySelected(pane, entry, nextSelected);
+  checkboxSweepState.value = { pane, selected: nextSelected };
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('pointerup', endCheckboxSweep);
+    window.addEventListener('pointerup', endCheckboxSweep, { once: true });
+  }
+}
+
+function continueCheckboxSweep(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote'): void {
+  if (!checkboxSweepState.value || checkboxSweepState.value.pane !== pane) return;
+  setPaneEntrySelected(pane, entry, checkboxSweepState.value.selected);
+}
+
+function isAllPaneEntriesSelected(pane: 'local' | 'remote'): boolean {
+  const entries = pane === 'local' ? (localFiles.listing?.entries ?? []) : sftp.entries;
+  if (entries.length === 0) return false;
+  const selected = pane === 'local' ? localFiles.selectedPaths : sftp.selectedPaths;
+  return selected.length >= entries.length;
+}
+
+function isSomePaneEntriesSelected(pane: 'local' | 'remote'): boolean {
+  const entries = pane === 'local' ? (localFiles.listing?.entries ?? []) : sftp.entries;
+  if (entries.length === 0) return false;
+  const selected = pane === 'local' ? localFiles.selectedPaths : sftp.selectedPaths;
+  return selected.length > 0 && selected.length < entries.length;
+}
+
+function toggleSelectAllPane(pane: 'local' | 'remote'): void {
+  activePane.value = pane;
+  if (isAllPaneEntriesSelected(pane)) {
+    if (pane === 'local') localFiles.clearSelection();
+    else sftp.clearSelection();
+    return;
+  }
+  if (pane === 'local') localFiles.selectAll();
+  else sftp.selectAll();
+}
+
+function toggleActiveMultiSelectMode(): void {
+  if (activePane.value === 'remote') sftp.toggleMultiSelectMode();
+  else localFiles.toggleMultiSelectMode();
+}
+
+function clearActiveSelection(): void {
+  if (activePane.value === 'remote') sftp.clearSelection();
+  else localFiles.clearSelection();
 }
 
 function handlePaneEntryClick(
@@ -725,14 +899,15 @@ function handlePaneEntryClick(
     return;
   }
   activePane.value = pane;
+  const modifiers = {
+    ctrlOrMeta: event.ctrlKey || event.metaKey,
+    shift: event.shiftKey,
+  };
   if (pane === 'remote') {
-    sftp.selectWithModifiers(entry, {
-      ctrlOrMeta: event.ctrlKey || event.metaKey,
-      shift: event.shiftKey,
-    });
+    sftp.selectWithModifiers(entry, modifiers);
     return;
   }
-  localFiles.select(entry);
+  localFiles.selectWithModifiers(entry, modifiers);
 }
 
 function bindInlineRenameInput(element: Element | ComponentPublicInstance | null): void {
@@ -800,6 +975,50 @@ async function commitInlineRename(): Promise<void> {
   }
 }
 
+async function resolvePaneSymlinkTarget(
+  entry: LocalFileEntry | RemoteFileEntry,
+  pane: 'local' | 'remote',
+): Promise<ResolvedLinkTarget | null> {
+  const resolved = pane === 'local'
+    ? await localFiles.resolveLink(entry.path)
+    : await sftp.resolveLink(entry.path);
+  if (!resolved) {
+    const key = pane === 'local' ? localFiles.error?.messageKey : sftp.error?.messageKey;
+    ui.notify(t((key ?? 'errors.symlinkTargetUnavailable') as Parameters<typeof t>[0]));
+    return null;
+  }
+  return resolved;
+}
+
+async function revealResolvedTargetFile(
+  targetPath: string,
+  parentDirectory: string,
+  pane: 'local' | 'remote',
+): Promise<void> {
+  const sessionId = sessions.activeSessionId;
+  if (pane === 'local') {
+    if (localFiles.listing?.path !== parentDirectory) {
+      await localFiles.load(parentDirectory);
+    }
+    const targetEntry = localFiles.listing?.entries.find((item) => item.path === targetPath);
+    if (targetEntry) localFiles.select(targetEntry);
+    void syncTreePath('local', parentDirectory);
+    return;
+  }
+  if (!sessionId) return;
+  if (sftp.path !== parentDirectory) {
+    await loadRemotePath(sessionId, parentDirectory);
+  }
+  const targetEntry = sftp.entries.find((item) => item.path === targetPath);
+  if (targetEntry) sftp.select(targetEntry);
+  void syncTreePath('remote', parentDirectory);
+}
+
+function handlePaneEntryDblClick(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote'): void {
+  if (hasStickyMultiSelection(pane)) return;
+  void openPaneEntry(entry, pane);
+}
+
 async function openPaneEntry(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote'): Promise<void> {
   selectPaneEntry(entry, pane);
   if (entry.isDirectory) {
@@ -807,7 +1026,22 @@ async function openPaneEntry(entry: LocalFileEntry | RemoteFileEntry, pane: 'loc
     else await sftp.open(entry);
     return;
   }
-  if (entry.isSymlink) return;
+  if (entry.isSymlink) {
+    const resolved = await resolvePaneSymlinkTarget(entry, pane);
+    if (!resolved) return;
+    if (resolved.targetKind === 'directory') {
+      if (pane === 'local') await localFiles.load(resolved.targetPath);
+      else if (sessions.activeSessionId) await loadRemotePath(sessions.activeSessionId, resolved.targetPath);
+      void syncTreePath(pane, resolved.targetPath);
+      return;
+    }
+    if (resolved.targetKind === 'file' && resolved.parentPath) {
+      await revealResolvedTargetFile(resolved.targetPath, resolved.parentPath, pane);
+      return;
+    }
+    ui.notify(t('errors.symlinkTargetUnavailable'));
+    return;
+  }
   if (settings.value.textEditorPreference === 'external') {
     if (pane === 'remote') {
       await externalEditors.openRemote(
@@ -825,9 +1059,24 @@ async function openPaneEntry(entry: LocalFileEntry | RemoteFileEntry, pane: 'loc
 }
 
 async function openEntryInEditor(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote'): Promise<void> {
-  if (entry.isDirectory || entry.isSymlink) return;
+  if (entry.isDirectory) return;
+  let targetPath = entry.path;
+  if (entry.isSymlink) {
+    const resolved = await resolvePaneSymlinkTarget(entry, pane);
+    if (!resolved) return;
+    if (resolved.targetKind === 'directory') {
+      if (pane === 'local') await localFiles.load(resolved.targetPath);
+      else if (sessions.activeSessionId) await loadRemotePath(sessions.activeSessionId, resolved.targetPath);
+      return;
+    }
+    if (resolved.targetKind !== 'file') {
+      ui.notify(t('errors.symlinkTargetUnavailable'));
+      return;
+    }
+    targetPath = resolved.targetPath;
+  }
   view.value = 'editor';
-  await editor.open(pane, entry.path);
+  await editor.open(pane, targetPath);
 }
 
 function openContextMenu(
@@ -839,7 +1088,8 @@ function openContextMenu(
   event.stopPropagation();
   activePane.value = pane;
   if (entry) {
-    if (pane === 'remote' && sftp.isSelected(entry.path) && selectedRemoteEntries.value.length > 1) {
+    const currentSelected = selectedEntriesForPane(pane);
+    if (isPaneEntrySelected(pane, entry.path) && currentSelected.length > 1) {
       // Preserve multi-selection when opening context menu on an already-selected item.
     } else {
       selectPaneEntry(entry, pane);
@@ -903,12 +1153,21 @@ async function copyContextPath(): Promise<void> {
 
 async function openContextWithSystemAssociation(): Promise<void> {
   const target = fileMenu.value;
-  if (!target?.entry || target.entry.isDirectory || target.entry.isSymlink) return;
+  if (!target?.entry || target.entry.isDirectory) return;
+  let targetPath = target.entry.path;
+  if (target.entry.isSymlink) {
+    const resolved = await resolvePaneSymlinkTarget(target.entry, target.pane);
+    if (!resolved || resolved.targetKind !== 'file') {
+      if (resolved) ui.notify(t('errors.symlinkTargetUnavailable'));
+      return;
+    }
+    targetPath = resolved.targetPath;
+  }
   if (target.pane === 'remote' && sessions.activeSessionId) {
-    await externalEditors.openRemote(sessions.activeSessionId, target.entry.path, 'system');
+    await externalEditors.openRemote(sessions.activeSessionId, targetPath, 'system');
     return;
   }
-  const result = await openLocalFileExternally(target.entry.path, null);
+  const result = await openLocalFileExternally(targetPath, null);
   ui.notify(t(result.ok ? 'externalEditor.systemOpened' : result.error.messageKey as Parameters<typeof t>[0]));
 }
 
@@ -1019,6 +1278,37 @@ async function runFileMenuAction(action: string): Promise<void> {
     case 'rename':
       openRenameDialog();
       return;
+    case 'clipboardCopy': {
+      const selected = selectedEntriesForPane(target.pane);
+      const entries = selected.length > 0 ? selected : (target.entry ? [target.entry] : []);
+      stagePaneClipboard('copy', target.pane, entries);
+      return;
+    }
+    case 'clipboardCut': {
+      const selected = selectedEntriesForPane(target.pane);
+      const entries = selected.length > 0 ? selected : (target.entry ? [target.entry] : []);
+      stagePaneClipboard('cut', target.pane, entries);
+      return;
+    }
+    case 'clipboardPaste': {
+      const destination = target.entry?.isDirectory
+        ? target.entry.path
+        : (target.pane === 'local' ? (localFiles.listing?.path ?? '') : sftp.path);
+      await pastePaneClipboard(target.pane, destination);
+      return;
+    }
+    case 'duplicate': {
+      const selected = selectedEntriesForPane(target.pane);
+      const entries = selected.length > 0 ? selected : (target.entry ? [target.entry] : []);
+      await duplicatePaneEntries(target.pane, entries);
+      return;
+    }
+    case 'move':
+      openMoveDialog();
+      return;
+    case 'copyTo':
+      openCopyDialog();
+      return;
     case 'delete':
       await deleteActiveEntry();
       return;
@@ -1096,20 +1386,146 @@ async function queueDroppedLocalPaths(paths: string[]): Promise<void> {
   });
 }
 
-function beginRemoteFileDrag(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote', event: DragEvent): void {
-  const session = sessions.activeSession;
-  if (pane !== 'remote' || !session || !remoteReady.value || entry.isSymlink || !event.dataTransfer) {
+function paneParentDirectory(entryPath: string, pane: 'local' | 'remote'): string {
+  if (pane === 'remote') {
+    const idx = entryPath.lastIndexOf('/');
+    if (idx <= 0) return '/';
+    return entryPath.slice(0, idx);
+  }
+  const normalized = entryPath.replace(/[\\/]+$/, '');
+  const slash = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'));
+  if (slash < 0) return '';
+  if (slash === 2 && normalized[1] === ':') return normalized.slice(0, 3);
+  if (slash === 0) return normalized[0] ?? '/';
+  return normalized.slice(0, slash);
+}
+
+function canDropOnDirectory(targetDirectory: string, pane: 'local' | 'remote'): boolean {
+  const drag = activeInternalDrag.value;
+  if (!drag || drag.pane !== pane || !targetDirectory || drag.entries.length === 0) return false;
+  if (pane === 'remote' && (drag.sessionId !== sessions.activeSessionId || !remoteReady.value)) {
+    return false;
+  }
+  const normalizedTarget = targetDirectory.length > 1 ? targetDirectory.replace(/[\\/]+$/, '') : targetDirectory;
+  return drag.entries.every((entry) => {
+    if (isSameOrDescendantPath(targetDirectory, entry.path)) return false;
+    const parent = paneParentDirectory(entry.path, pane);
+    const normalizedParent = parent.length > 1 ? parent.replace(/[\\/]+$/, '') : parent;
+    return normalizedParent !== normalizedTarget;
+  });
+}
+
+async function executeDragMoveToDirectory(
+  pane: 'local' | 'remote',
+  entries: Array<LocalFileEntry | RemoteFileEntry>,
+  targetDirectory: string,
+): Promise<void> {
+  if (entries.length === 0 || !targetDirectory) return;
+  const movedCount = pane === 'local'
+    ? (entries.length === 1
+      ? ((await localFiles.move(entries[0]!, targetDirectory)) ? 1 : 0)
+      : await localFiles.moveMany(entries, targetDirectory))
+    : (entries.length === 1
+      ? ((await sftp.move(entries[0]!, targetDirectory)) ? 1 : 0)
+      : await sftp.moveMany(entries, targetDirectory));
+  if (movedCount > 0) {
+    ui.notify(t('files.movedToDirectory', { count: movedCount, target: targetDirectory }));
+  }
+}
+
+function beginPaneEntryDrag(entry: LocalFileEntry | RemoteFileEntry, pane: 'local' | 'remote', event: DragEvent): void {
+  if (!event.dataTransfer) {
     event.preventDefault();
     return;
   }
-  event.dataTransfer.setData(REMOTE_FILE_DRAG_TYPE, JSON.stringify({ path: entry.path, sessionId: session.id }));
-  event.dataTransfer.effectAllowed = 'copy';
+  const session = sessions.activeSession;
+  if (pane === 'remote' && (!session || !remoteReady.value)) {
+    event.preventDefault();
+    return;
+  }
+  const currentSelected = selectedEntriesForPane(pane);
+  const draggedEntries = isPaneEntrySelected(pane, entry.path) && currentSelected.length > 1
+    ? [...currentSelected]
+    : [entry];
+  activeInternalDrag.value = {
+    pane,
+    sessionId: pane === 'remote' ? (session?.id ?? null) : null,
+    entries: draggedEntries,
+  };
+  event.dataTransfer.setData(
+    'application/x-filex-internal-move',
+    JSON.stringify({ pane, paths: draggedEntries.map((item) => item.path) }),
+  );
+  if (pane === 'remote' && session && remoteReady.value) {
+    event.dataTransfer.setData(
+      REMOTE_FILE_DRAG_TYPE,
+      JSON.stringify({
+        path: entry.path,
+        paths: draggedEntries.map((item) => item.path),
+        sessionId: session.id,
+      }),
+    );
+    event.dataTransfer.effectAllowed = 'copyMove';
+  } else {
+    event.dataTransfer.effectAllowed = 'move';
+  }
+}
+
+function endPaneEntryDrag(): void {
+  activeInternalDrag.value = null;
+  dropTargetFolderPath.value = null;
+  localDropActive.value = false;
+}
+
+function handleRowDragOver(
+  entry: LocalFileEntry | RemoteFileEntry,
+  pane: 'local' | 'remote',
+  event: DragEvent,
+): void {
+  if (!entry.isDirectory || !canDropOnDirectory(entry.path, pane) || !event.dataTransfer) return;
+  event.preventDefault();
+  event.stopPropagation();
+  dropTargetFolderPath.value = entry.path;
+  event.dataTransfer.dropEffect = 'move';
+}
+
+function handleRowDragLeave(entry: LocalFileEntry | RemoteFileEntry, event: DragEvent): void {
+  if (dropTargetFolderPath.value !== entry.path) return;
+  const element = event.currentTarget;
+  if (element instanceof HTMLElement && event.relatedTarget instanceof Node && element.contains(event.relatedTarget)) {
+    return;
+  }
+  dropTargetFolderPath.value = null;
+}
+
+async function handleRowDrop(
+  entry: LocalFileEntry | RemoteFileEntry,
+  pane: 'local' | 'remote',
+  event: DragEvent,
+): Promise<void> {
+  if (!entry.isDirectory || !canDropOnDirectory(entry.path, pane)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const entriesToMove = [...(activeInternalDrag.value?.entries ?? [])];
+  endPaneEntryDrag();
+  await executeDragMoveToDirectory(pane, entriesToMove, entry.path);
+}
+
+async function handleTreeDirectoryDrop(pane: 'local' | 'remote', targetDirectory: string): Promise<void> {
+  if (!canDropOnDirectory(targetDirectory, pane)) {
+    endPaneEntryDrag();
+    return;
+  }
+  const entriesToMove = [...(activeInternalDrag.value?.entries ?? [])];
+  endPaneEntryDrag();
+  await executeDragMoveToDirectory(pane, entriesToMove, targetDirectory);
 }
 
 function allowRemoteFileDrop(event: DragEvent, pane: 'local' | 'remote'): void {
   if (pane !== 'local' || !event.dataTransfer) return;
   const types = Array.from(event.dataTransfer.types);
   if (!types.includes(REMOTE_FILE_DRAG_TYPE)) return;
+  if (activeInternalDrag.value?.pane === 'local') return;
   event.preventDefault();
   localDropActive.value = true;
   event.dataTransfer.dropEffect = 'copy';
@@ -1124,31 +1540,43 @@ function leaveRemoteFileDrop(event: DragEvent, pane: 'local' | 'remote'): void {
 
 async function dropRemoteFileOnLocal(event: DragEvent, pane: 'local' | 'remote'): Promise<void> {
   if (pane !== 'local' || !event.dataTransfer) return;
+  if (activeInternalDrag.value?.pane === 'local') return;
   const raw = event.dataTransfer.getData(REMOTE_FILE_DRAG_TYPE);
   if (!raw) return;
   event.preventDefault();
-  localDropActive.value = false;
+  endPaneEntryDrag();
   try {
-    const payload = JSON.parse(raw) as { path?: unknown; sessionId?: unknown };
-    if (typeof payload.path !== 'string' || typeof payload.sessionId !== 'string') return;
+    const payload = JSON.parse(raw) as { path?: unknown; paths?: unknown; sessionId?: unknown };
+    const requestedPaths = Array.isArray(payload.paths)
+      ? payload.paths.filter((item): item is string => typeof item === 'string')
+      : (typeof payload.path === 'string' ? [payload.path] : []);
+    if (requestedPaths.length === 0 || typeof payload.sessionId !== 'string') return;
     const session = sessions.activeSession;
     const listing = localFiles.listing;
-    const entry = sftp.entries.find((candidate) => candidate.path === payload.path);
-    if (!session || session.id !== payload.sessionId || !remoteReady.value || !listing || !entry
-      || entry.isSymlink || !isSafeTransferName(entry.name)) return;
-    const input: CreateTransferInput = {
-      profileId: session.profileId,
-      direction: 'download',
-      localPath: localJoin(listing.path, entry.name),
-      remotePath: entry.path,
-      conflictPolicy: 'ask',
-      totalBytes: entry.isDirectory ? null : entry.size,
-    };
-    const task = await transfers.enqueueTask(input, session.id);
-    if (task) {
-      transfers.trackDownloadBatch(listing.path, [task.id]);
+    if (!session || session.id !== payload.sessionId || !remoteReady.value || !listing) return;
+    const matchedEntries = requestedPaths
+      .map((entryPath) => sftp.entries.find((candidate) => candidate.path === entryPath))
+      .filter((candidate): candidate is RemoteFileEntry => Boolean(candidate && isSafeTransferName(candidate.name)));
+    if (matchedEntries.length === 0) return;
+    const queuedIds: string[] = [];
+    for (const entry of matchedEntries) {
+      const input: CreateTransferInput = {
+        profileId: session.profileId,
+        direction: 'download',
+        localPath: localJoin(listing.path, entry.name),
+        remotePath: entry.path,
+        conflictPolicy: 'ask',
+        totalBytes: entry.isDirectory || entry.isSymlink ? null : entry.size,
+      };
+      const task = await transfers.enqueueTask(input, session.id);
+      if (task) queuedIds.push(task.id);
+    }
+    if (queuedIds.length > 0) {
+      transfers.trackDownloadBatch(listing.path, queuedIds);
       settings.value.taskTab = 'transfers';
-      ui.notify(t('inspector.dropDownloadQueued', { name: entry.name }));
+      ui.notify(matchedEntries.length === 1
+        ? t('inspector.dropDownloadQueued', { name: matchedEntries[0]!.name })
+        : t('files.downloadBatchQueued', { count: queuedIds.length, folder: listing.path }));
     }
   } catch {
     ui.notify(t('inspector.dropFailed'));
@@ -1185,8 +1613,7 @@ async function openUpload(): Promise<void> {
 }
 
 async function openDownloadEntry(source: RemoteFileEntry): Promise<void> {
-  if (!remoteReady.value) return;
-  if (source.isSymlink) return;
+  if (!remoteReady.value || !isSafeTransferName(source.name)) return;
   const directory = await resolveDownloadDirectory();
   ui.openTransfer('download', source.path, directory ? localJoin(directory, source.name) : undefined, sessions.activeSession?.profileId);
 }
@@ -1194,7 +1621,7 @@ async function openDownloadEntry(source: RemoteFileEntry): Promise<void> {
 async function downloadRemoteEntries(targets: readonly RemoteFileEntry[]): Promise<void> {
   const session = sessions.activeSession;
   if (!session || !remoteReady.value) return;
-  const validTargets = targets.filter((entry) => !entry.isSymlink && isSafeTransferName(entry.name));
+  const validTargets = targets.filter((entry) => isSafeTransferName(entry.name));
   if (validTargets.length === 0) return;
   if (validTargets.length === 1 && validTargets[0]) {
     await openDownloadEntry(validTargets[0]);
@@ -1213,7 +1640,7 @@ async function downloadRemoteEntries(targets: readonly RemoteFileEntry[]): Promi
       localPath: localJoin(downloadDir, entry.name),
       remotePath: entry.path,
       conflictPolicy: 'rename',
-      totalBytes: entry.isDirectory ? null : entry.size,
+      totalBytes: entry.isDirectory || entry.isSymlink ? null : entry.size,
     }, session.id);
     if (!task) {
       if (queuedIds.length === 0 && transfers.error) {
@@ -1233,7 +1660,7 @@ async function downloadRemoteEntries(targets: readonly RemoteFileEntry[]): Promi
 async function downloadRemoteArchiveSelection(targets: readonly RemoteFileEntry[] = downloadableRemoteEntries.value): Promise<void> {
   const session = sessions.activeSession;
   if (!session || !remoteReady.value || archiveBusy.value) return;
-  const validTargets = targets.filter((entry) => !entry.isSymlink && isSafeTransferName(entry.name));
+  const validTargets = targets.filter((entry) => isSafeTransferName(entry.name));
   if (validTargets.length === 0) return;
   const downloadDir = await resolveDownloadDirectory();
   if (!downloadDir) {
@@ -1428,19 +1855,31 @@ const copyDestinationPath = computed(() => {
 
 async function deleteActiveEntry(): Promise<void> {
   if (activePane.value === 'local') {
-    const entry = selectedLocalEntry.value;
+    const targets = selectedLocalEntries.value.length > 0
+      ? selectedLocalEntries.value
+      : (selectedLocalEntry.value ? [selectedLocalEntry.value] : []);
     const sourceDirectory = localFiles.listing?.path;
-    if (!entry || !sourceDirectory) return;
+    if (targets.length === 0 || !sourceDirectory) return;
+    const firstTarget = targets[0]!;
     const accepted = await ui.confirm({
       title: t('inspector.deleteLocal'),
-      message: t('inspector.deleteLocalConfirm', { name: entry.name, path: entry.path }),
+      message: targets.length > 1
+        ? t('files.deleteLocalBatchConfirm', {
+          count: targets.length,
+          names: targets.slice(0, 5).map((item) => item.name).join(', '),
+        })
+        : t('inspector.deleteLocalConfirm', { name: firstTarget.name, path: firstTarget.path }),
       confirmLabel: t('inspector.deleteLocal'),
       danger: true,
     });
-    if (!accepted
-      || localFiles.listing?.path !== sourceDirectory
-      || !localFiles.listing.entries.some((candidate) => candidate.path === entry.path)) return;
-    if (await localFiles.remove(entry)) ui.notify(t('inspector.localDeleted'));
+    if (!accepted || localFiles.listing?.path !== sourceDirectory) return;
+    if (targets.length > 1) {
+      const deleted = await localFiles.removeMany(targets);
+      if (deleted > 0) ui.notify(t('files.localBatchDeleted', { count: deleted }));
+      return;
+    }
+    if (!localFiles.listing.entries.some((candidate) => candidate.path === firstTarget.path)) return;
+    if (await localFiles.remove(firstTarget)) ui.notify(t('inspector.localDeleted'));
     return;
   }
   const targets = selectedRemoteEntries.value.length > 0
@@ -1537,7 +1976,7 @@ async function submitCreateFile(): Promise<void> {
 function openRenameDialog(): void {
   const entry = activePane.value === 'local' ? selectedLocalEntry.value : selectedRemoteEntry.value;
   if (!entry) return;
-  if (activePane.value === 'remote' && selectedRemoteEntries.value.length > 1) return;
+  if (activePaneSelectedCount.value > 1) return;
   renameTargetPane.value = activePane.value;
   renameName.value = entry.name;
   if (renameTargetPane.value === 'local') localFiles.error = null;
@@ -1572,21 +2011,23 @@ async function submitRename(): Promise<void> {
 }
 
 function openMoveDialog(): void {
-  if (activePane.value === 'remote' && selectedRemoteEntries.value.length > 1) {
-    moveTargetPane.value = 'remote';
-    moveSourceEntries.value = [...selectedRemoteEntries.value];
-    moveSourceEntry.value = selectedRemoteEntries.value[0] ?? null;
-    moveSourceSessionId.value = sessions.activeSessionId;
+  const selected = selectedEntriesForPane(activePane.value);
+  if (selected.length > 1) {
+    moveTargetPane.value = activePane.value;
+    moveSourceEntries.value = [...selected];
+    moveSourceEntry.value = selected[0] ?? null;
+    moveSourceSessionId.value = activePane.value === 'remote' ? sessions.activeSessionId : null;
     moveDestinationDirectory.value = '';
-    sftp.error = null;
+    if (activePane.value === 'local') localFiles.error = null;
+    else sftp.error = null;
     moveDialogOpen.value = true;
     return;
   }
-  const entry = activePane.value === 'local' ? selectedLocalEntry.value : selectedRemoteEntry.value;
+  const entry = selected[0] ?? (activePane.value === 'local' ? selectedLocalEntry.value : selectedRemoteEntry.value);
   if (!entry) return;
   moveTargetPane.value = activePane.value;
   moveSourceEntry.value = entry;
-  moveSourceEntries.value = activePane.value === 'remote' ? [entry] : [];
+  moveSourceEntries.value = [entry];
   moveSourceSessionId.value = activePane.value === 'remote' ? sessions.activeSessionId : null;
   moveDestinationDirectory.value = '';
   if (activePane.value === 'local') localFiles.error = null;
@@ -1606,6 +2047,14 @@ async function submitMove(): Promise<void> {
   const destinationDirectory = moveDestinationDirectory.value.trim();
   if (!source || !destinationDirectory) return;
   if (moveTargetPane.value === 'local') {
+    if (moveSourceEntries.value.length > 1) {
+      const moved = await localFiles.moveMany(moveSourceEntries.value, destinationDirectory);
+      if (moved > 0) {
+        closeMoveDialog();
+        ui.notify(t('files.localBatchMoved', { count: moved }));
+      }
+      return;
+    }
     if (await localFiles.move(source, destinationDirectory)) {
       closeMoveDialog();
       ui.notify(t('inspector.localMoved'));
@@ -1631,11 +2080,117 @@ async function submitMove(): Promise<void> {
   }
 }
 
-function defaultCopyName(name: string, isDirectory: boolean): string {
-  if (isDirectory) return name + ' (' + t('inspector.copyNameSuffix') + ')';
-  const dot = name.lastIndexOf('.');
-  const stemEnd = dot > 0 ? dot : name.length;
-  return `${name.slice(0, stemEnd)} (${t('inspector.copyNameSuffix')})${name.slice(stemEnd)}`;
+function existingNamesForPane(pane: 'local' | 'remote', targetDirectory: string): string[] {
+  if (pane === 'local') {
+    if (localFiles.listing?.path === targetDirectory) {
+      return localFiles.listing.entries.map((item) => item.name);
+    }
+    return [];
+  }
+  if (sftp.path === targetDirectory) {
+    return sftp.entries.map((item) => item.name);
+  }
+  return [];
+}
+
+function defaultCopyName(
+  name: string,
+  isDirectory: boolean,
+  existingNames: readonly string[] = [],
+): string {
+  return resolveUniqueCopyName(name, isDirectory, new Set(existingNames), t('inspector.copyNameSuffix'));
+}
+
+function stagePaneClipboard(
+  mode: 'copy' | 'cut',
+  pane: 'local' | 'remote',
+  entries: Array<LocalFileEntry | RemoteFileEntry>,
+): void {
+  const eligible = mode === 'copy'
+    ? entries.filter((entry) => !entry.isSymlink)
+    : entries;
+  if (eligible.length === 0) {
+    if (mode === 'copy' && entries.some((entry) => entry.isSymlink)) {
+      ui.notify(t('files.copyUploadUnsupported'));
+    }
+    return;
+  }
+  const sourceDirectory = pane === 'local' ? (localFiles.listing?.path ?? '') : sftp.path;
+  paneClipboard.value = {
+    mode,
+    pane,
+    sessionId: pane === 'remote' ? (sessions.activeSessionId ?? null) : null,
+    sourceDirectory,
+    entries: eligible,
+  };
+  ui.notify(t(mode === 'copy' ? 'files.clipboardCopied' : 'files.clipboardCut', { count: eligible.length }));
+}
+
+function isCutPending(pane: 'local' | 'remote', entryPath: string): boolean {
+  const clip = paneClipboard.value;
+  if (!clip || clip.mode !== 'cut' || clip.pane !== pane) return false;
+  if (pane === 'remote' && clip.sessionId !== sessions.activeSessionId) return false;
+  return clip.entries.some((entry) => entry.path === entryPath);
+}
+
+function canPasteFromPaneClipboard(pane: 'local' | 'remote'): boolean {
+  const clip = paneClipboard.value;
+  if (!clip || clip.pane !== pane || clip.entries.length === 0) return false;
+  if (pane === 'remote') {
+    return remoteReady.value && clip.sessionId === sessions.activeSessionId;
+  }
+  return Boolean(localFiles.listing);
+}
+
+async function duplicatePaneEntries(
+  pane: 'local' | 'remote',
+  entries: Array<LocalFileEntry | RemoteFileEntry>,
+): Promise<void> {
+  const targetDirectory = pane === 'local' ? (localFiles.listing?.path ?? '') : sftp.path;
+  if (!targetDirectory) return;
+  const copySuffix = t('inspector.copyNameSuffix');
+  const created = pane === 'local'
+    ? await localFiles.duplicateMany(entries, targetDirectory, copySuffix)
+    : await sftp.duplicateMany(entries, targetDirectory, copySuffix);
+  if (created.length === 1 && created[0]) {
+    ui.notify(t('files.copiedAsName', { name: created[0] }));
+  } else if (created.length > 1) {
+    ui.notify(t('files.batchCopied', { count: created.length }));
+  }
+}
+
+async function pastePaneClipboard(pane: 'local' | 'remote', destinationDirectory: string): Promise<void> {
+  const clip = paneClipboard.value;
+  if (!clip || !canPasteFromPaneClipboard(pane) || !destinationDirectory) return;
+  if (clip.mode === 'cut') {
+    const validToMove = clip.entries.filter((entry) => !isSameOrDescendantPath(destinationDirectory, entry.path));
+    if (validToMove.length === 0) return;
+    await executeDragMoveToDirectory(pane, validToMove, destinationDirectory);
+    paneClipboard.value = null;
+    return;
+  }
+  const copySuffix = t('inspector.copyNameSuffix');
+  const createdNames: string[] = [];
+  for (const entry of clip.entries) {
+    if (entry.isSymlink) continue;
+    const operationId = crypto.randomUUID();
+    const created = pane === 'local'
+      ? await localFiles.copy(entry, destinationDirectory, entry.name, operationId, {
+        autoRename: true,
+        copySuffix,
+      })
+      : await sftp.copy(entry, destinationDirectory, entry.name, operationId, {
+        autoRename: true,
+        copySuffix,
+      });
+    if (!created) break;
+    createdNames.push(created);
+  }
+  if (createdNames.length === 1 && createdNames[0]) {
+    ui.notify(t('files.copiedAsName', { name: createdNames[0] }));
+  } else if (createdNames.length > 1) {
+    ui.notify(t('files.batchCopied', { count: createdNames.length }));
+  }
 }
 
 function openCopyDialog(): void {
@@ -1644,10 +2199,15 @@ function openCopyDialog(): void {
   copyTargetPane.value = activePane.value;
   copySourceEntry.value = entry;
   copySourceSessionId.value = activePane.value === 'remote' ? sessions.activeSessionId : null;
-  copyDestinationDirectory.value = activePane.value === 'local'
+  const destinationDir = activePane.value === 'local'
     ? localFiles.listing?.path ?? ''
     : sftp.path;
-  copyTargetName.value = defaultCopyName(entry.name, entry.isDirectory);
+  copyDestinationDirectory.value = destinationDir;
+  copyTargetName.value = defaultCopyName(
+    entry.name,
+    entry.isDirectory,
+    existingNamesForPane(activePane.value, destinationDir),
+  );
   if (activePane.value === 'local') localFiles.error = null;
   else sftp.error = null;
   copyDialogOpen.value = true;
@@ -1679,19 +2239,23 @@ async function submitCopy(): Promise<void> {
   const targetName = copyTargetName.value.trim();
   if (!source || !destinationDirectory || !targetName) return;
   const operationId = crypto.randomUUID();
+  const copySuffix = t('inspector.copyNameSuffix');
   copyOperationId.value = operationId;
   copyCancelling.value = false;
   try {
     if (copyTargetPane.value === 'local') {
-      const copied = await localFiles.copy(
+      const copiedName = await localFiles.copy(
         source,
         destinationDirectory,
         targetName,
         operationId,
+        { autoRename: true, copySuffix },
       );
-      if (copied) {
+      if (copiedName) {
         closeCopyDialog();
-        ui.notify(t('inspector.localCopied'));
+        ui.notify(copiedName === targetName
+          ? t('inspector.localCopied')
+          : t('files.copiedAsName', { name: copiedName }));
       } else if (copyCancelling.value) {
         ui.notify(t('inspector.copyCancelled'));
       }
@@ -1702,15 +2266,18 @@ async function submitCopy(): Promise<void> {
       closeCopyDialog();
       return;
     }
-    const copied = await sftp.copy(
+    const copiedName = await sftp.copy(
       source,
       destinationDirectory,
       targetName,
       operationId,
+      { autoRename: true, copySuffix },
     );
-    if (copied) {
+    if (copiedName) {
       closeCopyDialog();
-      ui.notify(t('inspector.remoteCopied'));
+      ui.notify(copiedName === targetName
+        ? t('inspector.remoteCopied')
+        : t('files.copiedAsName', { name: copiedName }));
     } else if (copyCancelling.value) {
       ui.notify(t('inspector.copyCancelled'));
     }
@@ -1961,14 +2528,25 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
         >
           <ShieldAlert :size="12" />
         </button>
-        <span v-if="selectedRemoteEntries.length > 1" class="file-selection-badge" role="status">
-          <span>{{ t('files.selectedCount', { count: selectedRemoteEntries.length }) }}</span>
+        <button
+          type="button"
+          class="chip-toggle"
+          :class="{ active: activeMultiSelectMode }"
+          :aria-pressed="activeMultiSelectMode"
+          :title="t('files.multiSelectHint')"
+          @click="toggleActiveMultiSelectMode"
+        >
+          <CheckSquare :size="11" />
+          {{ t('files.multiSelectMode') }}
+        </button>
+        <span v-if="activePaneSelectedCount > 1" class="file-selection-badge" role="status">
+          <span>{{ t('files.selectedCount', { count: activePaneSelectedCount }) }}</span>
           <button
             type="button"
             class="icon-button"
             :aria-label="t('files.clearSelection')"
             :title="t('files.clearSelection')"
-            @click="sftp.clearSelection()"
+            @click="clearActiveSelection()"
           >
             <X :size="11" />
           </button>
@@ -1982,17 +2560,17 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
         <span class="toolbar-divider" />
         <div class="file-toolbar-group">
           <button type="button" class="icon-button" :disabled="activePane === 'local' ? (!localFiles.listing || localFiles.mutating) : (!remoteReady || sftp.creatingDirectory)" :aria-label="t(activePane === 'local' ? 'inspector.createLocalDirectory' : 'inspector.createDirectory')" :title="t(activePane === 'local' ? 'inspector.createLocalDirectory' : 'inspector.createDirectory')" @click="openCreateDirectory"><FolderPlus :size="12" /></button>
-          <button type="button" class="icon-button" :disabled="(!selectedLocalEntry && !selectedRemoteEntry) || (activePane === 'remote' && selectedRemoteEntries.length > 1)" :aria-label="t('editor.openAction')" :title="t('editor.openAction')" @click="openSelectedInEditor"><FileCode2 :size="12" /></button>
-          <button type="button" class="icon-button" :disabled="activePane !== 'remote' || !remoteReady || downloadableRemoteEntries.length === 0 || sftp.changingMode" :aria-label="t('permissions.title')" :title="t('permissions.title')" @click="openPermissionDialog()"><ShieldCheck :size="12" /></button>
+          <button type="button" class="icon-button" :disabled="activePaneSelectedCount > 1 || (activePane === 'local' ? !selectedLocalEntry : (!remoteReady || !selectedRemoteEntry))" :aria-label="t('editor.openAction')" :title="t('editor.openAction')" @click="openSelectedInEditor"><FileCode2 :size="12" /></button>
+          <button type="button" class="icon-button" :disabled="activePane !== 'remote' || !remoteReady || permissionRemoteEntries.length === 0 || sftp.changingMode" :aria-label="t('permissions.title')" :title="t('permissions.title')" @click="openPermissionDialog()"><ShieldCheck :size="12" /></button>
           <button v-if="dualPaneEnabled" type="button" class="icon-button" :disabled="!canCompareChecksums || checksums.loading" :aria-label="t('inspector.compareChecksums')" :title="t('inspector.compareChecksums')" @click="openChecksumComparison"><ShieldCheck :size="12" /></button>
           <button v-if="dualPaneEnabled" type="button" class="icon-button" :disabled="!canPreviewDirectorySync || syncPreviews.loading" :aria-label="t('inspector.previewSync')" :title="t('inspector.previewSync')" @click="openSyncPreviewDialog"><ArrowLeftRight :size="12" /></button>
         </div>
         <span class="toolbar-divider" />
         <div class="file-toolbar-group">
-          <button type="button" class="icon-button" :disabled="activePane === 'local' ? (!selectedLocalEntry || localFiles.mutating) : (!remoteReady || !selectedRemoteEntry || selectedRemoteEntries.length > 1 || sftp.renaming)" :aria-label="t(activePane === 'local' ? 'inspector.renameLocal' : 'inspector.renameRemote')" :title="t(activePane === 'local' ? 'inspector.renameLocal' : 'inspector.renameRemote')" @click="openRenameDialog"><Edit3 :size="12" /></button>
-          <button type="button" class="icon-button" :disabled="activePane === 'local' ? (!selectedLocalEntry || localFiles.mutating) : (!remoteReady || selectedRemoteEntries.length === 0 || sftp.deleting || sftp.renaming || sftp.creatingDirectory || sftp.moving)" :aria-label="t(activePane === 'local' ? 'inspector.moveLocal' : 'inspector.moveRemote')" :title="t(activePane === 'local' ? 'inspector.moveLocal' : 'inspector.moveRemote')" @click="openMoveDialog"><FolderInput :size="12" /></button>
-          <button type="button" class="icon-button" :disabled="activePane === 'local' ? (!selectedLocalEntry || selectedLocalEntry.isSymlink || localFiles.mutating) : (!remoteReady || !selectedRemoteEntry || selectedRemoteEntries.length > 1 || selectedRemoteEntry.isSymlink || sftp.copying || sftp.moving || sftp.renaming || sftp.deleting || sftp.creatingDirectory)" :aria-label="t(activePane === 'local' ? 'inspector.copyLocal' : 'inspector.copyRemote')" :title="t(activePane === 'local' ? 'inspector.copyLocal' : 'inspector.copyRemote')" @click="openCopyDialog"><Copy :size="12" /></button>
-          <button type="button" class="icon-button" :disabled="activePane === 'local' ? (!selectedLocalEntry || localFiles.mutating) : (!remoteReady || selectedRemoteEntries.length === 0 || sftp.deleting)" :aria-label="t(activePane === 'local' ? 'inspector.deleteLocal' : 'inspector.deleteRemote')" :title="t(activePane === 'local' ? 'inspector.deleteLocal' : 'inspector.deleteRemote')" @click="deleteActiveEntry"><Trash2 :size="12" /></button>
+          <button type="button" class="icon-button" :disabled="activePaneSelectedCount > 1 || (activePane === 'local' ? (!selectedLocalEntry || localFiles.mutating) : (!remoteReady || !selectedRemoteEntry || sftp.renaming))" :aria-label="t(activePane === 'local' ? 'inspector.renameLocal' : 'inspector.renameRemote')" :title="t(activePane === 'local' ? 'inspector.renameLocal' : 'inspector.renameRemote')" @click="openRenameDialog"><Edit3 :size="12" /></button>
+          <button type="button" class="icon-button" :disabled="activePane === 'local' ? (selectedLocalEntries.length === 0 || localFiles.mutating) : (!remoteReady || selectedRemoteEntries.length === 0 || sftp.deleting || sftp.renaming || sftp.creatingDirectory || sftp.moving)" :aria-label="t(activePane === 'local' ? 'inspector.moveLocal' : 'inspector.moveRemote')" :title="t(activePane === 'local' ? 'inspector.moveLocal' : 'inspector.moveRemote')" @click="openMoveDialog"><FolderInput :size="12" /></button>
+          <button type="button" class="icon-button" :disabled="activePaneSelectedCount > 1 || (activePane === 'local' ? (!selectedLocalEntry || selectedLocalEntry.isSymlink || localFiles.mutating) : (!remoteReady || !selectedRemoteEntry || selectedRemoteEntry.isSymlink || sftp.copying || sftp.moving || sftp.renaming || sftp.deleting || sftp.creatingDirectory))" :aria-label="t(activePane === 'local' ? 'inspector.copyLocal' : 'inspector.copyRemote')" :title="t(activePane === 'local' ? 'inspector.copyLocal' : 'inspector.copyRemote')" @click="openCopyDialog"><Copy :size="12" /></button>
+          <button type="button" class="icon-button" :disabled="activePane === 'local' ? (selectedLocalEntries.length === 0 || localFiles.mutating) : (!remoteReady || selectedRemoteEntries.length === 0 || sftp.deleting)" :aria-label="t(activePane === 'local' ? 'inspector.deleteLocal' : 'inspector.deleteRemote')" :title="t(activePane === 'local' ? 'inspector.deleteLocal' : 'inspector.deleteRemote')" @click="deleteActiveEntry"><Trash2 :size="12" /></button>
         </div>
         <span class="toolbar-divider" />
         <div class="file-toolbar-group">
@@ -2053,6 +2631,17 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
               @keydown.esc.prevent="resetPathDraft(pane.id)"
             >
           </form>
+          <button
+            v-if="pane.id === 'remote' && remoteDirectoryUsageSummary"
+            type="button"
+            class="pane-dir-usage-badge mono"
+            :class="{ partial: remoteDirectoryUsageSummary.partial }"
+            :disabled="remoteDirectoryUsageSummary.loading"
+            :title="remoteDirectoryUsageSummary.title"
+            @click="sftp.loadDirectoryUsage()"
+          >
+            {{ remoteDirectoryUsageSummary.text }}
+          </button>
           <div class="pane-bookmark-actions" @keydown.esc.stop="bookmarkMenuPane = null">
             <button
               type="button"
@@ -2104,8 +2693,10 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
             :expanded-paths="expandedPathsFor(pane.id)"
             :loading-paths="pane.id === 'local' ? localFiles.directoryLoadingPaths : sftp.directoryLoadingPaths"
             :error-paths="pane.id === 'local' ? localFiles.directoryErrorPaths : sftp.directoryErrorPaths"
+            :can-drop-directory="(path) => canDropOnDirectory(path, pane.id)"
             @navigate="navigatePanePath(pane.id, $event)"
             @toggle="toggleTreePath(pane.id, $event)"
+            @drop-directory="handleTreeDirectoryDrop(pane.id, $event)"
           />
           <div
             :ref="(el) => bindPaneListElement(pane.id, el)"
@@ -2118,7 +2709,25 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
             @contextmenu.prevent="openContextMenu(null, pane.id, $event)"
           >
             <div class="file-table-header mono" aria-hidden="true">
-              <span>{{ t('files.columnName') }}</span>
+              <span class="file-cell file-cell-name">
+                <label
+                  class="file-header-check-hit"
+                  :title="t('files.selectAllEntries')"
+                  @mousedown.stop
+                  @click.stop
+                >
+                  <input
+                    type="checkbox"
+                    class="file-row-checkbox"
+                    :checked="isAllPaneEntriesSelected(pane.id)"
+                    :indeterminate.prop="isSomePaneEntriesSelected(pane.id)"
+                    :aria-label="t('files.selectAllEntries')"
+                    tabindex="-1"
+                    @change="toggleSelectAllPane(pane.id)"
+                  >
+                </label>
+                <span>{{ t('files.columnName') }}</span>
+              </span>
               <span>{{ t('files.columnSize') }}</span>
               <span>{{ t('files.columnType') }}</span>
               <span>{{ t('files.columnModified') }}</span>
@@ -2141,26 +2750,40 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
                   <button
                     type="button"
                     class="file-row file-table-row"
-                    :class="{ selected: isPaneEntrySelected(pane.id, item.path) }"
+                    :class="{
+                      selected: isPaneEntrySelected(pane.id, item.path),
+                      'file-row-drop-target': item.isDirectory && dropTargetFolderPath === item.path,
+                      'cut-pending': isCutPending(pane.id, item.path),
+                    }"
                     :data-entry-path="item.path"
-                    :draggable="pane.id === 'remote' && !item.isSymlink && !(inlineRename?.pane === pane.id && inlineRename.entry.path === item.path)"
-                    @dragstart="beginRemoteFileDrag(item, pane.id, $event)"
+                    :draggable="!(inlineRename?.pane === pane.id && inlineRename.entry.path === item.path)"
+                    @dragstart="beginPaneEntryDrag(item, pane.id, $event)"
+                    @dragend="endPaneEntryDrag"
+                    @dragover="handleRowDragOver(item, pane.id, $event)"
+                    @dragleave="handleRowDragLeave(item, $event)"
+                    @drop="handleRowDrop(item, pane.id, $event)"
                     @click="handlePaneEntryClick(item, pane.id, $event)"
-                    @dblclick="openPaneEntry(item, pane.id)"
+                    @dblclick="handlePaneEntryDblClick(item, pane.id)"
                     @contextmenu.prevent.stop="openContextMenu(item, pane.id, $event)"
                     @keydown.enter.prevent="inlineRename?.entry.path === item.path ? undefined : openPaneEntry(item, pane.id)"
                     @keydown.shift.f10.prevent="openContextMenuFromKeyboard(item, pane.id, $event)"
                   >
                     <span class="file-cell file-cell-name">
-                      <input
-                        v-if="pane.id === 'remote'"
-                        type="checkbox"
-                        class="file-row-checkbox"
-                        :checked="isPaneEntrySelected('remote', item.path)"
-                        :aria-label="item.name"
-                        tabindex="-1"
-                        @click.stop="sftp.toggleSelection(item as RemoteFileEntry)"
+                      <label
+                        class="file-row-check-hit"
+                        @pointerdown.stop="beginCheckboxSweep(item, pane.id, $event)"
+                        @pointerenter="continueCheckboxSweep(item, pane.id)"
+                        @click.stop.prevent
+                        @dblclick.stop.prevent
                       >
+                        <input
+                          type="checkbox"
+                          class="file-row-checkbox"
+                          :checked="isPaneEntrySelected(pane.id, item.path)"
+                          :aria-label="item.name"
+                          tabindex="-1"
+                        >
+                      </label>
                       <FileEntryIcon :name="item.name" :is-directory="item.isDirectory" :is-symlink="item.isSymlink" :size="14" />
                       <input
                         v-if="inlineRename && inlineRename.pane === pane.id && inlineRename.entry.path === item.path"
@@ -2178,9 +2801,12 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
                         @keydown.esc.prevent.stop="cancelInlineRename"
                         @blur="commitInlineRename"
                       >
-                      <span v-else class="mono" :title="item.name">{{ item.name }}</span>
+                      <template v-else>
+                        <span class="mono" :title="item.symlinkTarget ? `${item.name} -> ${item.symlinkTarget}` : item.name">{{ item.name }}</span>
+                        <span v-if="item.symlinkTarget" class="file-symlink-target mono">-&gt; {{ item.symlinkTarget }}</span>
+                      </template>
                     </span>
-                    <span class="file-cell mono">{{ formatSize(item.size) }}</span>
+                    <span class="file-cell mono">{{ formatPaneEntrySize(item, pane.id) }}</span>
                     <span class="file-cell">{{ entryTypeLabel(item) }}</span>
                     <span class="file-cell mono">{{ formatTimestamp(item.modifiedAtMs) }}</span>
                     <span class="file-cell mono file-permissions" :title="formatPermissionMode(item.permissionsMode)">{{ formatPermissionMode(item.permissionsMode) }}</span>
@@ -2194,26 +2820,40 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
                   :key="entry.path"
                   type="button"
                   class="file-row file-table-row"
-                  :class="{ selected: isPaneEntrySelected(pane.id, entry.path) }"
+                  :class="{
+                    selected: isPaneEntrySelected(pane.id, entry.path),
+                    'file-row-drop-target': entry.isDirectory && dropTargetFolderPath === entry.path,
+                    'cut-pending': isCutPending(pane.id, entry.path),
+                  }"
                   :data-entry-path="entry.path"
-                  :draggable="pane.id === 'remote' && !entry.isSymlink && !(inlineRename?.pane === pane.id && inlineRename.entry.path === entry.path)"
-                  @dragstart="beginRemoteFileDrag(entry, pane.id, $event)"
+                  :draggable="!(inlineRename?.pane === pane.id && inlineRename.entry.path === entry.path)"
+                  @dragstart="beginPaneEntryDrag(entry, pane.id, $event)"
+                  @dragend="endPaneEntryDrag"
+                  @dragover="handleRowDragOver(entry, pane.id, $event)"
+                  @dragleave="handleRowDragLeave(entry, $event)"
+                  @drop="handleRowDrop(entry, pane.id, $event)"
                   @click="handlePaneEntryClick(entry, pane.id, $event)"
-                  @dblclick="openPaneEntry(entry, pane.id)"
+                  @dblclick="handlePaneEntryDblClick(entry, pane.id)"
                   @contextmenu.prevent.stop="openContextMenu(entry, pane.id, $event)"
                   @keydown.enter.prevent="inlineRename?.entry.path === entry.path ? undefined : openPaneEntry(entry, pane.id)"
                   @keydown.shift.f10.prevent="openContextMenuFromKeyboard(entry, pane.id, $event)"
                 >
                   <span class="file-cell file-cell-name">
-                    <input
-                      v-if="pane.id === 'remote'"
-                      type="checkbox"
-                      class="file-row-checkbox"
-                      :checked="isPaneEntrySelected('remote', entry.path)"
-                      :aria-label="entry.name"
-                      tabindex="-1"
-                      @click.stop="sftp.toggleSelection(entry as RemoteFileEntry)"
+                    <label
+                      class="file-row-check-hit"
+                      @pointerdown.stop="beginCheckboxSweep(entry, pane.id, $event)"
+                      @pointerenter="continueCheckboxSweep(entry, pane.id)"
+                      @click.stop.prevent
+                      @dblclick.stop.prevent
                     >
+                      <input
+                        type="checkbox"
+                        class="file-row-checkbox"
+                        :checked="isPaneEntrySelected(pane.id, entry.path)"
+                        :aria-label="entry.name"
+                        tabindex="-1"
+                      >
+                    </label>
                     <FileEntryIcon :name="entry.name" :is-directory="entry.isDirectory" :is-symlink="entry.isSymlink" :size="14" />
                     <input
                       v-if="inlineRename && inlineRename.pane === pane.id && inlineRename.entry.path === entry.path"
@@ -2231,9 +2871,12 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
                       @keydown.esc.prevent.stop="cancelInlineRename"
                       @blur="commitInlineRename"
                     >
-                    <span v-else class="mono" :title="entry.name">{{ entry.name }}</span>
+                    <template v-else>
+                      <span class="mono" :title="entry.symlinkTarget ? `${entry.name} -> ${entry.symlinkTarget}` : entry.name">{{ entry.name }}</span>
+                      <span v-if="entry.symlinkTarget" class="file-symlink-target mono">-&gt; {{ entry.symlinkTarget }}</span>
+                    </template>
                   </span>
-                  <span class="file-cell mono">{{ formatSize(entry.size) }}</span>
+                  <span class="file-cell mono">{{ formatPaneEntrySize(entry, pane.id) }}</span>
                   <span class="file-cell">{{ entryTypeLabel(entry) }}</span>
                   <span class="file-cell mono">{{ formatTimestamp(entry.modifiedAtMs) }}</span>
                   <span class="file-cell mono file-permissions" :title="formatPermissionMode(entry.permissionsMode)">{{ formatPermissionMode(entry.permissionsMode) }}</span>
@@ -2314,6 +2957,9 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
       <button type="button" class="file-browser-footer-button" @click="openTaskDrawer">
         {{ t('files.transferTasks') }}
       </button>
+      <span v-if="remoteReady && sftp.directoryUsage && sftp.directoryUsage.path === sftp.path" class="mono">
+        {{ t('files.currentDirectorySize', { size: sftp.directoryUsage.totalSizeLabel }) }}
+      </span>
       <span class="file-browser-panel-spacer" />
       <span class="mono">{{ t('files.transfersRunning', { count: runningTransfers }) }}<template v-if="runningTransferSpeedLabel"> · {{ runningTransferSpeedLabel }}</template></span>
     </footer>
@@ -2326,17 +2972,22 @@ const views: Array<{ id: 'files' | 'commands' | 'editor'; label: Parameters<type
       :editor-preference="settings.value.textEditorPreference"
       :remote-ready="remoteReady"
       :quick-session="quickSession"
-      :selected-count="fileMenu.pane === 'remote' ? selectedRemoteEntries.length : (fileMenu.entry ? 1 : 0)"
-      :can-edit="fileMenu.entry ? !fileMenu.entry.isSymlink && (fileMenu.pane === 'local' || (remoteReady && selectedRemoteEntries.length <= 1)) : true"
+      :selected-count="selectedEntriesForPane(fileMenu.pane).length || (fileMenu.entry ? 1 : 0)"
+      :can-open="Boolean(fileMenu.entry) && (fileMenu.pane === 'local' ? selectedLocalEntries.length <= 1 && !localFiles.loading : selectedRemoteEntries.length <= 1 && remoteReady)"
+      :can-edit="fileMenu.entry ? (fileMenu.pane === 'local' ? selectedLocalEntries.length <= 1 : (remoteReady && selectedRemoteEntries.length <= 1)) : true"
       :can-download="fileMenu.pane === 'remote' && downloadableRemoteEntries.length > 0 && remoteReady"
       :can-download-archive="fileMenu.pane === 'remote' && downloadableRemoteEntries.length > 0 && remoteReady && !archiveBusy"
       :can-remote-relay="fileMenu.pane === 'remote' && Boolean(fileMenu.entry) && selectedRemoteEntries.length <= 1 && !fileMenu.entry?.isSymlink && remoteReady"
-      :can-permissions="fileMenu.pane === 'remote' && downloadableRemoteEntries.length > 0 && remoteReady"
+      :can-permissions="fileMenu.pane === 'remote' && permissionRemoteEntries.length > 0 && remoteReady"
       :can-quick-delete="fileMenu.pane === 'remote' && selectedRemoteEntries.some((item) => item.path !== '/' && !item.isSymlink) && remoteReady"
       :can-create="fileMenu.pane === 'local' ? Boolean(localFiles.listing) : remoteReady"
       :can-upload="remoteReady"
-      :can-rename="fileMenu.pane === 'local' ? Boolean(fileMenu.entry) && !localFiles.mutating : Boolean(fileMenu.entry) && selectedRemoteEntries.length <= 1 && remoteReady && !sftp.renaming"
-      :can-delete="fileMenu.pane === 'local' ? Boolean(fileMenu.entry) && !localFiles.mutating : selectedRemoteEntries.length > 0 && remoteReady && !sftp.deleting"
+      :can-rename="fileMenu.pane === 'local' ? Boolean(fileMenu.entry) && selectedLocalEntries.length <= 1 && !localFiles.mutating : Boolean(fileMenu.entry) && selectedRemoteEntries.length <= 1 && remoteReady && !sftp.renaming"
+      :can-move="fileMenu.pane === 'local' ? selectedLocalEntries.length > 0 && !localFiles.mutating : selectedRemoteEntries.length > 0 && remoteReady && !sftp.moving && !sftp.deleting"
+      :can-copy-entry="fileMenu.pane === 'local' ? selectedLocalEntries.some((item) => !item.isSymlink) && !localFiles.mutating : selectedRemoteEntries.some((item) => !item.isSymlink) && remoteReady && !sftp.copying"
+      :can-paste-entry="canPasteFromPaneClipboard(fileMenu.pane)"
+      :paste-label="fileMenu.entry?.isDirectory ? t('fileMenu.pasteInto', { name: fileMenu.entry.name }) : t('fileMenu.pasteEntry')"
+      :can-delete="fileMenu.pane === 'local' ? selectedLocalEntries.length > 0 && !localFiles.mutating : selectedRemoteEntries.length > 0 && remoteReady && !sftp.deleting"
       @action="runFileMenuAction"
       @close="closeContextMenu"
     />

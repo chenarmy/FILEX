@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { ChevronRight, LoaderCircle, TriangleAlert } from 'lucide-vue-next';
 import FileEntryIcon from '@/components/files/FileEntryIcon.vue';
 import type { DirectoryTreeEntry } from '@/domain/directoryNavigation';
@@ -12,17 +12,44 @@ const props = defineProps<{
   expandedPaths: string[];
   loadingPaths: string[];
   errorPaths: string[];
+  canDropDirectory?: ((targetPath: string) => boolean) | undefined;
 }>();
 
 const emit = defineEmits<{
   navigate: [path: string];
   toggle: [path: string];
+  dropDirectory: [path: string];
 }>();
 
 const expanded = computed(() => props.expandedPaths.includes(props.node.path));
 const loading = computed(() => props.loadingPaths.includes(props.node.path));
 const failed = computed(() => props.errorPaths.includes(props.node.path));
 const children = computed(() => props.childrenByPath[props.node.path] ?? []);
+const dropHover = ref(false);
+
+function handleDragOver(event: DragEvent): void {
+  if (!props.canDropDirectory?.(props.node.path)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  dropHover.value = true;
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+}
+
+function handleDragLeave(event: DragEvent): void {
+  const row = event.currentTarget;
+  if (row instanceof HTMLElement && event.relatedTarget instanceof Node && row.contains(event.relatedTarget)) {
+    return;
+  }
+  dropHover.value = false;
+}
+
+function handleDrop(event: DragEvent): void {
+  dropHover.value = false;
+  if (!props.canDropDirectory?.(props.node.path)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  emit('dropDirectory', props.node.path);
+}
 </script>
 
 <template>
@@ -33,7 +60,14 @@ const children = computed(() => props.childrenByPath[props.node.path] ?? []);
     :aria-expanded="expanded"
     :aria-selected="activePath === node.path"
   >
-    <div class="directory-tree-row" :class="{ active: activePath === node.path }" :style="{ paddingInlineStart: `${(level - 1) * 13 + 3}px` }">
+    <div
+      class="directory-tree-row"
+      :class="{ active: activePath === node.path, 'drop-target': dropHover }"
+      :style="{ paddingInlineStart: `${(level - 1) * 13 + 3}px` }"
+      @dragover="handleDragOver"
+      @dragleave="handleDragLeave"
+      @drop="handleDrop"
+    >
       <button
         type="button"
         class="directory-tree-toggle"
@@ -66,8 +100,10 @@ const children = computed(() => props.childrenByPath[props.node.path] ?? []);
         :expanded-paths="expandedPaths"
         :loading-paths="loadingPaths"
         :error-paths="errorPaths"
+        :can-drop-directory="canDropDirectory"
         @navigate="emit('navigate', $event)"
         @toggle="emit('toggle', $event)"
+        @drop-directory="emit('dropDirectory', $event)"
       />
     </ul>
   </li>

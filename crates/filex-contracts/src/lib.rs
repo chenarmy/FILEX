@@ -1124,6 +1124,23 @@ pub struct TransferTask {
     pub updated_at_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkTargetKind {
+    Directory,
+    File,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedLinkTarget {
+    pub target_path: String,
+    pub target_kind: LinkTargetKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_path: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteFileEntry {
@@ -1138,6 +1155,8 @@ pub struct RemoteFileEntry {
     pub uid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symlink_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1145,6 +1164,15 @@ pub struct RemoteFileEntry {
 pub struct RemoteDirectoryListing {
     pub path: String,
     pub entries: Vec<RemoteFileEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDirectoryUsage {
+    pub path: String,
+    pub total_size_label: String,
+    pub entry_size_labels: std::collections::BTreeMap<String, String>,
+    pub partial: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1181,6 +1209,8 @@ pub struct LocalFileEntry {
     pub size: Option<u64>,
     pub modified_at_ms: Option<u64>,
     pub permissions_mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symlink_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
