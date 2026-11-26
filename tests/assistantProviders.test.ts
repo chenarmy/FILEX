@@ -29,4 +29,15 @@ describe('assistant provider presets', () => {
       ...preset.models,
     ]);
   });
+
+  it('exposes the Zhipu Token Plan preset separately from standard Zhipu', () => {
+    const preset = assistantProviderPresetById('zhipu-token-plan');
+    expect(preset.name).toBe('Zhipu Token Plan');
+    expect(preset.endpoint).toBe('https://open.bigmodel.cn/api/coding/paas/v4');
+    expect(preset.defaultModel).toBe('glm-5.3-flash');
+    expect(preset.models).toContain('glm-5.3-flash');
+    expect(matchAssistantProviderPreset(' https://open.bigmodel.cn/api/coding/paas/v4/ ').id).toBe('zhipu-token-plan');
+    expect(matchAssistantProviderPreset('https://open.bigmodel.cn/api/paas/v4').id).toBe('zhipu');
+    expect(assistantEndpointAllowsKeyless('https://open.bigmodel.cn/api/coding/paas/v4')).toBe(false);
+  });
 });
