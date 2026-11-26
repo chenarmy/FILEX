@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.1.22] - 2026-11-26
+
+### Added
+
+- **Zhipu Token Plan AI Provider Preset** (`src/domain/assistantProviders.ts`, `docs/ROADMAP.md`, `tests/assistantProviders.test.ts`): added a dedicated `Zhipu Token Plan` preset (`https://open.bigmodel.cn/api/coding/paas/v4`, default model `glm-5.3-flash`, plus `glm-5`, `glm-4.7`, `glm-4.6`, `glm-4.5`, `glm-4.5-air`) separate from standard Zhipu.
+- **Terminal CWD Tracking Fallback** (`src/domain/terminalCwd.ts`, `TerminalPane.vue`): added interactive `cd` command-line tracking alongside OSC 7 directory detection so File Browser Follow Terminal stays in sync on shells without OSC 7 hooks.
+
+### Fixed
+
+- **WebView2 Drag Freeze & Non-Blocking Local Directory Listing** (`FileBrowserPanel.vue`, `DirectoryTree.vue`, `DirectoryTreeNode.vue`, `InspectorPane.vue`, `src-tauri/src/lib.rs`): resolved Windows WebView2 drag freezes in the file browser/directory tree and moved `list_local_directory` onto `tokio::task::spawn_blocking`.
+- **SFTP & SSH Channel Timeouts** (`crates/filex-ssh/src/lib.rs`, `src-tauri/src/session_runtime.rs`, `src/stores/sftp.ts`): added connection-timeout guards around SFTP subsystem initialization and `exec` channel opening, bounded directory enumeration (`read_dir_truncated`), and preserved the active file listing on recoverable refresh errors (`preserveOnError`).
+- **Legacy Docker 18.09 Container Listing** (`src-tauri/src/remote_ops.rs`): detected Docker engines lacking the `{{.State}}` template field and inferred container state (`running`, `paused`, `restarting`, `exited`, `created`, `removing`, `dead`) from `Status`.
+- **Host-Key Dialog Focus & First-Seen Trust UX** (`HostKeyDialog.vue`, `docs/UX_DESIGN.md`): improved dialog focus handling and defaulted the confirmation checkbox to checked for first-seen unknown host keys while keeping changed host keys strictly unchecked and manually confirmed.
+- **Reconnect UX for Connected Saved & Temporary Sessions** (`src/stores/sessions.ts`, `tests/quickSessionParity.test.ts`): enabled in-place reconnect on connected saved sessions, clean replacement reconnect on connected temporary sessions, and prevented stale PTY close events from clobbering non-connected session states.
+
 ## [0.1.21] - 2026-11-25
 
 ### Added
